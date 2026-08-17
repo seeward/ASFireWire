@@ -15,6 +15,7 @@ final class BeBoBShellViewModel: ObservableObject {
     @Published var avStat: BeBoBSwiftAvStat? = nil
     @Published var syncState: BeBoBSwiftSyncState? = nil
     @Published var isAutoPolling: Bool = false
+    @Published var availableDevices: [FWDeviceInfo] = []
     @Published var selectedDeviceID: DeviceInstanceID = DeviceInstanceID(1)
     @Published var errorMessage: String? = nil
 
@@ -33,10 +34,36 @@ final class BeBoBShellViewModel: ObservableObject {
             .sink { [weak self] connected in
                 guard let self else { return }
                 self.isConnected = connected
+                if connected {
+                    self.refreshDevices()
+                }
             }
             .store(in: &cancellables)
 
         isConnected = connector.isConnected
+        if isConnected {
+            refreshDevices()
+        }
+    }
+
+    func refreshDevices() {
+        if let devices = connector.getDiscoveredDevices() {
+            self.availableDevices = devices
+            // If current selectedDeviceID is not in active/ready devices, auto-select the first ready device
+            if !devices.contains(where: { $0.id == selectedDeviceID && $0.state == .ready }) {
+                if let ready = devices.first(where: { $0.state == .ready }) {
+                    self.selectedDeviceID = ready.id
+                } else if let first = devices.first {
+                    self.selectedDeviceID = first.id
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    func resolveActiveDeviceID() -> DeviceInstanceID {
+        refreshDevices()
+        return selectedDeviceID
     }
 
     deinit {
@@ -50,6 +77,8 @@ final class BeBoBShellViewModel: ObservableObject {
         let cmd = explicitCmd ?? commandInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cmd.isEmpty else { return }
 
+        let deviceID = resolveActiveDeviceID()
+
         if explicitCmd == nil {
             commandHistory.append(cmd)
             historyIndex = commandHistory.count
@@ -61,7 +90,7 @@ final class BeBoBShellViewModel: ObservableObject {
         errorMessage = nil
 
         Task {
-            let output = await connector.executeBeBoBShellCommand(deviceID: selectedDeviceID, command: cmd)
+            let output = await connector.executeBeBoBShellCommand(deviceID: deviceID, command: cmd)
             await MainActor.run {
                 self.isExecuting = false
                 if let output, !output.isEmpty {
@@ -76,10 +105,11 @@ final class BeBoBShellViewModel: ObservableObject {
 
     @MainActor
     func refreshTelemetry() {
+        let deviceID = resolveActiveDeviceID()
         Task {
-            async let statsTask = connector.fetchBeBoBStreamingStats(deviceID: selectedDeviceID)
-            async let avStatTask = connector.fetchBeBoBAvStat(deviceID: selectedDeviceID)
-            async let syncTask = connector.fetchBeBoBSyncState(deviceID: selectedDeviceID)
+            async let statsTask = connector.fetchBeBoBStreamingStats(deviceID: deviceID)
+            async let avStatTask = connector.fetchBeBoBAvStat(deviceID: deviceID)
+            async let syncTask = connector.fetchBeBoBSyncState(deviceID: deviceID)
 
             let (stats, av, sync) = await (statsTask, avStatTask, syncTask)
             await MainActor.run {

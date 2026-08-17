@@ -53,9 +53,22 @@ struct BeBoBShellView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("BridgeCo DM1000 / BeBoB Virtual UART")
                     .font(.headline)
-                Text("Device Instance ID: \(viewModel.selectedDeviceID.rawValue) (0xFFFF_C802_1000/9000)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if !viewModel.availableDevices.isEmpty {
+                    HStack(spacing: 8) {
+                        Picker("Target Device:", selection: $viewModel.selectedDeviceID) {
+                            ForEach(viewModel.availableDevices) { device in
+                                Text("\(device.vendorName) \(device.modelName) [ID: \(device.id.rawValue), Node: \(device.nodeId), Gen: \(device.generation)]")
+                                    .tag(device.id)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .font(.caption)
+                    }
+                } else {
+                    Text("Device Instance ID: \(viewModel.selectedDeviceID.rawValue) (0xFFFF_C802_1000/9000)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer()
