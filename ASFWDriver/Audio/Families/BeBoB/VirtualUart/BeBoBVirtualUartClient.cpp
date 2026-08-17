@@ -15,13 +15,35 @@ namespace {
 
 constexpr ASFW::FW::FwSpeed kVirtualUartSpeed = ASFW::FW::FwSpeed::S100;
 
+/// Block transactions against this mailbox must be a whole number of quadlets.
+/// An unaligned request-buffer write drops its tail: "help\r\n" lands as "help"
+/// with the CR/LF replaced by whatever the previous command left at those
+/// offsets, so the device echoes a garbled line and never executes it.
+constexpr size_t QuadletAligned(size_t length) noexcept {
+    return (length + 3U) & ~static_cast<size_t>(3U);
+}
+
 } // namespace
 
 BeBoBVirtualUartClient::BeBoBVirtualUartClient(
     ASFW::Async::IFireWireBusOps& busOps,
     Discovery::DeviceRouteToken route,
+    Scheduling::ITimerScheduler* timers,
     uint32_t protocolVersion) noexcept
-    : busOps_(busOps), route_(route), protocolVersion_(protocolVersion) {}
+    : busOps_(busOps), route_(route), timers_(timers),
+      protocolVersion_(protocolVersion) {}
+
+void BeBoBVirtualUartClient::AfterDelay(uint64_t delayNs,
+                                        std::function<void()> work) {
+    if (!work) {
+        return;
+    }
+    if (timers_ == nullptr) {
+        work();
+        return;
+    }
+    (void)timers_->ScheduleAfter(delayNs, std::move(work));
+}
 
 std::optional<ASFW::FW::NodeId>
 BeBoBVirtualUartClient::OperationalNode() const noexcept {
@@ -92,15 +114,18 @@ void BeBoBVirtualUartClient::WriteChars(
         return;
     }
 
-    std::span<const uint8_t> payload{
-        reinterpret_cast<const uint8_t*>(text.data()), text.size()};
+    // The envelope below carries the true, unpadded length, so padding the
+    // buffer write is safe: the device consumes exactly `text.size()` bytes.
+    auto padded = std::make_shared<std::vector<uint8_t>>(QuadletAligned(text.size()), 0U);
+    std::copy(text.begin(), text.end(), padded->begin());
+    std::span<const uint8_t> payload{padded->data(), padded->size()};
 
     // Step 1: Write text to Request Data Buffer (0xFFFF_C802_1040)
     (void)busOps_.WriteBlock(
         route_.generation, *node,
         AddressFor(kRequestBufferAddressLo), payload, kVirtualUartSpeed,
         [self = shared_from_this(), textLength = static_cast<uint32_t>(text.size()),
-         completion = std::move(completion), node](
+         padded, completion = std::move(completion), node](
             ASFW::Async::AsyncStatus status,
             std::span<const uint8_t> /*payload*/) mutable {
             if (self->cancelled_ || status != ASFW::Async::AsyncStatus::kSuccess) {
@@ -169,25 +194,72 @@ void BeBoBVirtualUartClient::ReadChars(
                     }
 
                     const uint32_t bytesToRead = std::min(resp->operand, 1024U);
+                    // The stdout tail page is almost never quadlet-aligned, and
+                    // an unaligned block read fails outright — which silently
+                    // lost the end of every response. Read aligned, trim back.
+                    const auto alignedRead =
+                        static_cast<uint32_t>(QuadletAligned(bytesToRead));
 
                     // Step 3: Read actual characters from AddrRegRespBuf (0xFFFF_C802_9040)
                     (void)self->busOps_.ReadBlock(
                         self->route_.generation, *node,
-                        self->AddressFor(kResponseBufferAddressLo), bytesToRead, kVirtualUartSpeed,
-                        [completion = std::move(completion)](
+                        self->AddressFor(kResponseBufferAddressLo), alignedRead, kVirtualUartSpeed,
+                        [completion = std::move(completion), bytesToRead](
                             ASFW::Async::AsyncStatus dataStatus,
                             std::span<const uint8_t> dataPayload) {
                             if (dataStatus != ASFW::Async::AsyncStatus::kSuccess || dataPayload.empty()) {
                                 completion("");
                                 return;
                             }
+                            const size_t usable =
+                                std::min(static_cast<size_t>(bytesToRead), dataPayload.size());
                             std::string outStr(
-                                reinterpret_cast<const char*>(dataPayload.data()),
-                                dataPayload.size());
+                                reinterpret_cast<const char*>(dataPayload.data()), usable);
                             completion(std::move(outStr));
                         });
                 });
         });
+}
+
+void BeBoBVirtualUartClient::DrainPage(std::shared_ptr<std::string> accumulated,
+                                       uint32_t pagesRead,
+                                       uint32_t quietPolls,
+                                       std::function<void(std::string)> completion) {
+    if (cancelled_) {
+        completion(std::move(*accumulated));
+        return;
+    }
+    if (pagesRead >= kMaxDrainPages || quietPolls >= kQuietPollsBeforeDone) {
+        completion(std::move(*accumulated));
+        return;
+    }
+
+    ReadChars(1024, [self = shared_from_this(), accumulated, pagesRead, quietPolls,
+                     completion = std::move(completion)](std::string page) mutable {
+        if (page.empty()) {
+            // A single empty poll proves nothing — stdout arrives in bursts as
+            // the RTOS produces it. Only a run of them ends the drain.
+            self->AfterDelay(kPageSettleNs,
+                             [self, accumulated, pagesRead, quietPolls,
+                              completion = std::move(completion)]() mutable {
+                                 self->DrainPage(accumulated, pagesRead,
+                                                 quietPolls + 1, std::move(completion));
+                             });
+            return;
+        }
+        accumulated->append(page);
+        self->AfterDelay(kPageSettleNs,
+                         [self, accumulated, pagesRead, completion = std::move(completion)]() mutable {
+                             self->DrainPage(accumulated, pagesRead + 1, 0, std::move(completion));
+                         });
+    });
+}
+
+void BeBoBVirtualUartClient::DrainStdout(std::function<void(std::string output)> completion) {
+    if (!completion) {
+        return;
+    }
+    DrainPage(std::make_shared<std::string>(), 0, 0, std::move(completion));
 }
 
 void BeBoBVirtualUartClient::ExecuteCommand(
@@ -195,18 +267,49 @@ void BeBoBVirtualUartClient::ExecuteCommand(
     if (cancelled_ || !completion) {
         return;
     }
+    pending_.push_back(PendingCommand{std::string{command}, std::move(completion)});
+    PumpQueue();
+}
 
-    std::string cmdWithNewline{command};
-    if (cmdWithNewline.empty() || cmdWithNewline.back() != '\n') {
-        cmdWithNewline += "\r\n";
+void BeBoBVirtualUartClient::PumpQueue() {
+    if (busy_ || pending_.empty() || cancelled_) {
+        return;
     }
+    busy_ = true;
+    PendingCommand next = std::move(pending_.front());
+    pending_.erase(pending_.begin());
+    RunCommand(std::move(next));
+}
 
-    WriteChars(cmdWithNewline, [self = shared_from_this(), completion = std::move(completion)](bool ok) mutable {
-        if (!ok) {
-            completion("");
-            return;
-        }
-        self->ReadChars(1024, std::move(completion));
+void BeBoBVirtualUartClient::RunCommand(PendingCommand request) {
+    // The shell terminates lines on CRLF. A bare LF is echoed but never runs,
+    // so normalise whatever the caller passed rather than appending blindly.
+    std::string line = std::move(request.command);
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
+        line.pop_back();
+    }
+    line += "\r\n";
+
+    auto finish = [self = shared_from_this(),
+                   completion = std::move(request.completion)](std::string output) mutable {
+        completion(std::move(output));
+        self->busy_ = false;
+        self->PumpQueue();
+    };
+
+    // Discard anything already staged so this command's drain returns its own
+    // output rather than the tail of the previous conversation.
+    DrainStdout([self = shared_from_this(), line = std::move(line),
+                 finish = std::move(finish)](std::string) mutable {
+        self->WriteChars(line, [self, finish = std::move(finish)](bool ok) mutable {
+            if (!ok) {
+                finish("");
+                return;
+            }
+            self->AfterDelay(kCommandSettleNs, [self, finish = std::move(finish)]() mutable {
+                self->DrainStdout(std::move(finish));
+            });
+        });
     });
 }
 
@@ -229,7 +332,9 @@ void BeBoBVirtualUartClient::ReadAvStat(
 void BeBoBVirtualUartClient::ReadSyncState(
     std::function<void(std::optional<BeBoBSyncState>)> completion) {
     if (!completion) return;
-    ExecuteCommand("fw sync show", [completion = std::move(completion)](std::string stdoutText) {
+    // `fw show` carries audio state, sync source and sample rate together;
+    // `fw sync show` is valid but reports only the sync source.
+    ExecuteCommand("fw show", [completion = std::move(completion)](std::string stdoutText) {
         completion(BeBoBStreamTelemetryParser::ParseSyncState(stdoutText));
     });
 }
