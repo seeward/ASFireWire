@@ -209,3 +209,10 @@ add_audio_test(AudioEndpointRuntimeTests
 add_audio_test(ITDescriptorLayoutTests
     ITDescriptorLayoutTests.cpp
 )
+
+# BeBoB Virtual UART & Telemetry Tests
+add_audio_test(BeBoBVirtualUartTests
+    BeBoBVirtualUartTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Families/BeBoB/VirtualUart/BeBoBStreamTelemetryParser.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Families/BeBoB/VirtualUart/BeBoBVirtualUartClient.cpp"
+)

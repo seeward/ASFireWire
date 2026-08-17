@@ -154,6 +154,14 @@ extension ASFWMCPCore {
         case "asfw_phase88_start_48k", "asfw_phase88_stop":
             return await phase88StreamingResult(toolName: name, decoder: decoder,
                                                 start: name == "asfw_phase88_start_48k")
+        case "asfw_bebob_get_streaming_stats":
+            return await bebobStreamingStatsResult(toolName: name, decoder: decoder)
+        case "asfw_bebob_get_silicon_status":
+            return await bebobSiliconStatusResult(toolName: name, decoder: decoder)
+        case "asfw_bebob_get_sync_state":
+            return await bebobSyncStateResult(toolName: name, decoder: decoder)
+        case "asfw_bebob_shell_execute":
+            return await bebobShellExecuteResult(toolName: name, decoder: decoder)
         default:
             return notImplementedToolResult(name, reason: "Catalog tool \(name) has no dispatch arm.")
         }
@@ -1453,6 +1461,172 @@ private extension ASFWMCPCore {
                 "kind": .string("bebobBootRomInfo"),
                 "transaction": transaction.mcpValue,
                 "information": information.mcpValue
+            ]))
+        } catch {
+            return malformedToolResult(toolName, reason: error.localizedDescription)
+        }
+    }
+
+    // MARK: - BeBoB Virtual UART / Shell & Telemetry Dispatch
+
+    private func executeBeBoBVirtualUart(deviceID: DeviceInstanceID, nodeId: UInt32, generation: UInt32, command: String) async -> (ok: Bool, stdout: String) {
+        func addr(_ low: UInt32) -> ASFWMCPAddress {
+            ASFWMCPAddress(deviceInstanceId: deviceID, nodeId: nodeId, generation: generation, addressHigh: 0xFFFF, addressLow: low)
+        }
+
+        func makeEnv(commandId: UInt16, opcode: UInt8, operandSize: UInt8, operand: UInt32) -> [UInt8] {
+            var b = [UInt8](repeating: 0, count: 12)
+            b[0] = 1; b[1] = 0; b[2] = 0; b[3] = 0 // Protocol Version 1
+            b[4] = UInt8(commandId & 0xFF); b[5] = UInt8((commandId >> 8) & 0xFF)
+            b[6] = opcode; b[7] = operandSize
+            b[8] = UInt8(operand & 0xFF); b[9] = UInt8((operand >> 8) & 0xFF)
+            b[10] = UInt8((operand >> 16) & 0xFF); b[11] = UInt8((operand >> 24) & 0xFF)
+            return b
+        }
+
+        var cmd = command
+        if !cmd.hasSuffix("\n") { cmd += "\r\n" }
+        let payloadBytes = [UInt8](cmd.utf8)
+
+        // 1. Write command string to 0xFFFF_C802_1040
+        let payloadTx = await driver.executeWriteBlock(
+            ASFWMCPWriteBlockRequest(address: addr(0xC802_1040), payload: payloadBytes)
+        )
+        guard payloadTx.ok else { return (false, "") }
+
+        // 2. Commit Opcode 0x09 (WriteShellChars) to 0xFFFF_C802_1000
+        let writeEnv = makeEnv(commandId: 1, opcode: 0x09, operandSize: 1, operand: UInt32(payloadBytes.count))
+        let writeEnvTx = await driver.executeWriteBlock(
+            ASFWMCPWriteBlockRequest(address: addr(0xC802_1000), payload: writeEnv)
+        )
+        guard writeEnvTx.ok else { return (false, "") }
+
+        try? await Task.sleep(nanoseconds: 20_000_000) // 20ms yield
+
+        // 3. Request Opcode 0x08 (ReadShellChars) from 0xFFFF_C802_1000
+        let readEnv = makeEnv(commandId: 2, opcode: 0x08, operandSize: 1, operand: 1024)
+        let readEnvTx = await driver.executeWriteBlock(
+            ASFWMCPWriteBlockRequest(address: addr(0xC802_1000), payload: readEnv)
+        )
+        guard readEnvTx.ok else { return (false, "") }
+
+        // 4. Read response envelope from 0xFFFF_C802_9000
+        let respEnvTx = await driver.executeReadBlock(
+            ASFWMCPReadBlockRequest(address: addr(0xC802_9000), length: 12)
+        )
+        guard respEnvTx.ok, let respBytes = respEnvTx.payload, respBytes.count >= 12 else {
+            return (true, "")
+        }
+
+        let availBytes = UInt32(respBytes[8]) | (UInt32(respBytes[9]) << 8) | (UInt32(respBytes[10]) << 16) | (UInt32(respBytes[11]) << 24)
+        guard availBytes > 0 else { return (true, "") }
+
+        let bytesToRead = min(availBytes, 1024)
+
+        // 5. Read stdout payload from 0xFFFF_C802_9040
+        let stdoutTx = await driver.executeReadBlock(
+            ASFWMCPReadBlockRequest(address: addr(0xC802_9040), length: bytesToRead)
+        )
+        guard stdoutTx.ok, let stdoutBytes = stdoutTx.payload else {
+            return (true, "")
+        }
+
+        let stdoutStr = String(decoding: stdoutBytes, as: UTF8.self)
+        return (true, stdoutStr)
+    }
+
+    func bebobStreamingStatsResult(
+        toolName: String,
+        decoder: ASFWMCPToolArgumentDecoder
+    ) async -> ASFWMCPToolCallResult {
+        do {
+            let deviceID = try decoder.deviceInstanceID()
+            let nodeId = try decoder.uint32("nodeId")
+            let generation = try decoder.uint32("generation")
+
+            let (ok, stdout) = await executeBeBoBVirtualUart(deviceID: deviceID, nodeId: nodeId, generation: generation, command: "sys stat")
+            guard ok else {
+                return .failure(toolName: toolName, code: .capabilityUnavailable, reason: "Failed to communicate with BeBoB Virtual UART.")
+            }
+
+            return .success(toolName: toolName, data: .object([
+                "kind": .string("bebobStreamingStats"),
+                "rawStdout": .string(stdout)
+            ]))
+        } catch {
+            return malformedToolResult(toolName, reason: error.localizedDescription)
+        }
+    }
+
+    func bebobSiliconStatusResult(
+        toolName: String,
+        decoder: ASFWMCPToolArgumentDecoder
+    ) async -> ASFWMCPToolCallResult {
+        do {
+            let deviceID = try decoder.deviceInstanceID()
+            let nodeId = try decoder.uint32("nodeId")
+            let generation = try decoder.uint32("generation")
+
+            let (ok, stdout) = await executeBeBoBVirtualUart(deviceID: deviceID, nodeId: nodeId, generation: generation, command: "sys avstat all")
+            guard ok else {
+                return .failure(toolName: toolName, code: .capabilityUnavailable, reason: "Failed to communicate with BeBoB Virtual UART.")
+            }
+
+            return .success(toolName: toolName, data: .object([
+                "kind": .string("bebobSiliconStatus"),
+                "setTgInLock": .bool(stdout.contains("SetTgInLock") || stdout.contains("TGEN in lock")),
+                "cipMismatch": .bool(stdout.contains("CIPMismatch")),
+                "dbcMismatch": .bool(stdout.contains("DBCMismatch")),
+                "headerMismatch": .bool(stdout.contains("HeaderMismatch")),
+                "rawStdout": .string(stdout)
+            ]))
+        } catch {
+            return malformedToolResult(toolName, reason: error.localizedDescription)
+        }
+    }
+
+    func bebobSyncStateResult(
+        toolName: String,
+        decoder: ASFWMCPToolArgumentDecoder
+    ) async -> ASFWMCPToolCallResult {
+        do {
+            let deviceID = try decoder.deviceInstanceID()
+            let nodeId = try decoder.uint32("nodeId")
+            let generation = try decoder.uint32("generation")
+
+            let (ok, stdout) = await executeBeBoBVirtualUart(deviceID: deviceID, nodeId: nodeId, generation: generation, command: "fw sync show")
+            guard ok else {
+                return .failure(toolName: toolName, code: .capabilityUnavailable, reason: "Failed to communicate with BeBoB Virtual UART.")
+            }
+
+            return .success(toolName: toolName, data: .object([
+                "kind": .string("bebobSyncState"),
+                "rawStdout": .string(stdout)
+            ]))
+        } catch {
+            return malformedToolResult(toolName, reason: error.localizedDescription)
+        }
+    }
+
+    func bebobShellExecuteResult(
+        toolName: String,
+        decoder: ASFWMCPToolArgumentDecoder
+    ) async -> ASFWMCPToolCallResult {
+        do {
+            let deviceID = try decoder.deviceInstanceID()
+            let nodeId = try decoder.uint32("nodeId")
+            let generation = try decoder.uint32("generation")
+            let command = try decoder.string("command")
+
+            let (ok, stdout) = await executeBeBoBVirtualUart(deviceID: deviceID, nodeId: nodeId, generation: generation, command: command)
+            guard ok else {
+                return .failure(toolName: toolName, code: .capabilityUnavailable, reason: "Failed to execute command on BeBoB Virtual UART.")
+            }
+
+            return .success(toolName: toolName, data: .object([
+                "kind": .string("bebobShellExecute"),
+                "command": .string(command),
+                "stdout": .string(stdout)
             ]))
         } catch {
             return malformedToolResult(toolName, reason: error.localizedDescription)

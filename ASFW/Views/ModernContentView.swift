@@ -17,6 +17,7 @@ struct ModernContentView: View {
     @StateObject private var diceReportStore: DiceReportStore
     @StateObject private var avcReportStore: AVCReportStore
     @StateObject private var mcpVM: ASFWMCPControlViewModel
+    @StateObject private var bebobShellVM: BeBoBShellViewModel
     @State private var selectedSection: SidebarSection? = .overview
     @State private var loggingPreset: LoggingPreset = .standard
     @AppStorage(DriverInstallSettings.requireNewerBuildKey)
@@ -37,6 +38,7 @@ struct ModernContentView: View {
         _diceReportStore = StateObject(wrappedValue: DiceReportStore(connector: debugViewModel.connector))
         _avcReportStore = StateObject(wrappedValue: AVCReportStore(connector: debugViewModel.connector))
         _mcpVM = StateObject(wrappedValue: ASFWMCPControlViewModel(connector: debugViewModel.connector))
+        _bebobShellVM = StateObject(wrappedValue: BeBoBShellViewModel(connector: debugViewModel.connector))
     }
 
     enum SidebarSection: String, CaseIterable, Identifiable {
@@ -58,6 +60,7 @@ struct ModernContentView: View {
         case audio = "Core Audio"
         case saffire = "Saffire"
         case duet = "Duet"
+        case bebobShell = "BeBoB Shell"
         case diagnostics = "1394 Diagnostics"
         case diceReport = "DICE Report"
         case avcReport = "AV/C Device Report"
@@ -84,6 +87,7 @@ struct ModernContentView: View {
             case .audio: return "hifispeaker.fill"
             case .saffire: return "slider.vertical.3"
             case .duet: return "slider.horizontal.below.square.filled.and.square"
+            case .bebobShell: return "terminal"
             case .diagnostics: return "heart.text.square"
             case .diceReport: return "doc.text.magnifyingglass"
             case .avcReport: return "doc.text.magnifyingglass"
@@ -144,6 +148,8 @@ struct ModernContentView: View {
                     SaffireMixerView(connector: debugVM.connector)
                 case .duet:
                     DuetControlView(connector: debugVM.connector)
+                case .bebobShell:
+                    BeBoBShellView(viewModel: bebobShellVM)
                 case .diagnostics:
                     DiagnosticsView(store: diagnosticsStore)
                 case .diceReport:

@@ -68,6 +68,42 @@ extension ASFWMCPToolCatalog {
             idempotent: true,
             summary: "Stop and cleanly tear down the active PHASE 88 duplex lifecycle.",
             requiredProtocolHints: ["bebob", "cmp"]
+        ),
+        ASFWMCPToolDefinition(
+            name: "asfw_bebob_get_streaming_stats",
+            group: "bebob",
+            visibility: .readOnly,
+            readOnly: true,
+            idempotent: false,
+            summary: "Query live BridgeCo isochronous streaming statistics (sys stat) including rxPackets, onlyHeaders, BCOHdrErr, SytDiffErr, and SYT offsets.",
+            requiredProtocolHints: ["bebob"]
+        ),
+        ASFWMCPToolDefinition(
+            name: "asfw_bebob_get_silicon_status",
+            group: "bebob",
+            visibility: .readOnly,
+            readOnly: true,
+            idempotent: false,
+            summary: "Query DM1000 hardware framer & TGEN silicon lock error flags (sys avstat) including SetTgInLock, DBCMismatch, and CIPMismatch.",
+            requiredProtocolHints: ["bebob"]
+        ),
+        ASFWMCPToolDefinition(
+            name: "asfw_bebob_get_sync_state",
+            group: "bebob",
+            visibility: .readOnly,
+            readOnly: true,
+            idempotent: false,
+            summary: "Query master clock sync state (fw sync show) including audioState (Waiting for sync, Running) and selected syncSource.",
+            requiredProtocolHints: ["bebob"]
+        ),
+        ASFWMCPToolDefinition(
+            name: "asfw_bebob_shell_execute",
+            group: "bebob",
+            visibility: .developerWrite,
+            readOnly: false,
+            idempotent: false,
+            summary: "Send a diagnostic shell command string to the BridgeCo BeBoB Virtual UART (0xFFFF_C802_1000) and return stdout.",
+            requiredProtocolHints: ["bebob"]
         )
     ]
 }

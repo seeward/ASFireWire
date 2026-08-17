@@ -1,0 +1,336 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 ASFireWire Project
+//
+// BeBoBShellView.swift — Interactive Virtual UART Terminal & Telemetry Dashboard for BeBoB.
+
+import SwiftUI
+
+struct BeBoBShellView: View {
+    @ObservedObject var viewModel: BeBoBShellViewModel
+    @State private var selectedTab: Int = 0
+
+    init(viewModel: BeBoBShellViewModel) {
+        self.viewModel = viewModel
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header: Device & Connection Status Bar
+            headerBar
+
+            Divider()
+
+            // Main Content: Tabs for Dashboard vs Raw Terminal
+            TabView(selection: $selectedTab) {
+                telemetryDashboard
+                    .tabItem {
+                        Label("Telemetry Dashboard", systemImage: "gauge.with.needle")
+                    }
+                    .tag(0)
+
+                terminalView
+                    .tabItem {
+                        Label("Virtual UART Terminal", systemImage: "terminal")
+                    }
+                    .tag(1)
+            }
+            .padding(12)
+        }
+        .navigationTitle("BeBoB Diagnostics & Shell")
+        .onAppear {
+            viewModel.refreshTelemetry()
+        }
+    }
+
+    // MARK: - Header Bar
+
+    private var headerBar: some View {
+        HStack(spacing: 16) {
+            Image(systemName: "cpu")
+                .font(.title2)
+                .foregroundStyle(.blue)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("BridgeCo DM1000 / BeBoB Virtual UART")
+                    .font(.headline)
+                Text("Device Instance ID: \(viewModel.selectedDeviceID.rawValue) (0xFFFF_C802_1000/9000)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            // Auto-polling Toggle
+            Button {
+                viewModel.toggleAutoPolling()
+            } label: {
+                Label(
+                    viewModel.isAutoPolling ? "Live Polling (1s)" : "Auto-Poll Paused",
+                    systemImage: viewModel.isAutoPolling ? "antenna.radiowaves.left.and.right" : "play.circle"
+                )
+            }
+            .buttonStyle(.bordered)
+            .tint(viewModel.isAutoPolling ? .green : .secondary)
+
+            // Manual Refresh
+            Button {
+                viewModel.refreshTelemetry()
+            } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!viewModel.isConnected || viewModel.isExecuting)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    // MARK: - Telemetry Dashboard Tab
+
+    private var telemetryDashboard: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                // Top Status Cards: Audio State & PLL Sync
+                HStack(spacing: 16) {
+                    syncStateCard
+                    siliconLockCard
+                }
+
+                // Streaming Error Flags & Counters
+                streamingMetricsSection
+
+                // Quick Action Bar
+                quickActionsSection
+            }
+            .padding(.vertical, 8)
+        }
+    }
+
+    private var syncStateCard: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Label("Audio State", systemImage: "waveform.circle")
+                        .font(.headline)
+                    Spacer()
+                    let stateStr = viewModel.syncState?.audioState ?? "Unknown"
+                    Text(stateStr)
+                        .font(.subheadline.bold())
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(stateBadgeColor(stateStr).opacity(0.2))
+                        .foregroundStyle(stateBadgeColor(stateStr))
+                        .clipShape(Capsule())
+                }
+
+                Divider()
+
+                HStack {
+                    Text("Sync Source:")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(viewModel.syncState?.syncSource ?? "—")
+                        .font(.subheadline.monospaced())
+                }
+
+                HStack {
+                    Text("Sample Rate:")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    let rate = viewModel.syncState?.sampleRateHz ?? 0
+                    Text(rate > 0 ? "\(rate) Hz" : "—")
+                        .font(.subheadline.monospaced())
+                }
+            }
+            .padding(6)
+        } label: {
+            Text("Clock & Engine Synchronization")
+        }
+    }
+
+    private var siliconLockCard: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Label("Silicon Hardware Latches", systemImage: "lock.shield")
+                        .font(.headline)
+                    Spacer()
+                    if let av = viewModel.avStat {
+                        Text(av.setTgInLock ? "LOCKED" : "UNLOCKED")
+                            .font(.caption.bold())
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(av.setTgInLock ? Color.green.opacity(0.2) : Color.red.opacity(0.2))
+                            .foregroundStyle(av.setTgInLock ? .green : .red)
+                            .clipShape(Capsule())
+                    }
+                }
+
+                Divider()
+
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                    flagBadge(name: "SetTgInLock", isGood: viewModel.avStat?.setTgInLock ?? false)
+                    flagBadge(name: "DBC In-Phase", isGood: !(viewModel.avStat?.dbcMismatch ?? false))
+                    flagBadge(name: "CIP Valid", isGood: !(viewModel.avStat?.cipMismatch ?? false))
+                    flagBadge(name: "Header Valid", isGood: !(viewModel.avStat?.headerMismatch ?? false))
+                }
+            }
+            .padding(6)
+        } label: {
+            Text("DM1000 Framer / TGEN Latches")
+        }
+    }
+
+    private var streamingMetricsSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Streaming Cadence & Presentation Telemetry (sys stat)", systemImage: "chart.bar.xaxis")
+                    .font(.headline)
+
+                Divider()
+
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                    metricCard(title: "rxPackets", value: "\(viewModel.streamingStats?.rxPackets ?? 0)", color: .blue)
+                    metricCard(title: "onlyHeaders", value: "\(viewModel.streamingStats?.onlyHeaders ?? 0)", color: .secondary)
+                    metricCard(title: "BCOHdrErr", value: "\(viewModel.streamingStats?.bcoHdrErr ?? 0)", color: (viewModel.streamingStats?.bcoHdrErr ?? 0) > 0 ? .red : .green)
+                    metricCard(title: "SytDiffErr", value: "\(viewModel.streamingStats?.sytDiffErr ?? 0)", color: (viewModel.streamingStats?.sytDiffErr ?? 0) > 0 ? .red : .green)
+
+                    metricCard(title: "pkt Future", value: "\(viewModel.streamingStats?.pktFuture ?? 0)", color: (viewModel.streamingStats?.pktFuture ?? 0) > 0 ? .orange : .secondary)
+                    metricCard(title: "pkt Past", value: "\(viewModel.streamingStats?.pktPast ?? 0)", color: (viewModel.streamingStats?.pktPast ?? 0) > 0 ? .red : .secondary)
+                    metricCard(title: "rxQ Fill Level", value: "\(viewModel.streamingStats?.rxQFillLevelPct ?? 0)%", color: .purple)
+                    metricCard(title: "SytCorr (ticks)", value: "\(viewModel.streamingStats?.sytCorr ?? 0)", color: .teal)
+                }
+            }
+            .padding(6)
+        }
+    }
+
+    private var quickActionsSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Quick Diagnostic Shell Actions", systemImage: "bolt.horizontal.circle")
+                    .font(.headline)
+
+                Divider()
+
+                HStack(spacing: 12) {
+                    quickButton(title: "📊 Stream Stats", cmd: "sys stat")
+                    quickButton(title: "🔒 Silicon Status", cmd: "sys avstat all")
+                    quickButton(title: "⏱ Clock & Sync", cmd: "fw sync show")
+                    quickButton(title: "📝 Toggle SytLog", cmd: "sys sytlog")
+                    quickButton(title: "🧵 ThreadX Tasks", cmd: "os th")
+                    quickButton(title: "🧹 Reset Stats", cmd: "sys stat reset")
+                }
+            }
+            .padding(6)
+        }
+    }
+
+    // MARK: - Virtual UART Monospace Terminal Tab
+
+    private var terminalView: some View {
+        VStack(spacing: 8) {
+            // Monospace Output Text Area
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(viewModel.terminalOutput)
+                        .font(.system(.body, design: .monospaced))
+                        .foregroundStyle(Color.green)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .id("bottomID")
+                }
+                .background(Color.black)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .onChange(of: viewModel.terminalOutput) {
+                    withAnimation {
+                        proxy.scrollTo("bottomID", anchor: .bottom)
+                    }
+                }
+            }
+
+            // Command Input Bar
+            HStack(spacing: 8) {
+                Text("1814>")
+                    .font(.system(.body, design: .monospaced).bold())
+                    .foregroundStyle(.secondary)
+
+                TextField("Enter shell command (e.g. sys stat, fw sync show, os th)...", text: $viewModel.commandInput)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .onSubmit {
+                        viewModel.sendCommand()
+                    }
+
+                Button {
+                    viewModel.sendCommand()
+                } label: {
+                    Label("Send", systemImage: "paperplane.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(viewModel.commandInput.isEmpty || viewModel.isExecuting)
+
+                Button {
+                    viewModel.clearTerminal()
+                } label: {
+                    Label("Clear", systemImage: "trash")
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+    }
+
+    // MARK: - Helpers & UI Elements
+
+    private func metricCard(title: String, value: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.title3.monospaced().bold())
+                .foregroundStyle(color)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func flagBadge(name: String, isGood: Bool) -> some View {
+        HStack {
+            Image(systemName: isGood ? "checkmark.circle.fill" : "xmark.circle.fill")
+                .foregroundStyle(isGood ? .green : .red)
+            Text(name)
+                .font(.caption.monospaced())
+            Spacer()
+        }
+        .padding(6)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+    }
+
+    private func quickButton(title: String, cmd: String) -> some View {
+        Button {
+            viewModel.sendCommand(cmd)
+            selectedTab = 1 // Switch to terminal to see result
+        } label: {
+            Text(title)
+                .font(.caption)
+        }
+        .buttonStyle(.bordered)
+    }
+
+    private func stateBadgeColor(_ state: String) -> Color {
+        switch state {
+        case "Running": return .green
+        case "Waiting for sync": return .orange
+        case "Idle": return .blue
+        case "Stop": return .red
+        default: return .secondary
+        }
+    }
+}

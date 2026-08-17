@@ -7,6 +7,7 @@
 
 #include "TransactionHandler.hpp"
 #include "../../Audio/Families/BeBoB/Bootloader/BeBoBBootloaderCue.hpp"
+#include "../../Audio/Families/BeBoB/VirtualUart/BeBoBVirtualUartCommand.hpp"
 #include "../../Controller/ControllerCore.hpp"
 #include "../../Discovery/DeviceRegistry.hpp"
 #include "../../Logging/Logging.hpp"
@@ -21,35 +22,43 @@
 #include <DriverKit/OSData.h>
 
 #include <optional>
+#include <span>
 
 namespace ASFW::UserClient {
 
 namespace {
 
-/// Refuses any user-client write into the BridgeCo bootloader register window.
+/// Refuses any user-client write into the BridgeCo bootloader register window,
+/// EXCEPT for safe Virtual UART operations (stdin buffer or shell opcodes 0x07/0x08/0x09).
 ///
 /// That window is where a 12-byte write starts the application firmware — and
 /// where the *same* write with one byte changed permanently reprograms device
 /// identity in flash: 0x0a rewrites the EUI-64 GUID, 0x10 the hardware ID, and
 /// 0x04-0x06 the firmware image. None of that is recoverable.
-///
-/// The driver's own cue path is separately interlocked (a closed value type with
-/// no opcode parameter, plus IsPermittedBootloaderWrite at the transmit point),
-/// but every one of those interlocks lives *inside* the bootloader client. This
-/// path does not go through it: AsyncWrite/AsyncBlockWrite/AsyncCompareSwap take
-/// an arbitrary caller-supplied address, so the MCP write tools and any other
-/// user-client caller could otherwise reach that window directly.
-///
-/// The rule here is deliberately stricter than the client's: no user-client
-/// write to this window is permitted at all, not even a well-formed cue. The
-/// driver owns firmware preparation and decides it from catalog policy; there is
-/// no legitimate external reason to write here.
 [[nodiscard]] bool RefusesBootloaderWindow(uint16_t addressHi, uint32_t addressLo,
+                                           std::span<const uint8_t> payload,
                                            const char* operation) {
     namespace Boot = ASFW::Audio::Families::BeBoB::Bootloader;
+    namespace VUart = ASFW::Audio::Families::BeBoB::VirtualUart;
+
     if (!Boot::IsBootloaderWindow(addressHi, addressLo)) {
         return false;
     }
+
+    // Allow Virtual UART character buffer writes (0xFFFF:C8021040 - Request stdin buffer)
+    if (addressHi == VUart::kVirtualUartAddressHi && addressLo == VUart::kRequestBufferAddressLo) {
+        return false;
+    }
+
+    // Allow Virtual UART mailbox command envelopes (0xFFFF:C8021000) ONLY for shell opcodes (0x07, 0x08, 0x09)
+    if (addressHi == VUart::kVirtualUartAddressHi && addressLo == VUart::kRequestAddressLo &&
+        payload.size() == VUart::kCommandEnvelopeBytes) {
+        const auto opcode = static_cast<uint8_t>((VUart::LoadLittleEndianQuadlet(payload, 4) >> 16U) & 0xFF);
+        if (VUart::IsPermittedVirtualUartOpcode(opcode)) {
+            return false;
+        }
+    }
+
     ASFW_LOG_ERROR(UserClient,
                    "%{public}s: refused write to the BeBoB bootloader window "
                    "0x%04x:%08x - this range permanently reprograms device "
@@ -230,14 +239,21 @@ kern_return_t TransactionHandler::AsyncWrite(IOUserClientMethodArguments* args,
     const uint32_t addressLo = static_cast<uint32_t>(args->scalarInput[2] & 0xFFFFFFFFu);
     const uint32_t length = static_cast<uint32_t>(args->scalarInput[3] & 0xFFFFFFFFu);
 
-    if (RefusesBootloaderWindow(addressHi, addressLo, "AsyncWrite")) {
-        return kIOReturnNotPermitted;
-    }
-
     if (length != actualPayloadSize) {
         ASFW_LOG(UserClient, "AsyncWrite: Length mismatch (specified=%u actual=%u)", length,
                  actualPayloadSize);
         return kIOReturnBadArgument;
+    }
+
+    const void* payload = payloadData->getBytesNoCopy();
+    if (!payload) {
+        ASFW_LOG(UserClient, "AsyncWrite: Failed to get payload bytes");
+        return kIOReturnBadArgument;
+    }
+
+    std::span<const uint8_t> payloadSpan{static_cast<const uint8_t*>(payload), actualPayloadSize};
+    if (RefusesBootloaderWindow(addressHi, addressLo, payloadSpan, "AsyncWrite")) {
+        return kIOReturnNotPermitted;
     }
 
     ASFW_LOG(UserClient,
@@ -250,13 +266,6 @@ kern_return_t TransactionHandler::AsyncWrite(IOUserClientMethodArguments* args,
     if (!asyncPort) {
         ASFW_LOG(UserClient, "AsyncWrite: Async port not available");
         return kIOReturnNotReady;
-    }
-
-    // Get payload bytes (payloadData already validated above)
-    const void* payload = payloadData->getBytesNoCopy();
-    if (!payload) {
-        ASFW_LOG(UserClient, "AsyncWrite: Failed to get payload bytes");
-        return kIOReturnBadArgument;
     }
 
     // Build WriteParams
@@ -383,14 +392,21 @@ kern_return_t TransactionHandler::AsyncBlockWrite(IOUserClientMethodArguments* a
     const uint32_t addressLo = static_cast<uint32_t>(args->scalarInput[2] & 0xFFFFFFFFu);
     const uint32_t length = static_cast<uint32_t>(args->scalarInput[3] & 0xFFFFFFFFu);
 
-    if (RefusesBootloaderWindow(addressHi, addressLo, "AsyncBlockWrite")) {
-        return kIOReturnNotPermitted;
-    }
-
     if (length != actualPayloadSize) {
         ASFW_LOG(UserClient, "AsyncBlockWrite: Length mismatch (specified=%u actual=%u)", length,
                  actualPayloadSize);
         return kIOReturnBadArgument;
+    }
+
+    const void* payload = payloadData->getBytesNoCopy();
+    if (!payload) {
+        ASFW_LOG(UserClient, "AsyncBlockWrite: Failed to get payload bytes");
+        return kIOReturnBadArgument;
+    }
+
+    std::span<const uint8_t> payloadSpan{static_cast<const uint8_t*>(payload), actualPayloadSize};
+    if (RefusesBootloaderWindow(addressHi, addressLo, payloadSpan, "AsyncBlockWrite")) {
+        return kIOReturnNotPermitted;
     }
 
     ASFW_LOG(UserClient,
@@ -403,12 +419,6 @@ kern_return_t TransactionHandler::AsyncBlockWrite(IOUserClientMethodArguments* a
     if (!asyncPort) {
         ASFW_LOG(UserClient, "AsyncBlockWrite: Async port not available");
         return kIOReturnNotReady;
-    }
-
-    const void* payload = payloadData->getBytesNoCopy();
-    if (!payload) {
-        ASFW_LOG(UserClient, "AsyncBlockWrite: Failed to get payload bytes");
-        return kIOReturnBadArgument;
     }
 
     WriteParams params{};
@@ -557,7 +567,7 @@ kern_return_t TransactionHandler::AsyncCompareSwap(IOUserClientMethodArguments* 
     const uint32_t addressLo = static_cast<uint32_t>(args->scalarInput[2] & 0xFFFFFFFFu);
     const uint8_t size = static_cast<uint8_t>(args->scalarInput[3] & 0xFF); // 4 or 8 bytes
 
-    if (RefusesBootloaderWindow(addressHi, addressLo, "AsyncCompareSwap")) {
+    if (RefusesBootloaderWindow(addressHi, addressLo, {}, "AsyncCompareSwap")) {
         return kIOReturnNotPermitted;
     }
 
