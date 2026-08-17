@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 ASFireWire Project
 //
-// Hardware-free wire test for the FireWire 1814 / ProjectMix blank-slate
+// Hardware-free wire test for the FireWire 1814 / ProjectMix clock-configuration
 // sequence. It uses the real FCP transport and a deterministic target rather
 // than replacing either command submission path with a mock.
+//
+// The invariant under test is that exactly one policy is applied. Two exist:
+// the vendor kext's (source 0 plus selector FB 4, issued against a live output
+// plug) and Linux's (source 3, no selector). ASFW follows Linux, and mixing the
+// two is what the command-count assertions here are guarding against.
 
 #include <gtest/gtest.h>
 
@@ -38,7 +43,7 @@ void ExpectFrame(const FCPFrame& actual,
     }
 }
 
-TEST(MAudioSpecialInitTests, ReplaysVendorBlankSlateSequenceAndTiming) {
+TEST(MAudioSpecialInitTests, SendsInternalClockSourceAndNoSelector) {
     AvcTestRig rig;
     ASSERT_TRUE(rig.IsReady());
 
@@ -54,44 +59,42 @@ TEST(MAudioSpecialInitTests, ReplaysVendorBlankSlateSequenceAndTiming) {
         completionStatus = status;
     });
 
-    // Resolve the initial vendor command. Its accepted response starts the
-    // 300 ms interlock but must not enqueue the selector early.
+    // One vendor clock frame, with operand 6 == 0x03 ("Internal"). Linux sends
+    // exactly this at discovery (bebob_maudio.c:276). Operand 0 would be the
+    // vendor kext's "Internal with Digital Mute", which is only safe paired with
+    // the selector that releases it.
     EXPECT_EQ(rig.Drain(), 1U);
     ASSERT_EQ(rig.Target().CommandCount(), 1U);
     constexpr std::array<uint8_t, 16> clockFrame{
-        0x00, 0xFF, 0x00, 0x04, 0x00, 0x04, 0x00, 0x00,
+        0x00, 0xFF, 0x00, 0x04, 0x00, 0x04, 0x03, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
     ExpectFrame(rig.Target().Commands()[0], clockFrame);
     EXPECT_FALSE(completed);
 
-    rig.Timers().Advance(Milliseconds(299));
+    rig.Timers().Advance(Milliseconds(2499));
     EXPECT_EQ(rig.Drain(), 0U);
-    EXPECT_EQ(rig.Target().CommandCount(), 1U);
+    EXPECT_FALSE(completed);
 
-    // At 300 ms the selector is submitted. The AVCCdb encoder must produce the
-    // exact 12-byte frame observed by FireBug, including quadlet padding.
+    // The settle expiring is not the end of initialisation: it releases
+    // SendParameterBlock, whose 160-byte write to the parameter window is a real
+    // asynchronous bus transaction and needs a drain before its completion runs.
+    // Asserting on `completed` without that drain is what left this test red
+    // from 5fbb6ad1 onwards.
     rig.Timers().Advance(Milliseconds(1));
+    EXPECT_FALSE(completed);
     EXPECT_EQ(rig.Drain(), 1U);
-    ASSERT_EQ(rig.Target().CommandCount(), 2U);
-    constexpr std::array<uint8_t, 12> selectorFrame{
-        0x00, 0x08, 0xB8, 0x80, 0x04, 0x10,
-        0x02, 0x00, 0x01, 0x00, 0x00, 0x00};
-    ExpectFrame(rig.Target().Commands()[1], selectorFrame);
-    EXPECT_FALSE(completed);
-
-    // No wire operation separates the kext's second 300 ms sleep from its
-    // outer 2500 ms sleep, so ASFW coalesces them into one 2800 ms timer.
-    rig.Timers().Advance(Milliseconds(2799));
-    EXPECT_FALSE(completed);
-    rig.Timers().Advance(Milliseconds(1));
     EXPECT_TRUE(completed);
     EXPECT_EQ(completionStatus, kIOReturnSuccess);
+
+    // Still one AV/C command: no selector was ever submitted, before or after
+    // the settle. This is the assertion that keeps the two policies from being
+    // recombined into the hybrid that shipped previously.
+    EXPECT_EQ(rig.Target().CommandCount(), 1U);
 }
 
-TEST(MAudioSpecialInitTests, SelectorRefusalFailsInitializationWithoutSettle) {
+TEST(MAudioSpecialInitTests, ClockRefusalFailsInitializationWithoutSettle) {
     AvcTestRig rig;
     ASSERT_TRUE(rig.IsReady());
-    rig.Target().Script(AvcReply::Accepted());
     rig.Target().Script(AvcReply::Rejected());
 
     MAudioSpecialProtocol protocol(
@@ -106,13 +109,12 @@ TEST(MAudioSpecialInitTests, SelectorRefusalFailsInitializationWithoutSettle) {
         completionStatus = status;
     });
 
+    // A device that refused its clock configuration is not one to publish, so
+    // the refusal completes immediately rather than arming the settle timer.
     EXPECT_EQ(rig.Drain(), 1U);
-    rig.Timers().Advance(Milliseconds(300));
-    EXPECT_EQ(rig.Drain(), 1U);
-
     EXPECT_TRUE(completed);
     EXPECT_NE(completionStatus, kIOReturnSuccess);
-    EXPECT_EQ(rig.Target().CommandCount(), 2U);
+    EXPECT_EQ(rig.Target().CommandCount(), 1U);
     EXPECT_EQ(rig.Timers().PendingCount(), 0U);
 }
 

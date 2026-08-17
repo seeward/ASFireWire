@@ -61,6 +61,27 @@ struct AmdtpTxPolicy final {
     bool initializeNonAudioSlots{true};
     bool preserveFdfInNoDataPackets{false};
     bool emptyPacketsDuringIdle{false};
+
+    /// Send cadence packets full-size, carrying a complete set of data blocks
+    /// whose audio slots hold `cadenceSlotWord`, instead of header-only.
+    ///
+    /// The M-Audio "special" firmware is driven this way by its own driver: in
+    /// tools/1814/12.txt -- a session in which the device streams -- every
+    /// host->device packet is 232 bytes. The cadence packet differs from a DATA
+    /// packet only in FDF (0xFF), SYT (0xFFFF) and the audio-slot label; its
+    /// eight data blocks and their non-audio slot are byte-identical. The
+    /// device's own transmit does use header-only empties, so the short form is
+    /// legal on the wire -- but no working stack sends one *to* this device, and
+    /// its firmware keeps a receive counter named `onlyHeaders`.
+    ///
+    /// DBC is unaffected as a special case: it advances by the data blocks the
+    /// packet carries, which for a full-size cadence packet is the same count a
+    /// DATA packet would carry. That is the ordinary rule, not an exception.
+    bool cadencePacketsCarryDataBlocks{false};
+
+    /// Audio-slot fill for those packets. Only meaningful when
+    /// `cadencePacketsCarryDataBlocks` is set.
+    uint32_t cadenceSlotWord{0xCF000000};
 };
 
 // Value-owned PCM snapshot supplied to the packetizer. The bytes referenced by

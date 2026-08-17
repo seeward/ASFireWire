@@ -51,6 +51,13 @@ struct TxPacketPolicy final {
     bool initializeNonAudioSlots{true};
     bool preserveFdfInNoDataPackets{false};
     bool emptyPacketsDuringIdle{false};
+
+    /// Send cadence packets full-size, carrying data blocks whose audio slots
+    /// hold a no-audio label, rather than header-only. Required by the M-Audio
+    /// "special" firmware; see AmdtpTxPolicy::cadencePacketsCarryDataBlocks for
+    /// the wire evidence. The label itself is not plumbed: it stays a constant
+    /// in the packetizer until a second device needs a different one.
+    bool cadencePacketsCarryDataBlocks{false};
 };
 
 struct RecoveryPolicy final {

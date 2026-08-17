@@ -228,7 +228,7 @@ TEST(AmdtpDirectTxTests, ForcedNoDataHoldsDbcAndAudioFrame) {
 // cadence NO-DATA like every other endpoint, or every DATA packet after one
 // looks to the device like 8 lost data blocks.
 TEST(AmdtpDirectTxTests,
-     ExplicitPacketScheduleHoldsDbcAcrossNoDataForMAudioSpecialFirmware) {
+     ExplicitPacketScheduleHoldsDbcAcrossHeaderOnlyCadencePacket) {
     AmdtpPacketTimeline timeline{};
     std::array<PacketTimelineSlot, 8> slots{};
     ASSERT_TRUE(timeline.AttachSlots(slots.data(), slots.size()));
@@ -251,10 +251,15 @@ TEST(AmdtpDirectTxTests,
     data.hasExplicitPacketSchedule = true;
     data.explicitDataBlocks = 8;
 
-    // Two full 48 kHz blocking groups.  Linux's generate_rx_packet_descs
-    // (amdtp-stream.c:1053-1061) advances by desc->data_blocks, and
-    // pool_blocking_data_blocks (:377) makes that 0 for the empty, so the
-    // empty repeats the DBC the next DATA packet will carry.
+    // Two full 48 kHz blocking groups.  DBC advances by the data blocks the
+    // packet carries; a header-only cadence packet carries none, so it repeats
+    // the DBC the next DATA packet will use.  Linux's generate_rx_packet_descs
+    // (amdtp-stream.c:1053-1061) advances by desc->data_blocks and
+    // pool_blocking_data_blocks (:377) makes that 0 for its empty.
+    //
+    // This is the default policy, not the M-Audio one -- see
+    // FullSizeCadencePacketCarriesBlocksAndAdvancesDbc for the case where the
+    // cadence packet is not empty and the same rule therefore yields +8.
     constexpr bool kIsData[] = {true, true,  true, false, true,
                                 true, true,  false, true};
     constexpr uint8_t kExpectedDbc[] = {0, 8, 16, 24, 24, 32, 40, 48, 48};
@@ -280,6 +285,67 @@ TEST(AmdtpDirectTxTests,
         }
         EXPECT_EQ(packet.dbc, kExpectedDbc[index]) << "at packet " << index;
     }
+}
+
+TEST(AmdtpDirectTxTests, FullSizeCadencePacketCarriesBlocksAndAdvancesDbc) {
+    // The M-Audio "special" policy. Its own driver never sends this firmware a
+    // header-only packet: in tools/1814/12.txt every host->device packet is
+    // full size, and the cadence ones differ from DATA only in FDF, SYT and the
+    // audio-slot label. DBC then advances by 8 under the ordinary rule, because
+    // eight data blocks really are on the wire.
+    AmdtpPacketTimeline timeline{};
+    std::array<PacketTimelineSlot, 4> slots{};
+    ASSERT_TRUE(timeline.AttachSlots(slots.data(), slots.size()));
+    // The real playback geometry: 6 PCM + 1 non-audio slot, so the two slot
+    // classes are actually distinguishable. A stereo config would not be --
+    // dbs == pcmChannels leaves no non-audio slot to check.
+    AmdtpStreamConfig config{};
+    config.streamMode = StreamMode::Blocking;
+    config.dbs = 7;
+    config.pcmChannels = 6;
+    config.framesPerDataPacket = 8;
+    config.maxPacketBytes = 232;
+
+    AmdtpTxPolicy policy{};
+    policy.cadencePacketsCarryDataBlocks = true;
+    AmdtpTxPacketizer packetizer{};
+    packetizer.BindTimeline(&timeline);
+    ASSERT_TRUE(packetizer.Configure(config, policy));
+
+    std::array<uint8_t, 232> bytes{};
+    AmdtpTimingState timing{};
+    timing.disposition = AmdtpPacketDisposition::NoData;
+    PreparedTxPacket packet{};
+    ASSERT_TRUE(packetizer.PrepareNextPacket(
+        {0, bytes.data(), bytes.size()}, timing, packet));
+
+    EXPECT_FALSE(packet.isData);
+    EXPECT_EQ(packet.syt, 0xFFFFU); // NO-INFO
+
+    // 8 blocks x 7 slots x 4 B + 8 B CIP == 232, the size the vendor puts on
+    // the wire for every host->device packet.
+    EXPECT_EQ(packet.byteCount, 232U);
+
+    // No audio frames were consumed even though blocks were emitted.
+    EXPECT_EQ(packet.framesInPacket, 0U);
+
+    // Audio slots take the cadence label; the non-audio slot keeps the word a
+    // DATA packet gives it, so the block layout matches tools/1814/12.txt.
+    for (uint32_t block = 0; block < 8; ++block) {
+        const uint8_t* base = bytes.data() + 8 + (block * 7 * 4);
+        for (uint32_t slot = 0; slot < 6; ++slot) {
+            EXPECT_EQ(base[slot * 4], 0xCFU)
+                << "block " << block << " slot " << slot;
+        }
+        EXPECT_EQ(base[6 * 4], 0x80U) << "block " << block;
+    }
+
+    // The next packet's DBC reflects the eight blocks just transmitted.
+    PreparedTxPacket second{};
+    std::array<uint8_t, 232> secondBytes{};
+    ASSERT_TRUE(packetizer.PrepareNextPacket(
+        {1, secondBytes.data(), secondBytes.size()}, timing, second));
+    EXPECT_EQ(second.dbc, 8U);
 }
 
 TEST(AmdtpDirectTxTests, NoDataFdfCanUseCompatibilityQuirk) {

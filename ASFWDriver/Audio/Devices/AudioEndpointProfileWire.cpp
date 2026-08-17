@@ -166,10 +166,13 @@ Serialize(const ResolvedAudioEndpointProfile& profile) noexcept {
     header.playbackFdf = profile.playbackFdf;
     header.captureFmt = profile.captureFmt;
     header.playbackFmt = profile.playbackFmt;
+    // Bit 0x10 was already inside ValidFlagsAndReserved's ~0x1FU mask and
+    // unused, so claiming it needs neither a mask change nor a version bump.
     header.txPacketFlags = (profile.txPacketPolicy.variableDbs ? 1U : 0U) |
                            (profile.txPacketPolicy.initializeNonAudioSlots ? 2U : 0U) |
                            (profile.txPacketPolicy.preserveFdfInNoDataPackets ? 4U : 0U) |
-                           (profile.txPacketPolicy.emptyPacketsDuringIdle ? 8U : 0U);
+                           (profile.txPacketPolicy.emptyPacketsDuringIdle ? 8U : 0U) |
+                           (profile.txPacketPolicy.cadencePacketsCarryDataBlocks ? 16U : 0U);
     header.recoveryFlags =
         (profile.recoveryPolicy.recoverAfterTimingLoss ? 1U : 0U) |
         (profile.recoveryPolicy.recoverAfterCycleInconsistent ? 2U : 0U) |
@@ -345,6 +348,8 @@ Parse(std::span<const uint8_t> bytes) noexcept {
     profile.txPacketPolicy.initializeNonAudioSlots = (header.txPacketFlags & 2U) != 0;
     profile.txPacketPolicy.preserveFdfInNoDataPackets = (header.txPacketFlags & 4U) != 0;
     profile.txPacketPolicy.emptyPacketsDuringIdle = (header.txPacketFlags & 8U) != 0;
+    profile.txPacketPolicy.cadencePacketsCarryDataBlocks =
+        (header.txPacketFlags & 16U) != 0;
     profile.txPacketPolicy.defaultNonAudioSlotWord = header.defaultNonAudioSlotWord;
     profile.recoveryPolicy.recoverAfterTimingLoss = (header.recoveryFlags & 1U) != 0;
     profile.recoveryPolicy.recoverAfterCycleInconsistent = (header.recoveryFlags & 2U) != 0;

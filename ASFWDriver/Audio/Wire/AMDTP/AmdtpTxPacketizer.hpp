@@ -30,6 +30,12 @@ struct AmdtpNextPacketPlan final {
     uint8_t framesInPacket{0};
     uint32_t byteCount{0};
     uint64_t firstAudioFrame{0};
+
+    /// Data blocks the packet puts on the wire. Equal to `framesInPacket` for a
+    /// DATA packet, but non-zero and independent of it for a full-size cadence
+    /// packet, which carries blocks without consuming audio frames. DBC follows
+    /// this, never `framesInPacket`.
+    uint8_t blocksInPacket{0};
 };
 
 class AmdtpTxPacketizer final {
@@ -93,6 +99,11 @@ private:
     void WriteDataPacketDefaults(uint8_t* packetBytes,
                                  uint32_t packetCapacityBytes,
                                  uint32_t payloadBytes) noexcept;
+
+    /// Fill a full-size cadence packet's data blocks: audio slots take the
+    /// cadence label, non-audio slots the same word a DATA packet gives them.
+    void WriteCadencePacketFill(uint8_t* packetBytes,
+                                uint32_t payloadBytes) noexcept;
 
     void WritePcmSnapshot(uint8_t* packetBytes,
                           const PreparedTxPacket& packet,

@@ -40,6 +40,13 @@ inline constexpr size_t kMAudioClockCommandBytes = 16;
 ///
 /// Linux independently identifies function block 4 as the 1814/ProjectMix
 /// digital-input-interface selector (bebob_maudio.c:461-462, 514).
+///
+/// NOT SENT under the current policy. These describe the vendor's operand-0
+/// path, which pairs the selector with clock source `InternalDigitalMute` and
+/// issues both against an already-streaming output plug. ASFW follows Linux
+/// instead — source `Internal`, no selector — so nothing here has a call site;
+/// they remain as the record of the alternative. See MAudioSpecialProtocol's
+/// InitializeClock for why the two policies must not be mixed.
 inline constexpr uint8_t kMAudioDigitalInputSelectorBlockId = 0x04;
 inline constexpr uint8_t kMAudioDefaultDigitalInputInterface = 0x00;
 

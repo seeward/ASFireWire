@@ -171,7 +171,7 @@ bool AmdtpTxPacketizer::PrepareNextPacket(TxPacketSlotView slot,
     }
 
     const uint32_t payloadBytes =
-        static_cast<uint32_t>(plan.framesInPacket) * streamConfig_.dbs *
+        static_cast<uint32_t>(plan.blocksInPacket) * streamConfig_.dbs *
         kBytesPerSlot;
     const bool isEmptyPacket =
         !plan.isData && txPolicy_.emptyPacketsDuringIdle;
@@ -202,7 +202,7 @@ bool AmdtpTxPacketizer::PrepareNextPacket(TxPacketSlotView slot,
             return false; // bytes written but no counters advanced
         }
 
-        dbcCounter_.AdvanceDataBlocks(plan.framesInPacket);
+        dbcCounter_.AdvanceDataBlocks(plan.blocksInPacket);
         nextAudioFrame_ += plan.framesInPacket;
         lastDataFirstAudioFrame_ = outPacket.firstAudioFrame;
         lastDataEndAudioFrame_ = nextAudioFrame_;
@@ -216,18 +216,25 @@ bool AmdtpTxPacketizer::PrepareNextPacket(TxPacketSlotView slot,
             // Emitting genuine empty packets: byteCount = 0. No CIP header or payload is written.
             timeline_->MarkNoDataPacket(slot.packetIndex);
         } else {
-            // CIP-header-only: no payload, even as padding (DICE-II rejects it).
             WriteCipHeader(slot.bytes, cipBuilder_.BuildNoData(dbc));
+            if (plan.blocksInPacket != 0) {
+                // Full-size cadence packet: real data blocks, audio slots
+                // labelled as carrying no audio. See
+                // AmdtpTxPolicy::cadencePacketsCarryDataBlocks.
+                WriteCadencePacketFill(slot.bytes, payloadBytes);
+            }
+            // Otherwise CIP-header-only: no payload, even as padding
+            // (DICE-II rejects it).
             timeline_->MarkNoDataPacket(slot.packetIndex);
         }
 
-        // DBC counts data blocks actually transmitted, so a header-only packet
-        // carries none and must not advance it (IEC 61883-1 6.2.2).  Both
-        // reference stacks hold it: Linux advances by desc->data_blocks, which
-        // pool_blocking_data_blocks sets to 0 for the cadence empty
-        // (amdtp-stream.c:377, :1053-1061), and FFADO's
-        // fillNoDataPacketHeader returns 0 with the comment "DBC is not
-        // increased" (AmdtpTransmitStreamProcessor.cpp:394).
+        // DBC counts the data blocks actually transmitted (IEC 61883-1 6.2.2),
+        // so this advances by zero for a header-only packet and by the full
+        // block count for a full-size cadence packet. One rule, not two: Linux
+        // advances by desc->data_blocks (amdtp-stream.c:377, :1053-1061) and
+        // FFADO's fillNoDataPacketHeader returns 0 because *their* cadence
+        // packet carries nothing -- not because empties are special.
+        dbcCounter_.AdvanceDataBlocks(plan.blocksInPacket);
     }
 
     cadence_->AdvanceCycle();
@@ -260,18 +267,23 @@ bool AmdtpTxPacketizer::PreviewNextPacket(
     if (frames > streamConfig_.framesPerDataPacket) {
         return false;
     }
-    const uint32_t payloadBytes =
-        static_cast<uint32_t>(frames) * streamConfig_.dbs * kBytesPerSlot;
     const bool isEmptyPacket =
         !isData && txPolicy_.emptyPacketsDuringIdle;
+    // A cadence packet carries blocks without consuming audio frames, so the
+    // two counts diverge here and stay separate through emission.
+    const uint8_t blocks =
+        isData ? frames
+               : (isEmptyPacket || !txPolicy_.cadencePacketsCarryDataBlocks
+                      ? uint8_t{0}
+                      : streamConfig_.framesPerDataPacket);
+    const uint32_t payloadBytes =
+        static_cast<uint32_t>(blocks) * streamConfig_.dbs * kBytesPerSlot;
     outPlan = {
         .isData = isData,
         .framesInPacket = frames,
-        .byteCount = isEmptyPacket
-                         ? 0u
-                         : (isData ? kCipHeaderBytes + payloadBytes
-                                   : kCipHeaderBytes),
+        .byteCount = isEmptyPacket ? 0u : kCipHeaderBytes + payloadBytes,
         .firstAudioFrame = nextAudioFrame_,
+        .blocksInPacket = blocks,
     };
     return true;
 }
@@ -348,6 +360,25 @@ void AmdtpTxPacketizer::WriteDataPacketDefaults(uint8_t* packetBytes,
                 WriteBE32(payload + (frame * streamConfig_.dbs + s) * kBytesPerSlot,
                           txPolicy_.defaultNonAudioSlotWord);
             }
+        }
+    }
+}
+
+void AmdtpTxPacketizer::WriteCadencePacketFill(uint8_t* packetBytes,
+                                               uint32_t payloadBytes) noexcept {
+    uint8_t* payload = packetBytes + kCipHeaderBytes;
+    const uint32_t blocks = payloadBytes / (streamConfig_.dbs * kBytesPerSlot);
+
+    for (uint32_t block = 0; block < blocks; ++block) {
+        for (uint32_t s = 0; s < streamConfig_.dbs; ++s) {
+            // Audio slots take the cadence label; the non-audio slots keep the
+            // same word a DATA packet gives them, so the block layout is
+            // byte-identical apart from the label itself.
+            const uint32_t word = s < streamConfig_.pcmChannels
+                                      ? txPolicy_.cadenceSlotWord
+                                      : txPolicy_.defaultNonAudioSlotWord;
+            WriteBE32(payload + (block * streamConfig_.dbs + s) * kBytesPerSlot,
+                      word);
         }
     }
 }

@@ -110,13 +110,25 @@ void MAudioSpecialProtocol::InitializeClock(std::function<void(IOReturn)> comple
         return;
     }
 
-    // Reproduce SetBlankSlateClockSource, not Linux's shorter discover-time
-    // approximation. The vendor driver maps its 0x40000003 blank-slate word to
-    // clock-source operand 0 ("Internal with Digital Mute"). The FireBug trace
-    // confirms that exact operand on the 1814 in the initialization sequence
-    // whose device-output runs reach full-size packets.
+    // Linux's discover-time policy, adopted whole: clock source 3 and no
+    // selector.
+    //
+    // Two self-consistent policies configure this firmware, and ASFW previously
+    // ran neither. The vendor kext sends operand 0 ("Internal with Digital
+    // Mute") and follows it ~300 ms later with selector FB 4 — into an output
+    // plug that is already connected and streaming. Linux sends operand 3
+    // ("Internal") at discovery and never sends a selector at all
+    // (bebob_maudio.c:276).
+    //
+    // Under operand 0 that selector is not decoration but the release: in the
+    // original-driver FireBug capture (tools/1814/firebug.txt) the clock frame
+    // alone drives the device's output stream from full-size packets down to
+    // header-only ones (Largest 552 -> 8), and only the selector restores it
+    // (-> 360, the S/PDIF capture formation). We were sending operand 0 with the
+    // selector, but both before the plugs are connected, so nothing was ever
+    // released. Operand 3 needs no release, which is why Linux ships without one.
     const auto frame = BuildMAudioClockCommand(
-        MAudioClockSource::InternalDigitalMute,
+        MAudioClockSource::Internal,
         captureFormat_ == MAudioDigitalFormat::ADAT
             ? MAudioClockDigitalFormat::ADAT : MAudioClockDigitalFormat::SPDIF,
         playbackFormat_ == MAudioDigitalFormat::ADAT
@@ -128,8 +140,7 @@ void MAudioSpecialProtocol::InitializeClock(std::function<void(IOReturn)> comple
     std::memcpy(command.data.data(), frame.data(), frame.size());
 
     ASFW_LOG(Audio,
-             "[BeBoB] %{public}s: setting blank-slate clock source=internal-mute "
-             "digIn=%u digOut=%u",
+             "[BeBoB] %{public}s: setting clock source=internal digIn=%u digOut=%u",
              DeviceName(), static_cast<unsigned>(captureFormat_),
              static_cast<unsigned>(playbackFormat_));
 
@@ -158,87 +169,33 @@ void MAudioSpecialProtocol::InitializeClock(std::function<void(IOReturn)> comple
                 return;
             }
 
-            // The vendor implementation does not return after this frame. It
-            // waits 300 ms, sends selector FB 4/value 0 through its generic
-            // Audio-subunit clock path, waits another 300 ms, and only then
-            // begins the outer 2500 ms blank-slate settle. The selector is not
-            // optional mixer decoration: it is the second half of the original
-            // driver's clock-source operation and selects the digital-input
-            // interface used by the asserted capture formation.
+            // Linux returns straight from here with no wait. The settle is kept
+            // because the device is being reconfigured and this runs at install
+            // time, not inside the stream-start budget; the vendor's 300 ms
+            // clock-to-selector interlock is gone with the selector it separated.
             const uint64_t epoch = ++signalFormatEpoch_;
-            auto sendSelector =
-                [this, epoch, completion = std::move(completion)]() mutable {
-                    if (signalFormatEpoch_ != epoch) return;
-
-                    ASFW_LOG(Audio,
-                             "[BeBoB] %{public}s: applying digital-input selector "
-                             "fb=%u value=%u",
-                             DeviceName(),
-                             static_cast<unsigned>(
-                                 kMAudioDigitalInputSelectorBlockId),
-                             static_cast<unsigned>(
-                                 kMAudioDefaultDigitalInputInterface));
-                    SetSelectorBlock(
-                        kMAudioDigitalInputSelectorBlockId,
-                        kMAudioDefaultDigitalInputInterface,
-                        [this, epoch, completion = std::move(completion)](
-                            IOReturn selectorStatus) mutable {
-                            if (signalFormatEpoch_ != epoch) return;
-                            if (selectorStatus != kIOReturnSuccess) {
-                                ASFW_LOG_ERROR(
-                                    Audio,
-                                    "[BeBoB] blank-slate input selector failed: "
-                                    "0x%08x",
-                                    selectorStatus);
-                                completion(selectorStatus);
-                                return;
-                            }
-
-                            auto finish =
-                                [this, epoch,
-                                 completion = std::move(completion)]() mutable {
-                                    if (signalFormatEpoch_ != epoch) return;
-                                    ASFW_LOG(
-                                        Audio,
-                                        "[BeBoB] %{public}s: blank-slate clock "
-                                        "settle complete",
-                                        DeviceName());
-                                    // The vendor's blank-slate pass stops here,
-                                    // but its non-blank-slate pass follows with
-                                    // FWSettingsLevels::SendToDevice. Without
-                                    // that the write-only parameter window is
-                                    // never asserted at all.
-                                    SendParameterBlock(std::move(completion));
-                                };
-
-                            if (!timerScheduler_) {
-                                finish();
-                                return;
-                            }
-
-                            // No command separates the vendor's second 300 ms
-                            // wait from SetBlankSlateClockSource's 2500 ms wait.
-                            // Coalescing them preserves the wire timeline while
-                            // avoiding a redundant timer callback.
-                            (void)timerScheduler_->ScheduleAfter(
-                                static_cast<uint64_t>(
-                                    kMAudioPostSelectorSettleMs) *
-                                    1000ULL * 1000ULL,
-                                std::move(finish));
-                        });
-                };
+            auto finish = [this, epoch,
+                           completion = std::move(completion)]() mutable {
+                if (signalFormatEpoch_ != epoch) return;
+                ASFW_LOG(Audio, "[BeBoB] %{public}s: clock settle complete",
+                         DeviceName());
+                // The vendor's blank-slate pass stops here, but its
+                // non-blank-slate pass follows with
+                // FWSettingsLevels::SendToDevice. Without that the write-only
+                // parameter window is never asserted at all.
+                SendParameterBlock(std::move(completion));
+            };
 
             if (!timerScheduler_) {
-                sendSelector();
+                finish();
                 return;
             }
 
             // Token deliberately dropped: the epoch makes a late firing inert,
             // and teardown bumps it.
             (void)timerScheduler_->ScheduleAfter(
-                static_cast<uint64_t>(kMAudioClockToSelectorInterlockMs) *
-                    1000ULL * 1000ULL,
-                std::move(sendSelector));
+                static_cast<uint64_t>(kMAudioClockSettleMs) * 1000ULL * 1000ULL,
+                std::move(finish));
         });
 
     // No failure branch on the handle. SubmitCommand invokes the completion on

@@ -24,6 +24,18 @@ BuildProfile(const Devices::ProfileBuildContext& context) noexcept {
     profile.txPacketPolicy.emptyPacketsDuringIdle =
         context.staticPlan.profileBuilder ==
         DeviceProfiles::Audio::ProfileBuilderId::TerraTecPhase88;
+
+    // The M-Audio "special" firmware is never sent a header-only packet by its
+    // own driver: in tools/1814/12.txt, a session in which the device streams,
+    // every host->device packet is full size and the cadence ones carry data
+    // blocks labelled as holding no audio. Scoped to these two personas because
+    // that is where the evidence is; every other BeBoB device here is driven
+    // with header-only cadence packets and works.
+    profile.txPacketPolicy.cadencePacketsCarryDataBlocks =
+        context.staticPlan.profileBuilder ==
+            DeviceProfiles::Audio::ProfileBuilderId::MAudioFireWire1814 ||
+        context.staticPlan.profileBuilder ==
+            DeviceProfiles::Audio::ProfileBuilderId::MAudioProjectMix;
     profile.facets.push_back({Devices::FacetKind::Clock, 1});
     Common::AddDefaultTiming(profile, 4000);
     for (uint8_t i = 0; i < profile.timingCount; ++i) {
