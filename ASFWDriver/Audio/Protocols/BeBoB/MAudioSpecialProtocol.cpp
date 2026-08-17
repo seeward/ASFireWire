@@ -270,15 +270,59 @@ void MAudioSpecialProtocol::SendParameterBlock(
     // FFADO's Mixer::initialize (special_mixer.cpp:74-106) asserts all 40
     // quadlets of 0x00-0x9c: gains and aux sends at unity/zero, the nine LR
     // balance registers hard-panned, and the four routing registers cleared.
+    //
+    // Clearing the routing registers is where FFADO and we part company. FFADO
+    // ships a mixer GUI, so it can hand the user an empty matrix to fill in. We
+    // have none, so a cleared matrix is permanent silence: the device reports
+    // "There are no connections!" and every physical output meters exactly zero
+    // while a perfectly healthy stream arrives (rxPackets nominal, onlyHeaders
+    // and BCOHdrErr both 0, TGEN locked). Assert the routing defaults instead.
+    //
+    // Values derived from the ALSA userspace BeBoB crate's parameter defaults,
+    // references/alsa-userspace-control-protocols-impl/protocols/bebob/src/
+    // maudio/special.rs: MaudioSpecialMixerParameters::default() has
+    // stream_pairs [[true,false],[false,true]] encoded as 1<<(pair*2 + mixer),
+    // and MaudioSpecialOutputParameters::default() sources the headphone pairs
+    // from MixerOutputPair0/1 encoded as flag<<(pair*16).
     static constexpr size_t kQuadletCount = 40;              // 0x00..0x9c
     static constexpr size_t kBalanceFirst = 16;              // 0x40
     static constexpr size_t kBalanceLast = 24;               // 0x60
     static constexpr uint32_t kBalanceHardPanned = 0x7FFE8000U;
 
+    static constexpr size_t kMixerPhysSourceIndex = 36;      // 0x90
+    static constexpr size_t kMixerStreamSourceIndex = 37;    // 0x94
+    static constexpr size_t kHeadphonePairSourceIndex = 38;  // 0x98
+    static constexpr size_t kAnalogOutPairSourceIndex = 39;  // 0x9c
+
+    // No physical input feeds the mixer; the two stream pairs feed mixer pairs
+    // 0 and 1; both headphone pairs follow those mixer pairs; the analog output
+    // pairs take the mixer output rather than the aux bus.
+    static constexpr uint32_t kMixerPhysSourceNone = 0x00000000U;
+    static constexpr uint32_t kMixerStreamSourcePairs = 0x00000009U;
+    static constexpr uint32_t kHeadphoneFromMixerPairs = 0x00020001U;
+    static constexpr uint32_t kAnalogOutFromMixer = 0x00000000U;
+
+    const auto quadletAt = [](size_t index) -> uint32_t {
+        if (index >= kBalanceFirst && index <= kBalanceLast) {
+            return kBalanceHardPanned;
+        }
+        switch (index) {
+        case kMixerPhysSourceIndex:
+            return kMixerPhysSourceNone;
+        case kMixerStreamSourceIndex:
+            return kMixerStreamSourcePairs;
+        case kHeadphonePairSourceIndex:
+            return kHeadphoneFromMixerPairs;
+        case kAnalogOutPairSourceIndex:
+            return kAnalogOutFromMixer;
+        default:
+            return 0U;
+        }
+    };
+
     std::array<uint8_t, kQuadletCount * 4> payload{};
     for (size_t i = 0; i < kQuadletCount; ++i) {
-        const uint32_t value =
-            (i >= kBalanceFirst && i <= kBalanceLast) ? kBalanceHardPanned : 0U;
+        const uint32_t value = quadletAt(i);
         // IEEE 1394 payloads are big-endian regardless of host order.
         payload[(i * 4) + 0] = static_cast<uint8_t>(value >> 24);
         payload[(i * 4) + 1] = static_cast<uint8_t>(value >> 16);

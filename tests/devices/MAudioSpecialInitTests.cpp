@@ -118,4 +118,59 @@ TEST(MAudioSpecialInitTests, ClockRefusalFailsInitializationWithoutSettle) {
     EXPECT_EQ(rig.Timers().PendingCount(), 0U);
 }
 
+// The parameter window's last four quadlets are the device's signal routing.
+// Zeroing them — which is what FFADO's Mixer::initialize does, because FFADO
+// ships a mixer GUI to fill the matrix back in — leaves the 1814 reporting
+// "There are no connections!" and metering silence on every physical output
+// while a healthy stream arrives. That failure is invisible from the wire: the
+// stream is accepted, the framer reports no mismatch, and the timing generator
+// locks. Only the device's own mixer state shows it, so it gets a test.
+//
+// Expected values are the ALSA userspace BeBoB crate's parameter defaults,
+// protocols/bebob/src/maudio/special.rs.
+TEST(MAudioSpecialInitTests, AssertsMixerRoutingSoStreamsReachTheOutputs) {
+    AvcTestRig rig;
+    ASSERT_TRUE(rig.IsReady());
+
+    MAudioSpecialProtocol protocol(
+        rig.Bus(), rig.Bus(), rig.Route(), nullptr, nullptr, &rig.Timers(),
+        MAudioSpecialModel::FireWire1814);
+    protocol.UpdateRuntimeContext(rig.Route(), rig.Transport());
+
+    protocol.InitializeClock([](IOReturn) {});
+    EXPECT_EQ(rig.Drain(), 1U);
+    rig.Timers().Advance(Milliseconds(2500));
+
+    // The AV/C clock command is itself a block write to the FCP register, so
+    // select the parameter window by address rather than by submission order.
+    const std::vector<uint8_t>* window = nullptr;
+    for (size_t index = 0; index < rig.Bus().WriteCount(); ++index) {
+        const auto& candidate = rig.Bus().WriteAt(index);
+        if (candidate.address.addressHi == 0xFFC7 &&
+            candidate.address.addressLo == 0x0070'0000) {
+            window = &candidate.data;
+        }
+    }
+    ASSERT_NE(window, nullptr) << "no write to the parameter window";
+    ASSERT_EQ(window->size(), 160U) << "parameter window is 40 quadlets";
+
+    const auto quadletAt = [window](size_t offset) {
+        return (static_cast<uint32_t>((*window)[offset]) << 24) |
+               (static_cast<uint32_t>((*window)[offset + 1]) << 16) |
+               (static_cast<uint32_t>((*window)[offset + 2]) << 8) |
+               static_cast<uint32_t>((*window)[offset + 3]);
+    };
+
+    // No physical input is mixed in: playback must not arrive folded together
+    // with the analog inputs the device is simultaneously capturing.
+    EXPECT_EQ(quadletAt(0x90), 0x00000000U) << "analog/spdif/adat -> mixer";
+    // Stream pair 0 -> mixer pair 0, stream pair 1 -> mixer pair 1, encoded as
+    // 1 << (pair * 2 + mixer). This is the quadlet whose absence is silence.
+    EXPECT_EQ(quadletAt(0x94), 0x00000009U) << "stream -> mixer";
+    // Both headphone pairs follow those mixer pairs, encoded as flag << (pair * 16).
+    EXPECT_EQ(quadletAt(0x98), 0x00020001U) << "headphone pair source";
+    // Analog output pairs take the mixer output rather than the aux bus.
+    EXPECT_EQ(quadletAt(0x9c), 0x00000000U) << "analog output pair source";
+}
+
 } // namespace
