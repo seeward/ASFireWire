@@ -47,6 +47,34 @@ public struct BeBoBSwiftSyncState: Equatable, Sendable {
     public var sampleRateHz: UInt32 = 0
 }
 
+/// The DM1000 mailbox is half-duplex and single-occupancy: overlapping 1394
+/// requests are answered with rCode 4 (resp_conflict_error), and a drain that
+/// loses its request/response pairing silently returns another command's
+/// output. Every Virtual UART conversation holds this gate for the whole
+/// exchange, not just for a single transaction.
+actor BeBoBMailboxGate {
+    static let shared = BeBoBMailboxGate()
+
+    private var busy = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func acquire() async {
+        while busy {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                waiters.append(continuation)
+            }
+        }
+        busy = true
+    }
+
+    func release() {
+        busy = false
+        if !waiters.isEmpty {
+            waiters.removeFirst().resume()
+        }
+    }
+}
+
 extension ASFWDriverConnector {
     private static let beBoBAddrHi: UInt16 = 0xFFFF
     private static let beBoBReqAddrLo: UInt32 = 0xC802_1000
@@ -56,8 +84,20 @@ extension ASFWDriverConnector {
 
     // MARK: - Synchronous Block Transaction Helpers with Polling
 
+    /// Block transactions against this mailbox must be a whole number of
+    /// quadlets. An unaligned request-buffer write drops its tail: `"help\r\n"`
+    /// lands as `"help"` and the CR/LF is replaced by whatever the previous
+    /// command left at those offsets, so the device echoes a garbled line and
+    /// never executes it. Padding here is safe because the request envelope
+    /// carries the true byte count separately.
+    private static func quadletAligned(_ length: Int) -> Int {
+        (length + 3) & ~3
+    }
+
     private func performBlockWrite(deviceID: DeviceInstanceID, addressLow: UInt32, payload: Data) async -> Bool {
-        guard let handle = asyncBlockWrite(deviceID: deviceID, addressHigh: Self.beBoBAddrHi, addressLow: addressLow, payload: payload) else {
+        var padded = payload
+        padded.append(contentsOf: repeatElement(UInt8(0), count: Self.quadletAligned(payload.count) - payload.count))
+        guard let handle = asyncBlockWrite(deviceID: deviceID, addressHigh: Self.beBoBAddrHi, addressLow: addressLow, payload: padded) else {
             return false
         }
         for _ in 0..<20 {
@@ -70,13 +110,17 @@ extension ASFWDriverConnector {
     }
 
     private func performBlockRead(deviceID: DeviceInstanceID, addressLow: UInt32, length: UInt32) async -> Data? {
-        guard let handle = asyncBlockRead(deviceID: deviceID, addressHigh: Self.beBoBAddrHi, addressLow: addressLow, length: length) else {
+        // The stdout FIFO's tail page is almost never a multiple of four, so
+        // read the aligned length and trim. Asking for the raw length instead
+        // fails the transaction outright and loses the end of every response.
+        let aligned = UInt32(Self.quadletAligned(Int(length)))
+        guard let handle = asyncBlockRead(deviceID: deviceID, addressHigh: Self.beBoBAddrHi, addressLow: addressLow, length: aligned) else {
             return nil
         }
         for _ in 0..<20 {
-            if let result = getTransactionResult(handle: handle, initialPayloadCapacity: Int(length)) {
+            if let result = getTransactionResult(handle: handle, initialPayloadCapacity: Int(aligned)) {
                 if result.status == 0 {
-                    return result.payload
+                    return result.payload.prefix(Int(length))
                 }
                 return nil
             }
@@ -120,18 +164,89 @@ extension ASFWDriverConnector {
     // MARK: - Virtual UART High-Level Execution
 
     public func enableBeBoB1394Shell(deviceID: DeviceInstanceID) async -> Bool {
+        await BeBoBMailboxGate.shared.acquire()
+        defer { Task { await BeBoBMailboxGate.shared.release() } }
+
         let envelope = makeEnvelope(commandId: 1, opcode: 0x07, operandSize: 0, operand: 0)
         return await performBlockWrite(deviceID: deviceID, addressLow: Self.beBoBReqAddrLo, payload: envelope)
     }
 
-    public func executeBeBoBShellCommand(deviceID: DeviceInstanceID, command: String) async -> String? {
-        var cmd = command
-        if !cmd.hasSuffix("\n") {
-            cmd += "\r\n"
+    /// Drains available stdout characters from the DM1000 FIFO until it reports
+    /// empty. Serialised against every other mailbox conversation.
+    public func drainStdoutFIFO(deviceID: DeviceInstanceID, maxChunks: Int = 32) async -> String {
+        await BeBoBMailboxGate.shared.acquire()
+        defer { Task { await BeBoBMailboxGate.shared.release() } }
+
+        return await drainStdoutFIFOLocked(deviceID: deviceID, maxChunks: maxChunks)
+    }
+
+    /// Caller must already hold `BeBoBMailboxGate`.
+    private func drainStdoutFIFOLocked(deviceID: DeviceInstanceID,
+                                       maxChunks: Int,
+                                       quietRoundsBeforeStop: Int = 3) async -> String {
+        var result = ""
+        var quietRounds = 0
+
+        for _ in 0..<maxChunks {
+            let readEnv = makeEnvelope(commandId: 3, opcode: 0x08, operandSize: 1, operand: 1024)
+            guard await performBlockWrite(deviceID: deviceID, addressLow: Self.beBoBReqAddrLo, payload: readEnv) else {
+                break
+            }
+
+            guard let respEnvData = await performBlockRead(deviceID: deviceID, addressLow: Self.beBoBRespAddrLo, length: 12),
+                  let availableBytes = decodeResponseOperand(respEnvData) else {
+                break
+            }
+
+            // stdout arrives in bursts as the RTOS produces it, so a single
+            // empty poll does not mean the response is complete. Only a run of
+            // them does. The old terminator — "fewer than 128 bytes available"
+            // — stopped on the first short page, which is normally the *first*
+            // page of a reply rather than the last.
+            if availableBytes == 0 {
+                quietRounds += 1
+                if quietRounds >= quietRoundsBeforeStop {
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 15_000_000) // 15ms
+                continue
+            }
+            quietRounds = 0
+
+            let bytesToRead = min(availableBytes, 1024)
+            guard let stdoutData = await performBlockRead(deviceID: deviceID, addressLow: Self.beBoBRespBufAddrLo, length: bytesToRead) else {
+                break
+            }
+
+            if let str = String(data: stdoutData, encoding: .utf8) ?? String(data: stdoutData, encoding: .ascii), !str.isEmpty {
+                result += str
+            }
+
+            try? await Task.sleep(nanoseconds: 15_000_000) // 15ms inter-chunk yield
         }
+        return result
+    }
+
+    public func executeBeBoBShellCommand(deviceID: DeviceInstanceID, command: String) async -> String? {
+        // The shell terminates lines on CRLF. A bare LF is echoed but never
+        // executed, so normalise whatever the caller passed.
+        var cmd = command
+        while cmd.hasSuffix("\n") || cmd.hasSuffix("\r") {
+            cmd.removeLast()
+        }
+        cmd += "\r\n"
         guard let cmdData = cmd.data(using: .utf8) else { return nil }
 
-        // Step 1: Write command payload to Request Buffer (0xFFFF_C802_1040)
+        await BeBoBMailboxGate.shared.acquire()
+        defer { Task { await BeBoBMailboxGate.shared.release() } }
+
+        // Discard anything already queued so the drain below returns this
+        // command's output rather than the tail of the previous one.
+        _ = await drainStdoutFIFOLocked(deviceID: deviceID, maxChunks: 24, quietRoundsBeforeStop: 2)
+
+        // Step 1: Write command payload to Request Buffer (0xFFFF_C802_1040).
+        // performBlockWrite pads to a quadlet; the envelope below carries the
+        // true, unpadded length so the device consumes exactly the command.
         guard await performBlockWrite(deviceID: deviceID, addressLow: Self.beBoBReqBufAddrLo, payload: cmdData) else {
             return nil
         }
@@ -142,29 +257,12 @@ extension ASFWDriverConnector {
             return nil
         }
 
-        // Small yield to let ThreadX RTOS process the command line
-        try? await Task.sleep(nanoseconds: 20_000_000) // 20ms
+        // Yield to let ThreadX RTOS execute the shell command
+        try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
 
-        // Step 3: Request ReadShellChars envelope (Opcode 0x08, maxBytes=1024)
-        let readEnv = makeEnvelope(commandId: 3, opcode: 0x08, operandSize: 1, operand: 1024)
-        guard await performBlockWrite(deviceID: deviceID, addressLow: Self.beBoBReqAddrLo, payload: readEnv) else {
-            return nil
-        }
-
-        // Step 4: Read 12-byte response from AddrRegResp (0xFFFF_C802_9000)
-        guard let respEnvData = await performBlockRead(deviceID: deviceID, addressLow: Self.beBoBRespAddrLo, length: 12),
-              let availableBytes = decodeResponseOperand(respEnvData), availableBytes > 0 else {
-            return ""
-        }
-
-        let bytesToRead = min(availableBytes, 1024)
-
-        // Step 5: Read stdout payload from AddrRegRespBuf (0xFFFF_C802_9040)
-        guard let stdoutData = await performBlockRead(deviceID: deviceID, addressLow: Self.beBoBRespBufAddrLo, length: bytesToRead) else {
-            return ""
-        }
-
-        return String(data: stdoutData, encoding: .utf8) ?? String(data: stdoutData, encoding: .ascii)
+        // Step 3: Drain all output chunks from the FIFO until empty
+        let stdout = await drainStdoutFIFOLocked(deviceID: deviceID, maxChunks: 40)
+        return stdout.isEmpty ? "" : stdout
     }
 
     // MARK: - Telemetry Parsers
@@ -206,17 +304,36 @@ extension ASFWDriverConnector {
         guard let output = await executeBeBoBShellCommand(deviceID: deviceID, command: "sys avstat all") else {
             return nil
         }
+        // `sys avstat all` prints every latch unconditionally as
+        // "    SetTgInLock       : 00000001", so the presence of a label says
+        // nothing — only its value does. Testing `output.contains(label)` made
+        // all five flags read true whenever the command merely succeeded.
         var stat = BeBoBSwiftAvStat()
-        if output.contains("SetTgInLock") || output.contains("TGEN in lock") { stat.setTgInLock = true }
-        if output.contains("SetTgSytMiss") || output.contains("SytMiss") { stat.setTgSytMiss = true }
-        if output.contains("CIPMismatch") { stat.cipMismatch = true }
-        if output.contains("DBCMismatch") { stat.dbcMismatch = true }
-        if output.contains("HeaderMismatch") { stat.headerMismatch = true }
+        stat.setTgInLock = latchIsSet(output, "SetTgInLock")
+        stat.setTgSytMiss = latchIsSet(output, "SetTgSytMiss")
+        stat.cipMismatch = latchIsSet(output, "CIPMismatch")
+        stat.dbcMismatch = latchIsSet(output, "DBCMismatch")
+        stat.headerMismatch = latchIsSet(output, "HeaderMismatch")
         return stat
     }
 
+    /// True when the named `sys avstat` latch is printed with a non-zero value.
+    private func latchIsSet(_ output: String, _ label: String) -> Bool {
+        for line in output.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix(label),
+                  let colon = trimmed.firstIndex(of: ":") else { continue }
+            let value = trimmed[trimmed.index(after: colon)...]
+                .trimmingCharacters(in: .whitespaces)
+            if let parsed = UInt32(value, radix: 16), parsed != 0 { return true }
+        }
+        return false
+    }
+
     public func fetchBeBoBSyncState(deviceID: DeviceInstanceID) async -> BeBoBSwiftSyncState? {
-        guard let output = await executeBeBoBShellCommand(deviceID: deviceID, command: "fw sync show") else {
+        // `fw show` carries audio state, sync source and sample rate together.
+        // `fw sync show` is a valid command but reports only the sync source.
+        guard let output = await executeBeBoBShellCommand(deviceID: deviceID, command: "fw show") else {
             return nil
         }
         var sync = BeBoBSwiftSyncState()

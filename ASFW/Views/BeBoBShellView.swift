@@ -39,6 +39,7 @@ struct BeBoBShellView: View {
         .navigationTitle("BeBoB Diagnostics & Shell")
         .onAppear {
             viewModel.refreshTelemetry()
+            viewModel.drainFIFO()
         }
     }
 
@@ -285,6 +286,14 @@ struct BeBoBShellView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(viewModel.commandInput.isEmpty || viewModel.isExecuting)
+
+                Button {
+                    viewModel.drainFIFO()
+                } label: {
+                    Label("Drain Logs", systemImage: "arrow.down.doc")
+                }
+                .buttonStyle(.bordered)
+                .disabled(viewModel.isExecuting)
 
                 Button {
                     viewModel.clearTerminal()

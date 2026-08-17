@@ -162,7 +162,102 @@ done.
  internal sync, pll: 1
 ```
 * **Root Cause:** The DM1000/DM1001 contains a **DCO (Digitally Controlled Oscillator)**. When the device is unanchored (no incoming isochronous SYT stream), the clock watchdog task (`sub_200F8E30`) continuously times out, falls back to internal clock, re-calibrates the DCO, and logs to `/dev/uart1394`.
-* **Resolution:** As soon as ASFW establishes valid isochronous SYT transmit cadence, `SetTgInLock` asserts, the audio state becomes `Running`, and the recalibration loop ceases.
+### 5.4 The Historical Boot Log FIFO & 128-Byte Chunk Protocol
+When first opening the virtual shell, reading `0xFFFF_C802_9040` yields accumulated RTOS kernel startup traces:
+```text
+mod: scGpioModule
+base address of CHIP_ID_DM1001 is 0x40000000
+
+stack1394NoBusReset
+
+mod: bldCommand
+  bldCommandProcessor: config ROM returned max packet size of 512
+  allocated 16 bytes
+  allocated 128 bytes from memType 1
+  allocated 64 bytes from memType 1
+  allocated 144 bytes from memType 1
+  allocated 296 bytes from memType 5
+
+mod: modCMP
+mod: Services1394
+mod: AVCStack
+mod: avDriver
+mod: AvdCommands
+mod: modScAvDriver
+base address of CHIP_ID_DM1001 is 0x40000000
+Warp loaded.
+Warp started.
+DM1001 digital pll calibration...
+done.
+
+mod: streamingDriver
+mod: StreamingFrmWrk
+mod: modBmCommand
+mod: modOsCommand
+mod: modDm1001Commands
+```
+* **ThreadX RTOS Architecture Decoded:**
+  * `mod: scGpioModule` & `CHIP_ID_DM1001 @ 0x40000000`: Confirms physical ARM memory-mapped base address for the DM1001 audio coprocessor.
+  * `mod: modCMP` / `mod: Services1394` / `mod: AVCStack`: Connection Management Protocol and IEEE 1394 / AV/C stacks.
+  * `Warp loaded / Warp started`: BridgeCo's proprietary "Warp" DSP mixing and sample routing engine.
+  * `mod: streamingDriver` & `mod: StreamingFrmWrk`: The low-level DMA isochronous streaming pipeline.
+  * `mod: modBmCommand`, `mod: modOsCommand`, `mod: modDm1001Commands`: The diagnostic shell command trees.
+* **128-Byte Paging Behavior:** The BridgeCo UART controller transfers stdout in **128-byte pages** (`0x0080` in the `0x9000` response envelope operand).
+* **FIFO Queueing:** Single 128-byte reads do not immediately return the output of a newly typed command; instead, they advance the FIFO by 128 bytes through historical boot logs.
+* **Resolution (`drainStdoutFIFO` & UI Drain Logs Button):** A multi-chunk drain loop flushes the backlog so subsequent commands return their responses in real time.
+
+### 5.5 Quadlet Alignment — the defect that made the shell look alive but deaf
+
+Measured on hardware 2026-08-17. Block transactions against this mailbox must be
+a whole number of quadlets, and **an unaligned request-buffer write silently
+drops its tail.**
+
+`"help\r\n"` is 6 bytes, so only `"help"` lands. The CR/LF is replaced by
+whatever the *previous* command left at offsets 4–5 — after `"fw sync show"`
+those bytes are `y`,`n`. The request envelope still declares 6, so the device
+reads `help` + `yn`, echoes the printable characters, and — having never seen a
+CR — **never executes the line**:
+
+```text
+$ help
+helpynhelpynhelpynhelpyn…
+```
+
+The shell therefore appears to respond while only ever replaying its boot-log
+backlog 128 bytes per keypress. Reproduced byte-exact by priming the buffer,
+writing a 4-byte prefix, and declaring 6.
+
+**Rules that follow:**
+* Pad the request payload to a quadlet; keep the envelope operand at the **true,
+  unpadded** byte count so the device consumes exactly the command.
+* Round read lengths up and trim: the stdout tail page is almost never aligned,
+  and asking for the raw length fails the transaction outright.
+* Terminate the drain on a **run of empty polls**, not on a short page. Output
+  arrives in bursts, so the first short page is usually the *first* page of a
+  reply, not the last.
+* The shell terminates lines on **CRLF**. A bare LF is echoed but never runs.
+* The device echoes the command and prints its own prompt — a UI that
+  synthesises either splices duplicate text into the middle of the response.
+
+### 5.6 Command names, corrected against the device
+
+`sys avstat all` and `sys stat` are correct. `sys av` and `sys tgen` are
+*different* handlers from `sys avstat`, and `sys av tgen` is rejected outright.
+`fw sync show` is valid but reports only the sync source; **`fw show`** is the
+command that carries audio state, sync source and sample rate together.
+
+`sys avstat all` prints every latch unconditionally as
+`    SetTgInLock       : 00000001`, so testing for the presence of a label says
+nothing — only its value does. Use `sys avstat clr all`, soak, then re-read to
+tell a live fault from a sticky power-on latch.
+
+### 5.7 Dynamic Device Routing & Stale `DeviceInstanceId` After Bus Resets
+When a bus reset or hotplug occurs:
+```text
+[UserClient] NOTICE [UserClient] AsyncBlockWrite: instance=1 has no routable current binding (missing, suspended, retired, or quarantined)
+```
+* **Root Cause:** The driver's `DeviceRegistry` invalidates all live generation routes upon bus reset (`InvalidateLiveMappingsForBusReset`). When the device re-enumerates, it receives a new `DeviceInstanceId` (e.g. `instance=2`).
+* **Resolution:** The host layer must dynamically query `connector.getDiscoveredDevices()` to resolve the live `.ready` device ID and provide a UI target picker.
 
 ---
 
@@ -174,11 +269,19 @@ done.
 - [x] Zero-allocation string telemetry parsers.
 - [x] Async 1394 client transport in `ASFWDriver`.
 - [x] Swift driver connector bridge & ViewModels.
+- [x] Multi-chunk FIFO drain loop (`drainStdoutFIFO`) for complete command output retrieval.
+- [x] Dynamic `DeviceInstanceId` resolution and UI Target Device Picker.
 - [x] SwiftUI monospace terminal and telemetry dashboard in `ASFW.app`.
 - [x] 4 MCP control plane tools for automated agent investigation.
 - [x] 7 GoogleTest unit tests covering encoding, safety, and parsing.
 
 ### Ongoing Refinements
-1. **FIFO Multi-Chunk Draining:** Implement multi-read loops in `DriverConnector` to drain all accumulated background logs until the `1814>` prompt is reached.
-2. **Sequential Transaction Serialization:** Ensure complete exclusion across parallel MCP and UI polling loops to eliminate `rCode 4` collisions.
-3. **Automated Telemetry Assertion in SYT Calibration:** Use `asfw_bebob_get_streaming_stats` in automated tests to verify `sytDiffErr == 0` during active playback.
+1. **Telemetry parsers vs. real output:** `BeBoBStreamTelemetryParser` parses a
+   `rxPackets:  12450` shape the device never emits. Real `sys stat` output is a
+   **three-column table with no colons**, one column per iso channel. The unit
+   tests currently pass against an invented fixture.
+2. **MCP tool exposure:** the `asfw_bebob_*` tools require an app rebuild and
+   relaunch before they appear on the control plane. `tools/1814/bebob_shell.py`
+   drives the mailbox with raw block transactions and needs neither.
+3. **Automated Telemetry Assertion:** Use `asfw_bebob_get_streaming_stats` in
+   automated tests to verify `sytDiffErr == 0` during active playback.

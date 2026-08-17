@@ -21,6 +21,7 @@ final class BeBoBShellViewModel: ObservableObject {
 
     var commandHistory: [String] = []
     var historyIndex: Int = -1
+    private var isRefreshingTelemetry = false
 
     private let connector: ASFWDriverConnector
     private var cancellables = Set<AnyCancellable>()
@@ -85,7 +86,9 @@ final class BeBoBShellViewModel: ObservableObject {
             commandInput = ""
         }
 
-        appendToTerminal("\(cmd)\r\n")
+        // The device echoes the command line and prints its own prompt, so
+        // synthesising either here splices duplicate text into the middle of
+        // the response.
         isExecuting = true
         errorMessage = nil
 
@@ -96,26 +99,50 @@ final class BeBoBShellViewModel: ObservableObject {
                 if let output, !output.isEmpty {
                     self.appendToTerminal(output)
                 } else {
-                    self.appendToTerminal("(no output or timeout)\r\n")
+                    self.appendToTerminal("\(cmd)\r\n(no output or timeout)\r\n")
                 }
-                self.appendToTerminal("1814> ")
             }
         }
     }
 
     @MainActor
     func refreshTelemetry() {
+        // Three gated conversations take well over a second. Without this the
+        // 1 Hz poll timer queues refreshes faster than the mailbox can serve
+        // them and the backlog grows without bound.
+        guard !isRefreshingTelemetry else { return }
+        isRefreshingTelemetry = true
+
         let deviceID = resolveActiveDeviceID()
         Task {
-            async let statsTask = connector.fetchBeBoBStreamingStats(deviceID: deviceID)
-            async let avStatTask = connector.fetchBeBoBAvStat(deviceID: deviceID)
-            async let syncTask = connector.fetchBeBoBSyncState(deviceID: deviceID)
+            // Sequential on purpose. Each of these is a full mailbox
+            // conversation and the DM1000 serves exactly one at a time; issuing
+            // them concurrently only queues them behind the gate while making
+            // the completion order unpredictable.
+            let stats = await connector.fetchBeBoBStreamingStats(deviceID: deviceID)
+            let av = await connector.fetchBeBoBAvStat(deviceID: deviceID)
+            let sync = await connector.fetchBeBoBSyncState(deviceID: deviceID)
 
-            let (stats, av, sync) = await (statsTask, avStatTask, syncTask)
             await MainActor.run {
                 self.streamingStats = stats
                 self.avStat = av
                 self.syncState = sync
+                self.isRefreshingTelemetry = false
+            }
+        }
+    }
+
+    @MainActor
+    func drainFIFO() {
+        let deviceID = resolveActiveDeviceID()
+        isExecuting = true
+        Task {
+            let output = await connector.drainStdoutFIFO(deviceID: deviceID, maxChunks: 32)
+            await MainActor.run {
+                self.isExecuting = false
+                if !output.isEmpty {
+                    self.appendToTerminal(output)
+                }
             }
         }
     }
