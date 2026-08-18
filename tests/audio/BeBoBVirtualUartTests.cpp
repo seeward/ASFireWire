@@ -3,8 +3,6 @@
 
 #include <gtest/gtest.h>
 
-#include "ASFWDriver/Audio/Families/BeBoB/VirtualUart/BeBoBStreamTelemetryParser.hpp"
-#include "ASFWDriver/Audio/Families/BeBoB/VirtualUart/BeBoBTelemetryTypes.hpp"
 #include "ASFWDriver/Audio/Families/BeBoB/VirtualUart/BeBoBVirtualUartClient.hpp"
 #include "ASFWDriver/Audio/Families/BeBoB/VirtualUart/BeBoBVirtualUartCommand.hpp"
 
@@ -112,71 +110,6 @@ TEST(BeBoBVirtualUartTests, DecodeResponseEnvelope) {
     EXPECT_EQ(decoded->operand, 384U);
 }
 
-TEST(BeBoBVirtualUartTests, ParseStreamingStatsStdout) {
-    constexpr std::string_view sampleSysStat =
-        "rxPackets:       12450\n"
-        "onlyHeaders:      3112\n"
-        "rxEmptyPkt:          0\n"
-        "rxNoMem:             0\n"
-        "rxQFillLevel:       15 %\n"
-        "PoolFillLevel:      85 %\n"
-        "CtrDiffErr:          0\n"
-        "SytDiffErr:          0\n"
-        "BCOHdrErr:           0\n"
-        "pkt Future:          0\n"
-        "pkt Past:            0\n"
-        "pktSytDiff:         -4\n"
-        "SytOffset:        4096\n"
-        "SytCorr:             2\n";
-
-    const auto stats = BeBoBStreamTelemetryParser::ParseStreamingStats(sampleSysStat);
-    ASSERT_TRUE(stats.has_value());
-    EXPECT_EQ(stats->rxPackets, 12450U);
-    EXPECT_EQ(stats->onlyHeaders, 3112U);
-    EXPECT_EQ(stats->rxQFillLevelPct, 15U);
-    EXPECT_EQ(stats->poolFillLevelPct, 85U);
-    EXPECT_EQ(stats->bcoHdrErr, 0U);
-    EXPECT_EQ(stats->sytDiffErr, 0U);
-    EXPECT_EQ(stats->pktSytDiff, -4);
-    EXPECT_EQ(stats->sytOffset, 4096U);
-    EXPECT_EQ(stats->sytCorr, 2);
-}
-
-TEST(BeBoBVirtualUartTests, ParseAvStatStdout) {
-    constexpr std::string_view sampleAvStat =
-        "TGEN in lock: SetTgInLock\n"
-        "Framer Status: CIPMismatch: 0, DBCMismatch: 0\n";
-
-    const auto av = BeBoBStreamTelemetryParser::ParseAvStat(sampleAvStat);
-    ASSERT_TRUE(av.has_value());
-    EXPECT_TRUE(av->setTgInLock);
-    EXPECT_FALSE(av->cipMismatch);
-    EXPECT_FALSE(av->dbcMismatch);
-}
-
-TEST(BeBoBVirtualUartTests, ParseSyncStateStdout) {
-    constexpr std::string_view sampleSyncShow =
-        "Sampling Frequency = 48kHz\n"
-        "Sync Source        = Internal Sync\n"
-        "Audio State        = Running\n"
-        "Selected Iso Channels:\n"
-        "  LineIn .....     = 8\n"
-        "  SpdifAdatIn .... = 2\n"
-        "  SpdifAdatOut ... = 2\n"
-        "  MixerOut ...     = 8\n";
-
-    const auto sync = BeBoBStreamTelemetryParser::ParseSyncState(sampleSyncShow);
-    ASSERT_TRUE(sync.has_value());
-    EXPECT_EQ(sync->sampleRateHz, 48000U);
-    EXPECT_EQ(sync->syncSource, BeBoBSyncSource::kInternal);
-    EXPECT_EQ(sync->audioState, BeBoBAudioState::kRunning);
-    EXPECT_EQ(sync->lineInChannels, 8U);
-}
-
-// The DM1000 mailbox is single-occupancy. Two overlapping conversations are
-// answered with rCode 4 and, worse, a drain that loses its request/response
-// pairing re-serves the same 128-byte page indefinitely. The client is the sole
-// owner precisely so callers cannot do this to each other.
 TEST(BeBoBVirtualUartTests, SecondCommandQueuesInsteadOfSharingTheMailbox) {
     UartFixture fixture;
 

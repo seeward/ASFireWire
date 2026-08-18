@@ -75,7 +75,7 @@ extension ASFWMCPToolCatalog {
             visibility: .readOnly,
             readOnly: true,
             idempotent: false,
-            summary: "Query live BridgeCo isochronous streaming statistics (sys stat) including rxPackets, onlyHeaders, BCOHdrErr, SytDiffErr, and SYT offsets.",
+            summary: "Query live BridgeCo isochronous streaming statistics (sys stat). Returns fireWireOutput and fireWireInput — the columns whose dest/source is 1394 — plus otherStreams and rawStdout. sys stat prints one column per iso stream and the FireWire one is NOT the first, so read the named fields, never column order.",
             requiredProtocolHints: ["bebob"]
         ),
         ASFWMCPToolDefinition(
@@ -84,7 +84,7 @@ extension ASFWMCPToolCatalog {
             visibility: .readOnly,
             readOnly: true,
             idempotent: false,
-            summary: "Query DM1000 hardware framer & TGEN silicon lock error flags (sys avstat) including SetTgInLock, DBCMismatch, and CIPMismatch.",
+            summary: "Query DM1000 framer/TGEN silicon latches (sys avstat all). Returns setLatches — only the latches reading non-zero — plus named flags and rawStdout. Latches are STICKY: a set bit may be a power-on artifact, so discriminate with sys avstat clr all, soak, then re-read.",
             requiredProtocolHints: ["bebob"]
         ),
         ASFWMCPToolDefinition(
@@ -93,7 +93,7 @@ extension ASFWMCPToolCatalog {
             visibility: .readOnly,
             readOnly: true,
             idempotent: false,
-            summary: "Query master clock sync state (fw sync show) including audioState (Waiting for sync, Running) and selected syncSource.",
+            summary: "Query master clock and engine state via fw show: audioState (Waiting for sync, Running), syncSource, sampleRateHz, the digital format (inputSource/outputSource, SPDIF or ADAT) and the iso channel assignments.",
             requiredProtocolHints: ["bebob"]
         ),
         ASFWMCPToolDefinition(

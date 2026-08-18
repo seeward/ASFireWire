@@ -1535,6 +1535,20 @@ private extension ASFWMCPCore {
         return (true, stdoutStr)
     }
 
+    /// One `sys stat` column, tagged with the stream it belongs to so a reader
+    /// can never mistake the device's internal path for the FireWire one.
+    private static func streamColumnValue(_ column: BeBoBStreamColumn) -> ASFWMCPValue {
+        var fields: [String: ASFWMCPValue] = [
+            "isoChannel": .int(column.isoChannel),
+            "endpoint": .string(column.endpoint.rawValue),
+            "speed": .int(column.speed)
+        ]
+        for (label, value) in column.counters {
+            fields[label] = .int(Int(value))
+        }
+        return .object(fields)
+    }
+
     func bebobStreamingStatsResult(
         toolName: String,
         decoder: ASFWMCPToolArgumentDecoder
@@ -1549,10 +1563,28 @@ private extension ASFWMCPCore {
                 return .failure(toolName: toolName, code: .capabilityUnavailable, reason: "Failed to communicate with BeBoB Virtual UART.")
             }
 
-            return .success(toolName: toolName, data: .object([
+            // `sys stat` prints one column per isochronous stream. The
+            // FireWire-facing column is identified by its dest/source row, not
+            // by position: on the 1814 it is column 1 of the output table and
+            // column 0 of the input table.
+            var data: [String: ASFWMCPValue] = [
                 "kind": .string("bebobStreamingStats"),
                 "rawStdout": .string(stdout)
-            ]))
+            ]
+            if let stats = BeBoBShellTelemetryParser.parseStreamingStats(stdout) {
+                if let out = stats.fireWireOutput {
+                    data["fireWireOutput"] = Self.streamColumnValue(out)
+                }
+                if let input = stats.fireWireInput {
+                    data["fireWireInput"] = Self.streamColumnValue(input)
+                }
+                data["otherStreams"] = .array(
+                    (stats.outputs + stats.inputs)
+                        .filter { $0.endpoint != .fireWire }
+                        .map(Self.streamColumnValue)
+                )
+            }
+            return .success(toolName: toolName, data: .object(data))
         } catch {
             return malformedToolResult(toolName, reason: error.localizedDescription)
         }
@@ -1572,14 +1604,34 @@ private extension ASFWMCPCore {
                 return .failure(toolName: toolName, code: .capabilityUnavailable, reason: "Failed to communicate with BeBoB Virtual UART.")
             }
 
-            return .success(toolName: toolName, data: .object([
+            // Every latch is printed unconditionally as
+            // "    SetTgInLock       : 00000001", so testing for the presence of
+            // a label made all four of these read true whenever the command
+            // merely succeeded. Only the (hex) value carries information.
+            var data: [String: ASFWMCPValue] = [
                 "kind": .string("bebobSiliconStatus"),
-                "setTgInLock": .bool(stdout.contains("SetTgInLock") || stdout.contains("TGEN in lock")),
-                "cipMismatch": .bool(stdout.contains("CIPMismatch")),
-                "dbcMismatch": .bool(stdout.contains("DBCMismatch")),
-                "headerMismatch": .bool(stdout.contains("HeaderMismatch")),
                 "rawStdout": .string(stdout)
-            ]))
+            ]
+            if let stat = BeBoBShellTelemetryParser.parseAvStat(stdout) {
+                data["setTgInLock"] = .bool(stat.setTgInLock)
+                data["setTgSytMiss"] = .bool(stat.setTgSytMiss)
+                data["cipMismatch"] = .bool(stat.cipMismatch)
+                data["dbcMismatch"] = .bool(stat.dbcMismatch)
+                data["fmtMismatch"] = .bool(stat.fmtMismatch)
+                data["sidMismatch"] = .bool(stat.sidMismatch)
+                data["headerMismatch"] = .bool(stat.headerMismatch)
+                // These latches are STICKY: a set bit may be a power-on artifact
+                // rather than a live fault. Discriminate with
+                // `sys avstat clr all`, soak, then re-read.
+                data["setLatches"] = .array(stat.setLatches.map {
+                    .object([
+                        "block": .string($0.block),
+                        "label": .string($0.label),
+                        "value": .int(Int($0.value))
+                    ])
+                })
+            }
+            return .success(toolName: toolName, data: .object(data))
         } catch {
             return malformedToolResult(toolName, reason: error.localizedDescription)
         }
@@ -1594,15 +1646,29 @@ private extension ASFWMCPCore {
             let nodeId = try decoder.uint32("nodeId")
             let generation = try decoder.uint32("generation")
 
-            let (ok, stdout) = await executeBeBoBVirtualUart(deviceID: deviceID, nodeId: nodeId, generation: generation, command: "fw sync show")
+            // `fw show` carries audio state, sample rate, digital format and the
+            // iso channel assignments together; `fw sync show` reports only the
+            // sync source.
+            let (ok, stdout) = await executeBeBoBVirtualUart(deviceID: deviceID, nodeId: nodeId, generation: generation, command: "fw show")
             guard ok else {
                 return .failure(toolName: toolName, code: .capabilityUnavailable, reason: "Failed to communicate with BeBoB Virtual UART.")
             }
 
-            return .success(toolName: toolName, data: .object([
+            var data: [String: ASFWMCPValue] = [
                 "kind": .string("bebobSyncState"),
                 "rawStdout": .string(stdout)
-            ]))
+            ]
+            if let sync = BeBoBShellTelemetryParser.parseSyncState(stdout) {
+                data["audioState"] = .string(sync.audioState)
+                data["syncSource"] = .string(sync.syncSource)
+                data["sampleRateHz"] = .int(Int(sync.sampleRateHz))
+                data["inputSource"] = .string(sync.inputSource)
+                data["outputSource"] = .string(sync.outputSource)
+                data["isoChannels"] = .object(
+                    sync.isoChannels.mapValues { ASFWMCPValue.int($0) }
+                )
+            }
+            return .success(toolName: toolName, data: .object(data))
         } catch {
             return malformedToolResult(toolName, reason: error.localizedDescription)
         }

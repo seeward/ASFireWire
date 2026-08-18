@@ -313,30 +313,4 @@ void BeBoBVirtualUartClient::RunCommand(PendingCommand request) {
     });
 }
 
-void BeBoBVirtualUartClient::ReadStreamingStats(
-    std::function<void(std::optional<BeBoBStreamingStats>)> completion) {
-    if (!completion) return;
-    ExecuteCommand("sys stat", [completion = std::move(completion)](std::string stdoutText) {
-        completion(BeBoBStreamTelemetryParser::ParseStreamingStats(stdoutText));
-    });
-}
-
-void BeBoBVirtualUartClient::ReadAvStat(
-    std::function<void(std::optional<BeBoBAvStat>)> completion) {
-    if (!completion) return;
-    ExecuteCommand("sys avstat all", [completion = std::move(completion)](std::string stdoutText) {
-        completion(BeBoBStreamTelemetryParser::ParseAvStat(stdoutText));
-    });
-}
-
-void BeBoBVirtualUartClient::ReadSyncState(
-    std::function<void(std::optional<BeBoBSyncState>)> completion) {
-    if (!completion) return;
-    // `fw show` carries audio state, sync source and sample rate together;
-    // `fw sync show` is valid but reports only the sync source.
-    ExecuteCommand("fw show", [completion = std::move(completion)](std::string stdoutText) {
-        completion(BeBoBStreamTelemetryParser::ParseSyncState(stdoutText));
-    });
-}
-
 } // namespace ASFW::Audio::Families::BeBoB::VirtualUart

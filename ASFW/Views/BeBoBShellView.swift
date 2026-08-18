@@ -187,14 +187,16 @@ struct BeBoBShellView: View {
 
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                     flagBadge(name: "SetTgInLock", isGood: viewModel.avStat?.setTgInLock ?? false)
+                    flagBadge(name: "SYT In Window", isGood: !(viewModel.avStat?.setTgSytMiss ?? false))
                     flagBadge(name: "DBC In-Phase", isGood: !(viewModel.avStat?.dbcMismatch ?? false))
+                    flagBadge(name: "FMT Valid", isGood: !(viewModel.avStat?.fmtMismatch ?? false))
                     flagBadge(name: "CIP Valid", isGood: !(viewModel.avStat?.cipMismatch ?? false))
                     flagBadge(name: "Header Valid", isGood: !(viewModel.avStat?.headerMismatch ?? false))
                 }
             }
             .padding(6)
         } label: {
-            Text("DM1000 Framer / TGEN Latches")
+            Text("DM1000 Framer / TGEN Latches — sticky; clear with `sys avstat clr all`, soak, re-read")
         }
     }
 
@@ -206,19 +208,70 @@ struct BeBoBShellView: View {
 
                 Divider()
 
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                    metricCard(title: "rxPackets", value: "\(viewModel.streamingStats?.rxPackets ?? 0)", color: .blue)
-                    metricCard(title: "onlyHeaders", value: "\(viewModel.streamingStats?.onlyHeaders ?? 0)", color: .secondary)
-                    metricCard(title: "BCOHdrErr", value: "\(viewModel.streamingStats?.bcoHdrErr ?? 0)", color: (viewModel.streamingStats?.bcoHdrErr ?? 0) > 0 ? .red : .green)
-                    metricCard(title: "SytDiffErr", value: "\(viewModel.streamingStats?.sytDiffErr ?? 0)", color: (viewModel.streamingStats?.sytDiffErr ?? 0) > 0 ? .red : .green)
+                // `sys stat` prints one column per isochronous stream, and the
+                // FireWire-facing one is not the first: on the 1814 the device's
+                // internal S/PDIF-ADAT path is printed ahead of ours. Each card
+                // names the iso channel it came from so the two can't be mixed.
+                if let ours = viewModel.streamingStats?.fireWireInput {
+                    streamMetricGrid(
+                        title: "Host → device (our transmit), iso ch \(ours.isoChannel)",
+                        labels: ["rxPackets", "onlyHeaders", "rxEmptyPkt", "rxNoMem",
+                                 "BCOHdrErr", "CtrDiffErr", "SytDiffErr", "rxQFillLevel"],
+                        column: ours
+                    )
+                }
 
-                    metricCard(title: "pkt Future", value: "\(viewModel.streamingStats?.pktFuture ?? 0)", color: (viewModel.streamingStats?.pktFuture ?? 0) > 0 ? .orange : .secondary)
-                    metricCard(title: "pkt Past", value: "\(viewModel.streamingStats?.pktPast ?? 0)", color: (viewModel.streamingStats?.pktPast ?? 0) > 0 ? .red : .secondary)
-                    metricCard(title: "rxQ Fill Level", value: "\(viewModel.streamingStats?.rxQFillLevelPct ?? 0)%", color: .purple)
-                    metricCard(title: "SytCorr (ticks)", value: "\(viewModel.streamingStats?.sytCorr ?? 0)", color: .teal)
+                if let ours = viewModel.streamingStats?.fireWireOutput {
+                    streamMetricGrid(
+                        title: "Device → host (our capture), iso ch \(ours.isoChannel)",
+                        labels: ["txWrite", "txDelayed", "txQFillLevel", "txQEmpty",
+                                 "pkt Future", "pkt Past", "SytOffset", "SytCorr"],
+                        column: ours
+                    )
+                }
+
+                if viewModel.streamingStats?.noActiveOutputStreams == true {
+                    Text("No active output streams.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .padding(6)
+        }
+    }
+
+    private func streamMetricGrid(title: String, labels: [String],
+                                  column: BeBoBStreamColumn) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()),
+                                GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                ForEach(labels, id: \.self) { label in
+                    if let value = column.counters[label] {
+                        metricCard(
+                            title: BeBoBStreamColumn.percentLabels.contains(label) ? "\(label) %" : label,
+                            value: "\(value)",
+                            color: metricColor(label: label, value: value, column: column)
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /// Colour follows the severity character the firmware itself printed for the
+    /// row ("W", "E", "S"), rather than a hardcoded opinion per counter.
+    private func metricColor(label: String, value: Int64,
+                             column: BeBoBStreamColumn) -> Color {
+        guard value > 0 else { return .green }
+        switch column.severity[label] {
+        case "E": return .red
+        case "W": return .orange
+        case "S": return .teal
+        default: return .blue
         }
     }
 
@@ -235,7 +288,7 @@ struct BeBoBShellView: View {
                     quickButton(title: "🔒 Silicon Status", cmd: "sys avstat all")
                     quickButton(title: "⏱ Clock & Sync", cmd: "fw sync show")
                     quickButton(title: "📝 Toggle SytLog", cmd: "sys sytlog")
-                    quickButton(title: "🧵 ThreadX Tasks", cmd: "os th")
+                    quickButton(title: "🧵 RTOS Tasks", cmd: "os th")
                     quickButton(title: "🧹 Reset Stats", cmd: "sys stat reset")
                 }
             }

@@ -11,9 +11,9 @@ final class BeBoBShellViewModel: ObservableObject {
     @Published var isExecuting: Bool = false
     @Published var terminalOutput: String = "CMDLINE tool ready for commands. Try 'help' for help.\r\n1814> "
     @Published var commandInput: String = ""
-    @Published var streamingStats: BeBoBSwiftStreamingStats? = nil
-    @Published var avStat: BeBoBSwiftAvStat? = nil
-    @Published var syncState: BeBoBSwiftSyncState? = nil
+    @Published var streamingStats: BeBoBStreamingStats? = nil
+    @Published var avStat: BeBoBAvStat? = nil
+    @Published var syncState: BeBoBSyncState? = nil
     @Published var isAutoPolling: Bool = false
     @Published var availableDevices: [FWDeviceInfo] = []
     @Published var selectedDeviceID: DeviceInstanceID = DeviceInstanceID(1)

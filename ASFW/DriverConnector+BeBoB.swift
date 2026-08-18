@@ -5,48 +5,6 @@
 
 import Foundation
 
-public struct BeBoBSwiftStreamingStats: Equatable, Sendable {
-    public var rxPackets: UInt64 = 0
-    public var onlyHeaders: UInt64 = 0
-    public var rxEmptyPkt: UInt64 = 0
-    public var rxNoMem: UInt64 = 0
-    public var rxToLong: UInt64 = 0
-    public var rxPktToLong: UInt64 = 0
-    public var rxPktToSmall: UInt64 = 0
-    public var rxDmaBusy: UInt64 = 0
-    public var rxQFull: UInt64 = 0
-    public var rxQFillLevelPct: UInt32 = 0
-    public var poolFillLevelPct: UInt32 = 0
-
-    public var ctrDiffErr: UInt64 = 0
-    public var sytDiffErr: UInt64 = 0
-    public var sumDiffErr: UInt64 = 0
-    public var bcoHdrErr: UInt64 = 0
-
-    public var pktFuture: UInt64 = 0
-    public var pktPast: UInt64 = 0
-    public var pktSytDiff: Int32 = 0
-    public var sytOffset: UInt32 = 0
-    public var sytCorr: Int32 = 0
-
-    public var rxIsr: UInt64 = 0
-    public var txIsr: UInt64 = 0
-}
-
-public struct BeBoBSwiftAvStat: Equatable, Sendable {
-    public var setTgInLock: Bool = false
-    public var setTgSytMiss: Bool = false
-    public var cipMismatch: Bool = false
-    public var dbcMismatch: Bool = false
-    public var headerMismatch: Bool = false
-}
-
-public struct BeBoBSwiftSyncState: Equatable, Sendable {
-    public var audioState: String = "Unknown"
-    public var syncSource: String = "Unknown"
-    public var sampleRateHz: UInt32 = 0
-}
-
 /// The DM1000 mailbox is half-duplex and single-occupancy: overlapping 1394
 /// requests are answered with rCode 4 (resp_conflict_error), and a drain that
 /// loses its request/response pairing silently returns another command's
@@ -257,7 +215,7 @@ extension ASFWDriverConnector {
             return nil
         }
 
-        // Yield to let ThreadX RTOS execute the shell command
+        // Yield to let the KnOS shell task execute the command
         try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
 
         // Step 3: Drain all output chunks from the FIFO until empty
@@ -267,108 +225,36 @@ extension ASFWDriverConnector {
 
     // MARK: - Telemetry Parsers
 
-    public func fetchBeBoBStreamingStats(deviceID: DeviceInstanceID) async -> BeBoBSwiftStreamingStats? {
+    /// `sys stat` prints one COLUMN PER ISOCHRONOUS STREAM, so a parser that
+    /// takes the first value on each row reads whichever stream the firmware
+    /// happens to print first. On the 1814 that is iso channel 58 — the
+    /// device's internal S/PDIF-ADAT output — not the FireWire stream. Callers
+    /// wanting "our" numbers must go through `fireWireOutput` / `fireWireInput`,
+    /// which select on the `dest`/`source` row.
+    public func fetchBeBoBStreamingStats(deviceID: DeviceInstanceID) async -> BeBoBStreamingStats? {
         guard let output = await executeBeBoBShellCommand(deviceID: deviceID, command: "sys stat") else {
             return nil
         }
-        var stats = BeBoBSwiftStreamingStats()
-        let lines = output.components(separatedBy: .newlines)
-        for line in lines {
-            if line.contains("rxPackets") { stats.rxPackets = extractUInt64(line, "rxPackets") }
-            if line.contains("onlyHeaders") { stats.onlyHeaders = extractUInt64(line, "onlyHeaders") }
-            if line.contains("rxEmptyPkt") { stats.rxEmptyPkt = extractUInt64(line, "rxEmptyPkt") }
-            if line.contains("rxNoMem") { stats.rxNoMem = extractUInt64(line, "rxNoMem") }
-            if line.contains("rxToLong") { stats.rxToLong = extractUInt64(line, "rxToLong") }
-            if line.contains("rxPktToLong") { stats.rxPktToLong = extractUInt64(line, "rxPktToLong") }
-            if line.contains("rxPktToSmall") { stats.rxPktToSmall = extractUInt64(line, "rxPktToSmall") }
-            if line.contains("rxDmaBusy") { stats.rxDmaBusy = extractUInt64(line, "rxDmaBusy") }
-            if line.contains("rxQFull") { stats.rxQFull = extractUInt64(line, "rxQFull") }
-            if line.contains("rxQFillLevel") { stats.rxQFillLevelPct = UInt32(extractUInt64(line, "rxQFillLevel")) }
-            if line.contains("PoolFillLevel") { stats.poolFillLevelPct = UInt32(extractUInt64(line, "PoolFillLevel")) }
-
-            if line.contains("CtrDiffErr") { stats.ctrDiffErr = extractUInt64(line, "CtrDiffErr") }
-            if line.contains("SytDiffErr") { stats.sytDiffErr = extractUInt64(line, "SytDiffErr") }
-            if line.contains("SumDiffErr") { stats.sumDiffErr = extractUInt64(line, "SumDiffErr") }
-            if line.contains("BCOHdrErr") { stats.bcoHdrErr = extractUInt64(line, "BCOHdrErr") }
-
-            if line.contains("pkt Future") { stats.pktFuture = extractUInt64(line, "pkt Future") }
-            if line.contains("pkt Past") { stats.pktPast = extractUInt64(line, "pkt Past") }
-            if line.contains("pktSytDiff") { stats.pktSytDiff = Int32(extractInt64(line, "pktSytDiff")) }
-            if line.contains("SytOffset") { stats.sytOffset = UInt32(extractUInt64(line, "SytOffset")) }
-            if line.contains("SytCorr") { stats.sytCorr = Int32(extractInt64(line, "SytCorr")) }
-        }
-        return stats
+        return BeBoBShellTelemetryParser.parseStreamingStats(output)
     }
 
-    public func fetchBeBoBAvStat(deviceID: DeviceInstanceID) async -> BeBoBSwiftAvStat? {
+    /// `sys avstat all` prints every latch unconditionally as
+    /// "    SetTgInLock       : 00000001", so the presence of a label says
+    /// nothing — only its value does, and the values are hex.
+    public func fetchBeBoBAvStat(deviceID: DeviceInstanceID) async -> BeBoBAvStat? {
         guard let output = await executeBeBoBShellCommand(deviceID: deviceID, command: "sys avstat all") else {
             return nil
         }
-        // `sys avstat all` prints every latch unconditionally as
-        // "    SetTgInLock       : 00000001", so the presence of a label says
-        // nothing — only its value does. Testing `output.contains(label)` made
-        // all five flags read true whenever the command merely succeeded.
-        var stat = BeBoBSwiftAvStat()
-        stat.setTgInLock = latchIsSet(output, "SetTgInLock")
-        stat.setTgSytMiss = latchIsSet(output, "SetTgSytMiss")
-        stat.cipMismatch = latchIsSet(output, "CIPMismatch")
-        stat.dbcMismatch = latchIsSet(output, "DBCMismatch")
-        stat.headerMismatch = latchIsSet(output, "HeaderMismatch")
-        return stat
+        return BeBoBShellTelemetryParser.parseAvStat(output)
     }
 
-    /// True when the named `sys avstat` latch is printed with a non-zero value.
-    private func latchIsSet(_ output: String, _ label: String) -> Bool {
-        for line in output.components(separatedBy: .newlines) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard trimmed.hasPrefix(label),
-                  let colon = trimmed.firstIndex(of: ":") else { continue }
-            let value = trimmed[trimmed.index(after: colon)...]
-                .trimmingCharacters(in: .whitespaces)
-            if let parsed = UInt32(value, radix: 16), parsed != 0 { return true }
-        }
-        return false
-    }
-
-    public func fetchBeBoBSyncState(deviceID: DeviceInstanceID) async -> BeBoBSwiftSyncState? {
-        // `fw show` carries audio state, sync source and sample rate together.
-        // `fw sync show` is a valid command but reports only the sync source.
+    /// `fw show` carries audio state, sync source, sample rate, digital format
+    /// and the iso channel assignments together. `fw sync show` is a valid
+    /// command but reports only the sync source.
+    public func fetchBeBoBSyncState(deviceID: DeviceInstanceID) async -> BeBoBSyncState? {
         guard let output = await executeBeBoBShellCommand(deviceID: deviceID, command: "fw show") else {
             return nil
         }
-        var sync = BeBoBSwiftSyncState()
-        if output.contains("Waiting for sync") { sync.audioState = "Waiting for sync" }
-        else if output.contains("Running") { sync.audioState = "Running" }
-        else if output.contains("Idle") { sync.audioState = "Idle" }
-        else if output.contains("Stop") { sync.audioState = "Stop" }
-
-        if output.contains("Internal Digital Input Sync") { sync.syncSource = "Internal Digital Input" }
-        else if output.contains("Internal Sync") { sync.syncSource = "Internal" }
-        else if output.contains("Adat External Sync") { sync.syncSource = "ADAT External" }
-        else if output.contains("Spdif External Sync") { sync.syncSource = "S/PDIF External" }
-        else if output.contains("Word Clock Sync") { sync.syncSource = "Word Clock" }
-
-        if output.contains("48kHz") { sync.sampleRateHz = 48000 }
-        else if output.contains("44.1kHz") { sync.sampleRateHz = 44100 }
-        else if output.contains("96kHz") { sync.sampleRateHz = 96000 }
-        else if output.contains("88.2kHz") { sync.sampleRateHz = 88200 }
-        else if output.contains("192kHz") { sync.sampleRateHz = 192000 }
-        return sync
-    }
-
-    private func extractUInt64(_ text: String, _ key: String) -> UInt64 {
-        guard let range = text.range(of: key) else { return 0 }
-        let sub = text[range.upperBound...]
-        let digits = sub.trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: ":=")))
-        let scanner = Scanner(string: digits)
-        return scanner.scanUInt64() ?? 0
-    }
-
-    private func extractInt64(_ text: String, _ key: String) -> Int64 {
-        guard let range = text.range(of: key) else { return 0 }
-        let sub = text[range.upperBound...]
-        let digits = sub.trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: ":=")))
-        let scanner = Scanner(string: digits)
-        return scanner.scanInt64() ?? 0
+        return BeBoBShellTelemetryParser.parseSyncState(output)
     }
 }

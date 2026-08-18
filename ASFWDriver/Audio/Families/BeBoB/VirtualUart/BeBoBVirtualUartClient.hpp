@@ -5,8 +5,6 @@
 
 #pragma once
 
-#include "BeBoBStreamTelemetryParser.hpp"
-#include "BeBoBTelemetryTypes.hpp"
 #include "BeBoBVirtualUartCommand.hpp"
 
 #include "../../../../Async/Interfaces/IFireWireBusOps.hpp"
@@ -66,15 +64,6 @@ public:
 
     /// True while a conversation owns the mailbox.
     [[nodiscard]] bool Busy() const noexcept { return busy_; }
-
-    /// Runs `sys stat` and parses the streaming telemetry into a structured model.
-    void ReadStreamingStats(std::function<void(std::optional<BeBoBStreamingStats>)> completion);
-
-    /// Runs `sys avstat` and parses the silicon lock flags.
-    void ReadAvStat(std::function<void(std::optional<BeBoBAvStat>)> completion);
-
-    /// Runs `fw sync show` and parses the master clock sync state.
-    void ReadSyncState(std::function<void(std::optional<BeBoBSyncState>)> completion);
 
     void Cancel() noexcept;
 
