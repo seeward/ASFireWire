@@ -2,6 +2,8 @@
 
 #include "DiceProfileBuilder.hpp"
 #include "../Common/CommonProfileBuilder.hpp"
+#include "../../../Logging/Logging.hpp"
+#include "../../../DeviceProfiles/Audio/AudioDeviceIds.hpp"
 
 namespace ASFW::Audio::Families::DICE {
 
@@ -53,10 +55,33 @@ BuildProfile(const Devices::ProfileBuildContext& context) noexcept {
             if (context.staticPlan.profileBuilder == ProfileBuilderId::AlesisMultiMix) {
                 profile.txPacketPolicy.initializeNonAudioSlots = false;
             }
+            // Midas Venice F16/F24/F32: derive marketing name from measured geometry.
+            // All three share the same DICE identity (product 0x001) and differ
+            // only in physical channel count. Unrecognized geometry keeps the
+            // catalog name.
+            if (context.staticPlan.profileBuilder == ProfileBuilderId::MidasVeniceF32) {
+                const char* derivedName = nullptr;
+                switch (facts->streams.hostInputPcmChannels) {
+                    case 16: derivedName = DeviceProfiles::Audio::kMidasVeniceF16ModelName; break;
+                    case 24: derivedName = DeviceProfiles::Audio::kMidasVeniceF24ModelName; break;
+                    case 32: derivedName = DeviceProfiles::Audio::kMidasVeniceF32ModelName; break;
+                    default: break;
+                }
+                if (derivedName) {
+                    profile.deviceName = derivedName;
+                }
+                ASFW_LOG(DICE, "DiceProfileBuilder: Midas Venice geometry %u/%u \u2192 name '%s'",
+                         facts->streams.hostInputPcmChannels,
+                         facts->streams.hostOutputPcmChannels,
+                         profile.deviceName.c_str());
+            }
             break;
         default:
             return std::unexpected(Devices::ProfileBuildError::UnsupportedBuilder);
     }
+    // Carry device-reported channel names to the nub for CoreAudio.
+    profile.deviceInputChannelNames = facts->inputLabels;
+    profile.deviceOutputChannelNames = facts->outputLabels;
     Common::AddDefaultTiming(profile, 500);
     for (uint8_t i = 0; i < profile.timingCount; ++i) {
         const uint32_t rate = profile.timing[i].sampleRateHz;

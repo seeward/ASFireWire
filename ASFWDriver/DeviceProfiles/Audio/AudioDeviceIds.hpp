@@ -98,7 +98,11 @@ inline constexpr const char* kPhase88RackFwModelName  = "PHASE 88 Rack FW";
 inline constexpr const char* kAlesisVendorName        = "Alesis";
 inline constexpr const char* kAlesisMultiMixModelName = "MultiMix FireWire";
 inline constexpr const char* kMidasVendorName         = "Midas";
-inline constexpr const char* kMidasVeniceModelName    = "Venice F32";
+inline constexpr const char* kMidasVeniceF16ModelName  = "Venice F16";
+inline constexpr const char* kMidasVeniceF24ModelName  = "Venice F24";
+inline constexpr const char* kMidasVeniceF32ModelName  = "Venice F32";
+// Catalog name (used when measured geometry doesn't match a known variant).
+inline constexpr const char* kMidasVeniceModelName     = kMidasVeniceF32ModelName;
 inline constexpr const char* kPreSonusVendorName      = "PreSonus";
 inline constexpr const char* kStudioLive1602ModelName = "StudioLive 16.0.2";
 inline constexpr const char* kStudioLive1642ModelName = "StudioLive 16.4.2";

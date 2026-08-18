@@ -8,6 +8,7 @@
 
 #include <DriverKit/IOService.h>
 #include <DriverKit/OSDictionary.h>
+#include <DriverKit/OSArray.h>
 #include <DriverKit/OSData.h>
 #include <DriverKit/OSNumber.h>
 #include <DriverKit/OSSharedPtr.h>
@@ -147,6 +148,26 @@ bool AudioNubPublisher::EnsureNub(
         properties->setObject(Keys::kDeviceName, deviceName.get());
         properties->setObject(Keys::kVendorName, vendorName.get());
         properties->setObject(Keys::kCoreAudioUid, coreAudioUid.get());
+
+        // Device-reported channel names from DICE TX/RX name sections.
+        // Set as IOArray properties so AudioDriverConfig picks them up.
+        auto setChannelNameArray = [&properties](const char* key,
+                                               const std::vector<std::string>& names) {
+            if (names.empty()) return;
+            auto* arr = OSArray::withCapacity(static_cast<uint32_t>(names.size()));
+            if (!arr) return;
+            for (const auto& name : names) {
+                auto* s = OSString::withCString(name.c_str());
+                if (s) { arr->setObject(s); s->release(); }
+            }
+            auto wrapped = OSSharedPtr(arr, OSNoRetain);
+            properties->setObject(key, wrapped.get());
+        };
+        setChannelNameArray(Keys::kInputChannelNames,
+                            profile.deviceInputChannelNames);
+        setChannelNameArray(Keys::kOutputChannelNames,
+                            profile.deviceOutputChannelNames);
+
         kr = nubService->SetProperties(properties.get());
         if (kr != kIOReturnSuccess) {
             ASFW_LOG_ERROR(Audio,

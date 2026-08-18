@@ -125,6 +125,12 @@ struct ResolvedAudioEndpointProfile final {
     uint8_t timingCount{0};
     std::vector<FacetDescriptor> facets;
 
+    // Device-reported channel names from DICE TX/RX name sections.
+    // In-memory only — not wire-serialized; carried to the nub by
+    // AudioNubPublisher for IORegistry channel name properties.
+    std::vector<std::string> deviceInputChannelNames;
+    std::vector<std::string> deviceOutputChannelNames;
+
     [[nodiscard]] const RateTimingPolicy* TimingFor(uint32_t sampleRateHz) const noexcept {
         for (uint8_t i = 0; i < timingCount; ++i) {
             if (timing[i].sampleRateHz == sampleRateHz) {
