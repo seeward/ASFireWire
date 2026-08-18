@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <expected>
 #include <utility>
 
@@ -28,6 +29,62 @@ namespace {
 using FamilyId = DeviceProfiles::Audio::AudioFamilyProviderId;
 using ProbePolicyId = DeviceProfiles::Audio::ProbePolicyId;
 using ProfileBuilderId = DeviceProfiles::Audio::ProfileBuilderId;
+
+enum class ProbeBootstrap : uint8_t {
+    Unsupported,
+    DiceProtocol,
+    AvcInitializeThenPlug0,
+    BeBoBPlug0Only,
+    BeBoBUnprobed,
+};
+
+[[nodiscard]] constexpr ProbeBootstrap SelectProbeBootstrap(
+    FamilyId family, ProbePolicyId policy) noexcept {
+    switch (family) {
+        case FamilyId::GenericAvc:
+            return policy == ProbePolicyId::GenericAvc
+                       ? ProbeBootstrap::AvcInitializeThenPlug0
+                       : ProbeBootstrap::Unsupported;
+        case FamilyId::BeBoB:
+            switch (policy) {
+                case ProbePolicyId::BeBoBPlug0:
+                    return ProbeBootstrap::BeBoBPlug0Only;
+                case ProbePolicyId::BeBoBFilteredCommandSet:
+                    return ProbeBootstrap::BeBoBUnprobed;
+                default:
+                    return ProbeBootstrap::Unsupported;
+            }
+        case FamilyId::DICE:
+            return policy == ProbePolicyId::DiceTcat
+                       ? ProbeBootstrap::DiceProtocol
+                       : ProbeBootstrap::Unsupported;
+        case FamilyId::OXFW:
+            return policy == ProbePolicyId::OxfwAvc
+                       ? ProbeBootstrap::AvcInitializeThenPlug0
+                       : ProbeBootstrap::Unsupported;
+        case FamilyId::None:
+        default:
+            return ProbeBootstrap::Unsupported;
+    }
+}
+
+static_assert(SelectProbeBootstrap(FamilyId::BeBoB,
+                                   ProbePolicyId::BeBoBPlug0) ==
+              ProbeBootstrap::BeBoBPlug0Only);
+// Both FireWire 1814 and ProjectMix catalog rows use this policy. They must
+// remain entirely outside AVCUnit::Initialize and plug-0 inventory.
+static_assert(SelectProbeBootstrap(FamilyId::BeBoB,
+                                   ProbePolicyId::BeBoBFilteredCommandSet) ==
+              ProbeBootstrap::BeBoBUnprobed);
+static_assert(SelectProbeBootstrap(FamilyId::GenericAvc,
+                                   ProbePolicyId::GenericAvc) ==
+              ProbeBootstrap::AvcInitializeThenPlug0);
+static_assert(SelectProbeBootstrap(FamilyId::OXFW,
+                                   ProbePolicyId::OxfwAvc) ==
+              ProbeBootstrap::AvcInitializeThenPlug0);
+static_assert(SelectProbeBootstrap(FamilyId::DICE,
+                                   ProbePolicyId::DiceTcat) ==
+              ProbeBootstrap::DiceProtocol);
 
 class Lock final {
 public:
@@ -77,23 +134,7 @@ private:
 
 [[nodiscard]] bool PolicyMatchesFamily(FamilyId family,
                                        ProbePolicyId policy) noexcept {
-    switch (family) {
-        case FamilyId::GenericAvc:
-            return policy == ProbePolicyId::GenericAvc;
-        case FamilyId::BeBoB:
-            // BeBoBFilteredCommandSet is a BeBoB device that must never be
-            // probed. It takes the same family provider and a different route
-            // through it — see StartProbe.
-            return policy == ProbePolicyId::BeBoBPlug0 ||
-                   policy == ProbePolicyId::BeBoBFilteredCommandSet;
-        case FamilyId::DICE:
-            return policy == ProbePolicyId::DiceTcat;
-        case FamilyId::OXFW:
-            return policy == ProbePolicyId::OxfwAvc;
-        case FamilyId::None:
-        default:
-            return false;
-    }
+    return SelectProbeBootstrap(family, policy) != ProbeBootstrap::Unsupported;
 }
 
 class AdapterState final : public std::enable_shared_from_this<AdapterState> {
@@ -262,24 +303,33 @@ private:
             if (!IsActiveLocked(epoch)) return;
             kickoffTimer_ = Scheduling::kInvalidTimerToken;
         }
-        if (family_ == FamilyId::DICE) {
-            StartDiceProbe(epoch, std::move(cancel));
-        } else if (context_.staticPlan.probePolicy ==
-                   ProbePolicyId::BeBoBFilteredCommandSet) {
-            StartUnprobedInstall(epoch, std::move(cancel));
-        } else {
-            StartAvcProbe(epoch, std::move(cancel));
+        const auto bootstrap = SelectProbeBootstrap(
+            family_, context_.staticPlan.probePolicy);
+        switch (bootstrap) {
+            case ProbeBootstrap::DiceProtocol:
+                StartDiceProbe(epoch, std::move(cancel));
+                return;
+            case ProbeBootstrap::BeBoBUnprobed:
+                StartUnprobedInstall(epoch, std::move(cancel));
+                return;
+            case ProbeBootstrap::AvcInitializeThenPlug0:
+            case ProbeBootstrap::BeBoBPlug0Only:
+                StartAvcProbe(epoch, std::move(cancel), bootstrap);
+                return;
+            case ProbeBootstrap::Unsupported:
+            default:
+                Complete(epoch, std::unexpected(Devices::ProbeError::Unsupported));
+                return;
         }
     }
 
     // Bring a device up with no probe at all.
     //
-    // StartAvcProbe cannot be used here and no amount of gating inside it would
-    // help: its first two acts are AVCUnit::Initialize (UNIT_INFO, SUBUNIT_INFO)
-    // and ProbePlug0 (PLUG_INFO), which are precisely the commands that hang
-    // this firmware. They would now be refused by the transport's permitted-frame
-    // table, so the probe would not damage the device — it would simply always
-    // fail, and the device would never come up.
+    // Neither AV/C bootstrap is safe here: generic initialization includes
+    // SUBUNIT_INFO, while plug-0 inventory includes PLUG_INFO and BridgeCo stream
+    // formats. Those commands hang this firmware. They would now be refused by
+    // the transport's permitted-frame table, so probing would not damage the
+    // device — it would simply always fail, and the device would never come up.
     //
     // Everything StartAvcProbe would have learned is instead asserted by the
     // catalog and the protocol class: geometry from the hardcoded formation
@@ -525,8 +575,102 @@ private:
         return nullptr;
     }
 
+    void StartAvcPlug0Probe(
+        uint64_t epoch,
+        std::shared_ptr<std::atomic<bool>> cancel,
+        std::shared_ptr<Protocols::AVC::RemoteAvcSession> session) {
+        if (!session) {
+            Complete(epoch, std::unexpected(Devices::ProbeError::Unsupported));
+            return;
+        }
+        if (!IsActive(epoch)) return;
+        const auto sessionHold = session;
+        session->ProbePlug0(
+            [self = shared_from_this(), epoch, cancel = std::move(cancel),
+             session = sessionHold](
+                const Protocols::AVC::Probe::DeviceModel& observedModel) mutable {
+                if (!self->IsActive(epoch)) return;
+                auto route = self->CurrentRoute(epoch);
+                auto transport = session->Transport();
+                const auto observedRates = observedModel.CommonDuplexRatesHz();
+                if (!route || !transport || observedRates.empty()) {
+                    self->Complete(epoch,
+                        std::unexpected(Devices::ProbeError::InvalidEvidence));
+                    return;
+                }
+                if (self->family_ == FamilyId::GenericAvc &&
+                    !session->HasAudioSubunit() &&
+                    !session->HasMusicSubunit()) {
+                    self->Complete(epoch,
+                        std::unexpected(Devices::ProbeError::InvalidEvidence));
+                    return;
+                }
+
+                auto protocol = self->CreateAvcProtocol(
+                    *route, transport.get(), observedModel);
+                if (!protocol) {
+                    self->Complete(epoch,
+                        std::unexpected(Devices::ProbeError::InvalidEvidence));
+                    return;
+                }
+                protocol->UpdateRuntimeContext(*route, transport.get());
+                const IOReturn initializeStatus = protocol->Initialize();
+                if (initializeStatus != kIOReturnSuccess) {
+                    self->Complete(epoch,
+                        std::unexpected(MapProbeStatus(initializeStatus)));
+                    return;
+                }
+                AudioStreamRuntimeCaps caps{};
+                std::vector<uint32_t> implementedRates;
+                if (!protocol->GetRuntimeAudioStreamCaps(caps) ||
+                    !HasUsableDuplexGeometry(caps) ||
+                    !protocol->GetSupportedSampleRates(implementedRates)) {
+                    (void)protocol->Shutdown();
+                    self->Complete(epoch,
+                        std::unexpected(Devices::ProbeError::InvalidEvidence));
+                    return;
+                }
+                auto rates = IntersectRates(observedRates, implementedRates);
+                if (rates.empty()) {
+                    (void)protocol->Shutdown();
+                    self->Complete(epoch,
+                        std::unexpected(Devices::ProbeError::InvalidEvidence));
+                    return;
+                }
+                self->InstallProtocol(protocol, cancel);
+                const uint32_t policy = static_cast<uint32_t>(
+                    self->context_.staticPlan.probePolicy);
+                if (self->family_ == FamilyId::GenericAvc) {
+                    self->Complete(epoch, Devices::GenericAvcProbeFacts{
+                        .streams = caps,
+                        .supportedRates = std::move(rates),
+                        .hasAudioSubunit = session->HasAudioSubunit(),
+                        .hasMusicSubunit = session->HasMusicSubunit(),
+                    });
+                } else if (self->family_ == FamilyId::BeBoB) {
+                    self->Complete(epoch, Devices::BeBoBProbeFacts{
+                        .streams = caps,
+                        .supportedRates = std::move(rates),
+                        .operationPolicyId = policy,
+                    });
+                } else {
+                    self->Complete(epoch, Devices::OxfwProbeFacts{
+                        .streams = caps,
+                        .supportedRates = std::move(rates),
+                        .operationPolicyId = policy,
+                    });
+                }
+            });
+    }
+
     void StartAvcProbe(uint64_t epoch,
-                       std::shared_ptr<std::atomic<bool>> cancel) {
+                       std::shared_ptr<std::atomic<bool>> cancel,
+                       ProbeBootstrap bootstrap) {
+        if (bootstrap != ProbeBootstrap::AvcInitializeThenPlug0 &&
+            bootstrap != ProbeBootstrap::BeBoBPlug0Only) {
+            Complete(epoch, std::unexpected(Devices::ProbeError::Unsupported));
+            return;
+        }
         if (!CurrentRoute(epoch)) {
             Complete(epoch, std::unexpected(Devices::ProbeError::StaleRoute));
             return;
@@ -542,6 +686,22 @@ private:
             avcSession_ = session;
         }
         const auto sessionHold = session;
+
+        if (bootstrap == ProbeBootstrap::BeBoBPlug0Only) {
+            // BeBoBPlug0 defines a wire sequence, not merely a capability probe:
+            // begin at unit PLUG_INFO and BridgeCo stream formats. Do not put the
+            // generic descriptor/UNIT_INFO/SUBUNIT_INFO waterfall in front of it.
+            // Cross-validated with references/linux-sound-firewire-stack/firewire/
+            // bebob/bebob_stream.c:908-940. M-Audio special firmware cannot reach
+            // this branch; its policy selects BeBoBUnprobed.
+            ASFW_LOG(AVC,
+                     "ExistingFamilyProvider: BeBoB plug-0 policy bypassing generic AV/C initialization device=%llu unitOffset=%u",
+                     static_cast<unsigned long long>(context_.unit.device.value),
+                     context_.unit.unitDirectoryOffset);
+            StartAvcPlug0Probe(epoch, std::move(cancel), sessionHold);
+            return;
+        }
+
         session->Initialize(
             [self = shared_from_this(), epoch, cancel = std::move(cancel),
              session = sessionHold](bool initialized) mutable {
@@ -551,81 +711,8 @@ private:
                         std::unexpected(Devices::ProbeError::Transport));
                     return;
                 }
-                session->ProbePlug0(
-                    [self, epoch, cancel = std::move(cancel), session](
-                        const Protocols::AVC::Probe::DeviceModel& observedModel) mutable {
-                        if (!self->IsActive(epoch)) return;
-                        auto route = self->CurrentRoute(epoch);
-                        auto transport = session->Transport();
-                        const auto observedRates = observedModel.CommonDuplexRatesHz();
-                        if (!route || !transport || observedRates.empty()) {
-                            self->Complete(epoch,
-                                std::unexpected(Devices::ProbeError::InvalidEvidence));
-                            return;
-                        }
-                        if (self->family_ == FamilyId::GenericAvc &&
-                            !session->HasAudioSubunit() &&
-                            !session->HasMusicSubunit()) {
-                            self->Complete(epoch,
-                                std::unexpected(Devices::ProbeError::InvalidEvidence));
-                            return;
-                        }
-
-                        auto protocol = self->CreateAvcProtocol(
-                            *route, transport.get(), observedModel);
-                        if (!protocol) {
-                            self->Complete(epoch,
-                                std::unexpected(Devices::ProbeError::InvalidEvidence));
-                            return;
-                        }
-                        protocol->UpdateRuntimeContext(*route, transport.get());
-                        const IOReturn initializeStatus = protocol->Initialize();
-                        if (initializeStatus != kIOReturnSuccess) {
-                            self->Complete(epoch,
-                                std::unexpected(MapProbeStatus(initializeStatus)));
-                            return;
-                        }
-                        AudioStreamRuntimeCaps caps{};
-                        std::vector<uint32_t> implementedRates;
-                        if (!protocol->GetRuntimeAudioStreamCaps(caps) ||
-                            !HasUsableDuplexGeometry(caps) ||
-                            !protocol->GetSupportedSampleRates(implementedRates)) {
-                            (void)protocol->Shutdown();
-                            self->Complete(epoch,
-                                std::unexpected(Devices::ProbeError::InvalidEvidence));
-                            return;
-                        }
-                        auto rates = IntersectRates(observedRates, implementedRates);
-                        if (rates.empty()) {
-                            (void)protocol->Shutdown();
-                            self->Complete(epoch,
-                                std::unexpected(Devices::ProbeError::InvalidEvidence));
-                            return;
-                        }
-                        self->InstallProtocol(protocol, cancel);
-                        const uint32_t policy = static_cast<uint32_t>(
-                            self->context_.staticPlan.probePolicy);
-                        if (self->family_ == FamilyId::GenericAvc) {
-                            self->Complete(epoch, Devices::GenericAvcProbeFacts{
-                                .streams = caps,
-                                .supportedRates = std::move(rates),
-                                .hasAudioSubunit = session->HasAudioSubunit(),
-                                .hasMusicSubunit = session->HasMusicSubunit(),
-                            });
-                        } else if (self->family_ == FamilyId::BeBoB) {
-                            self->Complete(epoch, Devices::BeBoBProbeFacts{
-                                .streams = caps,
-                                .supportedRates = std::move(rates),
-                                .operationPolicyId = policy,
-                            });
-                        } else {
-                            self->Complete(epoch, Devices::OxfwProbeFacts{
-                                .streams = caps,
-                                .supportedRates = std::move(rates),
-                                .operationPolicyId = policy,
-                            });
-                        }
-                    });
+                self->StartAvcPlug0Probe(epoch, std::move(cancel),
+                                         std::move(session));
             });
     }
 

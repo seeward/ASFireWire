@@ -81,7 +81,7 @@ def main() -> int:
     with open(sys.argv[1], "rb") as f:
         blob = f.read()
 
-    if blob[:4] != b"bCoD":
+    if blob[:4] not in (b"bCoD", b"BcOd"):
         print(f"not a BridgeCo container: magic={blob[:4]!r}", file=sys.stderr)
         return 1
 
