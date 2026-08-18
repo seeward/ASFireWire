@@ -44,7 +44,10 @@ struct DriverLogViewModelTests {
         #expect(result.map(\.sequence) == [100])
     }
 
-    @Test(arguments: ["w=480", "payloadwriter", "ERROR", "100"])
+    // "w=480" / "payloadwriter" were substrings of the fixture message until
+    // fad30cd3 replaced it; the arguments were not updated and two of the four
+    // cases have been searching for text no record contains.
+    @Test(arguments: ["deficit=8", "txcontent", "ERROR", "100"])
     func searchMatchesMessageCategoryLevelAndSequence(_ query: String) {
         let result = DriverLogViewModel.matchingRecords(
             records,
