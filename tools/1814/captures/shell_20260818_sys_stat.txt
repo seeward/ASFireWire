@@ -1,0 +1,55 @@
+/cfg/dev/isodrv/ClockDividers/syt/48000>sys stat
+global statistic:
+rxIsr        9691179    rxStreamInvalid     0    MDBAliveErrors      0
+txIsr        6116574    txStreamInvalid     0    distortErrors       0
+rxIsrH0            0    dmaBusyWaitCnt      0    rxLLCAlarm          0
+rxIsrH1            0           rxIsrH2      0    rxLLCAlarmIntrv     0
+
+Output Stream statistic:
+    iso channel      58        1       60
+           dest      AV     1394       AV
+          speed       0        2        0
+        txWrite 4515638  3880170  4515650
+        txReady 4515654  3880188  4515662
+      txDelayed 1580165  1293405  1580169
+         txSend       0        0        0
+          txDma 4515722  3880254  4515728
+   noInterption       0        0        0
+   txQFillLevel    33 %     33 %     41 %
+W      txQEmpty   10257     3108      355
+E       txQFull       0        0        0
+E     MdbPtrFull      0        0        0
+E     MdbPktFull      0        0        0
+E      txDmaBusy      0        0        0
+E       pkt Past      0        0        0
+E     pkt Future      4        0        0
+E     pktSytDiff      0        0        0
+S      SytOffset   9216    12288     4608
+S        SytCorr      0        0        0
+S        FFLimit  53448    56520    48840
+
+Input Stream statistic:
+    iso channel       0       61       62
+         source    1394       AV       AV
+    linStartSyt 9668096        0        0
+    outStartSyt       0        0    44731
+      rxPackets 3882332        0  4516419
+   blockingConv       0        0        0
+   rxQFillLevel    80 %      0 %      0 %
+  PoolFillLevel    90 %      0 %     19 %
+    onlyHeaders       0        0        0
+    rxEMIEtyPkt       0        0        0
+W    rxEmptyPkt 1294172        0        0
+E       rxNoMem    1652        0      246
+E      rxToLong       0        0        0
+E   rxPktToLong       0        0        0
+E  rxPktToSmall       0        0        0
+E     rxDmaBusy       0        0        0
+E       rxQFull       0        0        0
+E    CtrDiffErr       1        0        2
+E    SytDiffErr       2        0        0
+E    SumDiffErr       0        0        0
+E     BCOHdrErr       0        0        0
+      counter1        0        0        0
+      counter2        0        0        0
+/cfg>

@@ -1,0 +1,261 @@
+/cfg>sys tgen
+Pll in lock
+Word Strobe Delay: 206
+Synchronization Source: CTR
+System Clock Source: External
+VCO clock: 0x1770000
+VCOxC Division Ratio: 0x3000
+AV1 Clock: Internal
+AVCLK1 is invert of internal AV1CLK
+AV1 VCOxC Division Ratio: 0x8
+AV1 word strobe VCOxC Division Ratio: 0x40
+AV2 Clock: Internal
+AVCLK1 is invert of internal AV2CLK
+AV2 VCOxC Division Ratio: 0x8
+AV2 word strobe VCOxC Division Ratio: 0x40
+/cfg>sys isodrv
+AVDRV.C: Current ISOState
+==========================
+avFreq[0] = -1 avFreq[1] = 48000
+syncMode  = CSP
+syncInterface  = 9
+syncFreq       = -1
+vcoClock       = 24576000
+firstFrmBlock  = 0  lastFrmBlock   = 1
+avPortUsage[0] = 4  avPortUsage[1] = 4
+syncChannel    = 62
+used channels :  0:LINK1394_ARM  1:ARM_LINK1394  60:ARM_AV  62:AV_ARM
+inLock = 1
+pllInLock = 1
+saved ChanRxLoSet: 0x80000000
+saved ChanRxHiSet: 0x0
+stateMachineHeartBeat  = 8192
+nbrAVtoARMLink         = 1
+avInterfacesUsed : 1 2 4 7 8 10 11 13
+avdrv state : RUNNING_STATE
+av1Direction = 00000096
+av1Usage     = 00000096
+av2Direction = 00000000
+av2Usage     = 0000002D
+/cfg>sys sytlog
+SYT LOG not enabled
+/cfg>
+
+/cfg>sc tgen
+TGEN
+base address             : 40020000
+TgMisc                   : 00000001
+TgSyncDiv                : 00000001
+TgIntSet                 : 00000042
+TgIntMask                : 00000008
+                           Vco       Dco
+TgDiv                    : 00000001, 00002000
+TgRefDiv                 : 00000001, 00000004
+TgSytDelay               : 00000000
+TgWsDelay                : 00000000, 00000053
+TgMisc                   : 00000000, 00000481
+TgLockCnt                : 0000000A, 00000007
+TgLockThres              : 00000A08, 00000A08
+TgStatus                 : 00000000, 00000001
+TgPhaseErr               : 00000000, 80000003
+TgIIA1                   :           00010000
+TgIIB0                   :           005B974A
+TgIIB1                   :           00A5F3E7
+TgPInc                   :           00000000
+TgCcalib                 :           00000000
+TgFcalib                 :           00000000
+TgOcalib                 :           00000000
+TgPInc                   :           00000000
+
+/cfg>sc av
+AV port                    AV1       AV2
+base address             : 40022000, 40023000
+AVon                     : 00000004, 0000000A
+AVFlag                   : 00000000, 00000000
+AVKind                   : 00000040, 00000040
+AVConfig0                : 00000000, 0000000F
+AVConfig1                : 00000000, 0000000A
+AVConfig2                : 00000003, 00000003
+AVConfig3                : 00000010, 00000030
+AVFifoFull               : 00000000, 00000000
+AVFifoEmpty              : 0000000F, 00000005
+AVDtaFlowErr             : 00000000, 00000000
+AVTSErr                  : 00000000, 00000000
+AVInSync                 : 00000000, 0000000A
+AVAESErr                 : 00000000, 00000000
+AVIntSet                 : 00000004, 00000007
+AVIntMask                : 00000000. 00000000
+TGEN DIVIDERS
+base address             : 40020000
+                           AV1       AV2
+TgAvFs256Div             : 00000000, 00000000
+TgAvClkDiv               : 00000002, 00000002
+TgAvWsDiv                : 00000080, 00000080
+TgAvMisc                 : 00000008, 00000008
+AV common
+base address             : 40024000
+AVactivate               : 00000003
+AVstAES                  : 00 x 24
+
+/cfg>sc frmr
+DM1001 Framer status
+base address             : 40002C00
+Routing                  : 00000000
+                           PTU read   PTU write
+base address             : 40002C08,  40002C1C
+numQuads                 : 00000010,  00000010
+tsIv.limit               : 00000001,  00000001
+tsIv.cnt                 : 00000000,  00000000
+queueList[3:0]           : FFFFFF02,  FFFF0705
+queueList[7:4]           : FFFFFFFF,  FFFFFFFF
+                           Framer     Deframer
+framer SW status         :         ,
+base address             : 40002C44,  40002C94
+numBlocks                : 00000008,  00000008
+packetIv.limit           : 00000001,  00000001
+packetIv.cnt             : 00000000,  00000000
+descr.quadCnt            : 00000000,  00000024
+descr.isoHdr             : 00487DA0,  00887AA0
+descr.quadList[0]        : 00020000,  00020000
+descr.quadList[1]        : 00020100,  00020100
+descr.quadList[2]        : FFFFFFFF,  00020001
+descr.quadList[3]        : FFFFFFFF,  00020101
+descr.quadList[4..7]     : FFFFFFFF,  FFFFFFFF
+                           DSDF
+base address             : 40002DB4
+mode                     : 00000000
+chIv.limit               : 00000000
+chIv.cnt                 : 00000000
+changedCfg               : 00000000
+
+/cfg>sc isodrv
+ScottyAvdrv.C: Current state
+============================
+  avdrv analog pll state : IDLE_STATE
+      syncMode  = CSP
+      syncInterface       = -1
+      vcoClock            = 0
+      syncChannel         = -1
+      lpbkState           = 0
+      pllIsInLock         = 0
+      driftLimDCOCount    = 0
+      driftLimDCOState    = 0
+      driftLimTgIIRA1Value = 0
+
+  avdrv  digital pll state : RUNNING_STATE
+      pll drives av port 1
+      pll drives av port 2
+      syncMode  = SYT
+      syncInterface       = 26
+      vcoClock            = 24576000
+      syncChannel         = 58
+      lpbkState           = 0
+      pllIsInLock         = 1
+      driftLimDCOCount    = 0
+      driftLimDCOState    = 0
+      driftLimTgIIRA1Value = 0
+
+  pllUsedByAvPort[0] = 1 pllUsedByAvPort[1] = 1
+  avFreq[0] = 48000 avFreq[1] = 48000
+  av1Direction = 00000000
+  av1Usage     = 0000000F
+  av2Direction = 0000000F
+  av2Usage     = 0000000F
+
+  avPort 2 referred by last command.
+
+  channelState: 1: IDLE, 2: READY, 3: RUNNING
+  ch0-31 : all 1
+  ch32-63: all 1 except ch58 = 4 and ch61 = 4
+  lpbkAesConversionInterfaces: NONE
+
+/cfg>avd printcfg 0    (and 61, 62 — all identical)
+------------- LINK 0 ----------
+self                = -1
+----
+not initialized
+----
+
+/cfg>avd printav
+========== HAL (id=0x0E00) Midiman FW 106 ==========
+(direction bits:  0=into chip,     1=out from chip)
+(interfaces bits: 0=GPIO,          1=AV pin       )
+(frequency bits:  0=not supported, 1=supported    )
+                        ------ DM1000 ------   ------ DM1001 ------
+                        -- AV1 --  -- AV2 --   -- AV1 --  -- AV2 --
+            iFKind:     I2S        I2S         AES        AES
+avInterfacesUsed [7:0]: 0x96       0x2D        0x0F       0x0F
+     avDirection [7:0]: 0x96       0x00        0x00       0x0F
+           avClkSrc:    0          0           2          2
+       bitClkInvert:    1          1           0          0
+            vcoHigh:    25000000   25000000    25000000   25000000
+             vcoLow:    19000000   19000000    19000000   19000000
+             avEdge:    0          0           0          0
+          delayedWS:    0          0           1          1
+   wordStrobeInvert:    0          0           1          1
+         dataFormat:    0          0           3          3
+    suportedFreq [7:0]: 0x5E       0x5E        0x1E       0x1E
+
+/cfg>sys isodrv 0
+  [ ... AVDRV.C Current ISOState summary as before ... ]
+iso config for iso channel  0
+==============================
+        Link status : CHANNEL_RUNNING
+         isoChannel : 0
+         interfaces : -1 -1 -1 -1 -1 -1 -1 -1
+      aesConversion : -1 -1 -1 -1 -1 -1 -1 -1
+      syncInterface : -1
+           syncMode : ?? -1 ??
+    inLockDetection : LOCK detection is PLL_LOCK
+        EmptyPktGen : DM1000 MDB generates empty packets
+                fmt : 16
+                fdf : 2
+                dbs : 2
+      dbcOffsetCode : 3
+              speed : 0
+   playoutSytOffset : -1
+        packetDelay : 24576
+outputPktDelayCorrection : 0
+         packetMode : ?? -1 ??
+      queueElements : 10
+            memType : OS_AHB
+ISO Input Stream
+===============
+            channel : 0
+             source : 1
+       maxBlockSize : 291
+        packetDelay : 24576
+inputStreamCallback : 0x00000000
+       callbackData : 0x00000000
+   (no ISO Output Stream block — channel 0 is receive-only)
+
+/cfg>sys isodrv 1
+iso config for iso channel  1
+=============================
+        Link status : CHANNEL_RUNNING
+         isoChannel : 1
+         interfaces : -1 x8
+      aesConversion : -1 x8
+      syncInterface : -1
+           syncMode : ?? -1 ??
+    inLockDetection : LOCK detection is PLL_LOCK
+        EmptyPktGen : DM1000 MDB generates empty packets
+                fmt : 16
+                fdf : 2
+                dbs : 2
+      dbcOffsetCode : 3
+              speed : 2
+   playoutSytOffset : 12288
+        packetDelay : -1
+outputPktDelayCorrection : 0
+         packetMode : ?? -1 ??
+      queueElements : 12
+            memType : OS_AHB
+ISO Output Stream
+=================
+            channel : 1
+        destination : 1
+              speed : 2
+   playOutSytOffset : 12288
+outputPktDelayCorrection : 0
+     farFutureLimit : 56520
