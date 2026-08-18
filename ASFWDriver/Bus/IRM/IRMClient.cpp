@@ -313,10 +313,18 @@ void IRMClient::CompareSwapIRMQuadlet(
         });
 }
 
+IRMEpoch IRMClient::CurrentEpoch() const noexcept {
+    return IRMEpoch{
+        .generation = generation_,
+        .irmNodeId = irmNodeId_,
+        .lastBusResetNs = lastBusResetNs_
+    };
+}
+
 void IRMClient::ReadIRMWindow(ResourceSnapshotCallback callback)
 {
     if (irmNodeId_ == 0xFF) {
-        callback(AllocationStatus::NotFound, {});
+        callback(AllocationStatus::NoIRM, {});
         return;
     }
 
@@ -374,7 +382,7 @@ void IRMClient::AllocateChannel(uint8_t channel,
 
     if (irmNodeId_ == 0xFF) {
         ASFW_LOG_ERROR(IRM, "AllocateChannel: No IRM node on bus");
-        callback(AllocationStatus::NotFound);
+        callback(AllocationStatus::NoIRM);
         return;
     }
 
@@ -392,8 +400,8 @@ void IRMClient::ReleaseChannel(uint8_t channel,
     }
 
     if (irmNodeId_ == 0xFF) {
-        ASFW_LOG_ERROR(IRM, "ReleaseChannel: No IRM node on bus");
-        callback(AllocationStatus::NotFound);
+        ASFW_LOG(IRM, "ReleaseChannel: No IRM node on bus");
+        callback(AllocationStatus::NoIRM);
         return;
     }
 
@@ -411,7 +419,7 @@ void IRMClient::AllocateBandwidth(uint32_t units,
 
     if (irmNodeId_ == 0xFF) {
         ASFW_LOG_ERROR(IRM, "AllocateBandwidth: No IRM node on bus");
-        callback(AllocationStatus::NotFound);
+        callback(AllocationStatus::NoIRM);
         return;
     }
 
@@ -428,8 +436,8 @@ void IRMClient::ReleaseBandwidth(uint32_t units,
     }
 
     if (irmNodeId_ == 0xFF) {
-        ASFW_LOG_ERROR(IRM, "ReleaseBandwidth: No IRM node on bus");
-        callback(AllocationStatus::NotFound);
+        ASFW_LOG(IRM, "ReleaseBandwidth: No IRM node on bus");
+        callback(AllocationStatus::NoIRM);
         return;
     }
 
@@ -448,7 +456,7 @@ void IRMClient::AllocateResources(uint8_t channel,
         return;
     }
     if (irmNodeId_ == 0xFF) {
-        Common::InvokeSharedCallback(callbackState, AllocationStatus::NotFound);
+        Common::InvokeSharedCallback(callbackState, AllocationStatus::NoIRM);
         return;
     }
 
@@ -493,7 +501,40 @@ void IRMClient::AllocateResources(uint8_t channel,
 
 void IRMClient::ReadResourcesSnapshot(ResourceSnapshotCallback callback)
 {
-    ReadIRMWindow(std::move(callback));
+    constexpr uint64_t kQuietPeriodNs = 1'000'000'000ULL;
+
+    for (;;) {
+        const auto epoch = CurrentEpoch();
+        if (epoch.irmNodeId == 0xFF) {
+            callback(AllocationStatus::NoIRM, {});
+            return;
+        }
+
+        if (epoch.lastBusResetNs != 0) {
+            const uint64_t nowNs = CurrentMonotonicNowNs();
+            if (nowNs > epoch.lastBusResetNs) {
+                const uint64_t elapsedNs = nowNs - epoch.lastBusResetNs;
+                if (elapsedNs < kQuietPeriodNs) {
+                    const uint64_t remainingMs = (kQuietPeriodNs - elapsedNs + 999'999ULL) / 1'000'000ULL;
+                    ASFW_LOG(IRM, "IRMClient: waiting %llums for post-reset quiet period", remainingMs);
+                    IOSleep(static_cast<unsigned int>(remainingMs));
+
+                    const auto after = CurrentEpoch();
+                    if (after.generation != epoch.generation) {
+                        // Bus reset occurred while asleep: recompute against new generation
+                        if (after.irmNodeId == 0xFF) {
+                            callback(AllocationStatus::NoIRM, {});
+                            return;
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
+
+        ReadIRMWindow(std::move(callback));
+        return;
+    }
 }
 
 void IRMClient::CompareSwapBandwidth(uint32_t expected,

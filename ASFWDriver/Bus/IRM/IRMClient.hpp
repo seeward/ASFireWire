@@ -24,6 +24,12 @@ struct ResourceSnapshot {
     uint32_t channelsAvailable63_32{0};
 };
 
+struct IRMEpoch {
+    Generation generation{0};
+    uint8_t irmNodeId{0xFF};
+    uint64_t lastBusResetNs{0};
+};
+
 using ResourceSnapshotCallback = std::function<void(AllocationStatus status, ResourceSnapshot snapshot)>;
 
 class IRMClient {
@@ -41,6 +47,8 @@ public:
 
     explicit IRMClient(Async::IFireWireBus& bus, LocalIRMAccess localIRMAccess = {});
     ~IRMClient();
+
+    [[nodiscard]] IRMEpoch CurrentEpoch() const noexcept;
 
     void SetIRMNode(uint8_t irmNodeId, Generation generation, uint64_t lastBusResetNs = 0);
 
