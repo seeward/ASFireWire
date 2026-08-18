@@ -680,40 +680,109 @@ void ControllerCore::OnBMElectionFailed(uint32_t generation, ASFW::Async::AsyncS
 void ControllerCore::EvaluateActivePolicies() noexcept {
     pendingReset_.reset();
 
-    // 1. Cycle Repair (M5)
-    EvaluateCyclePolicy();
+    // 0. Pre-Role IRM Bootstrap Policy (Active when zero usable contenders exist)
+    if (irmBootstrap_) {
+        const auto topo = LatestTopology();
+        if (topo.has_value()) {
+            bool hasUsableContender = false;
+            for (const auto& node : topo->physical.nodes) {
+                if (node.contender && node.linkActive) {
+                    hasUsableContender = true;
+                    break;
+                }
+            }
 
-    // 2. Root Selection (M6)
-    if (cyclePolicy_ && cyclePolicy_->Snapshot().lastDecision == Bus::CyclePolicyDecision::RootSelectionRequired) {
-        EvaluateRootSelectionPolicy();
+            uint64_t connectivityHash = 14695981039346656037ULL;
+            for (const auto& n : topo->physical.nodes) {
+                connectivityHash ^= n.portCount;
+                connectivityHash *= 1099511628211ULL;
+                for (size_t p = 0; p < n.portCount; ++p) {
+                    connectivityHash ^= static_cast<uint8_t>(n.reportedPorts[p]);
+                    connectivityHash *= 1099511628211ULL;
+                }
+            }
+
+            Bus::PhysicalTopologySignature physSig{
+                .nodeCount = topo->nodeCount,
+                .connectivityHash = connectivityHash
+            };
+
+            const bool localIrmCsrReady = localIrmController_
+                ? (localIrmController_->Snapshot().state != Bus::LocalIRMResourceState::Disabled)
+                : true;
+            const bool currentRHB = false;
+
+            Bus::IRMBootstrapInputs in{
+                .roleMode = rolePolicy_.roleMode,
+                .topologyValid = (topo->graphStatus == Driver::TopologyGraphStatus::Valid),
+                .generation = topo->generation,
+                .provenanceResetRequestId = 0,
+                .localNodeId = topo->localNodeId,
+                .irmNodeId = topo->irmNodeId,
+                .rootNodeId = topo->rootNodeId,
+                .gapCount = topo->gapCount,
+                .hasUsableContender = hasUsableContender,
+                .physicalTopology = physSig,
+                .localCmcReady = true,
+                .localIrmCsrHostReady = localIrmCsrReady,
+                .currentRootHoldOff = currentRHB,
+                .nowNs = BusResetCoordinator::MonotonicNow()
+            };
+
+            const auto bootstrapDecision = irmBootstrap_->Evaluate(in);
+            if (bootstrapDecision.resetRequested) {
+                pendingReset_ = PendingReset{
+                    .targetRoot = bootstrapDecision.targetRoot,
+                    .longReset = false,
+                    .gapCount = topo->gapCount,
+                    .setContender = bootstrapDecision.setContender,
+                    .rootHoldoff = bootstrapDecision.rootHoldoff,
+                    .reason = bootstrapDecision.reason
+                };
+            }
+        }
     }
 
-    // 3. Gap Count Optimization (M7)
-    EvaluateGapPolicy();
-
-    // 4. Power Management / Link-On (M8)
-    // Only proceed to Link-On evaluation if no root/gap reset is already pending.
     if (!pendingReset_) {
+        // 1. Cycle Repair (M5)
+        EvaluateCyclePolicy();
+
+        // 2. Root Selection (M6)
+        if (cyclePolicy_ && cyclePolicy_->Snapshot().lastDecision == Bus::CyclePolicyDecision::RootSelectionRequired) {
+            EvaluateRootSelectionPolicy();
+        }
+
+        // 3. Gap Count Optimization (M7)
+        EvaluateGapPolicy();
+
+        // 4. Power Management / Link-On (M8)
         EvaluatePowerLinkPolicy();
     }
 
     // 5. Execution of combined reset
     if (pendingReset_ && deps_.busReset) {
-        std::optional<bool> setContender = std::nullopt;
-        if (const auto topo = LatestTopology(); topo && topo->localNodeId == pendingReset_->targetRoot) {
-            setContender = true;
+        std::optional<bool> setContender = pendingReset_->setContender;
+        if (!setContender.has_value()) {
+            if (const auto topo = LatestTopology(); topo && topo->localNodeId == pendingReset_->targetRoot) {
+                setContender = true;
+            }
         }
 
-        ASFW_LOG(Controller, "[BM Active Policy] Executing combined reset: root=%u gap=%{public}s long=%d",
+        if (pendingReset_->rootHoldoff.has_value() && deps_.hardware) {
+            deps_.hardware->SetRootHoldOff(*pendingReset_->rootHoldoff);
+        }
+
+        ASFW_LOG(Controller, "[BM Active Policy] Executing combined reset: root=%u gap=%{public}s long=%d reason=%{public}s",
                  pendingReset_->targetRoot,
                  pendingReset_->gapCount ? std::to_string(*pendingReset_->gapCount).c_str() : "none",
-                 pendingReset_->longReset);
+                 pendingReset_->longReset,
+                 pendingReset_->reason.c_str());
 
         deps_.busReset->RequestRolePolicyReset(pendingReset_->targetRoot,
                                                pendingReset_->longReset,
                                                pendingReset_->gapCount,
                                                setContender,
-                                               "BM active policy");
+                                               pendingReset_->reason.empty() ? "BM active policy" : pendingReset_->reason);
         pendingReset_.reset();
     }
 }

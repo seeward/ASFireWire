@@ -15,6 +15,7 @@
 #include "../Bus/BusManager/RootSelectionCoordinator.hpp"
 #include "../Bus/BusManager/GapPolicyCoordinator.hpp"
 #include "../Bus/BusManager/PowerLinkPolicyCoordinator.hpp"
+#include "../Bus/IRM/IRMBootstrapCoordinator.hpp"
 #include "../Discovery/DiscoveryTypes.hpp" // For Discovery::Generation
 #include "ControllerConfig.hpp"
 #include "ControllerTypes.hpp"
@@ -249,6 +250,7 @@ class ControllerCore final : private Role::IPhyConfigReset,
     ASFW::Bus::TopologyMapService* GetTopologyMapService() const { return deps_.topologyMapService.get(); }
     ASFW::Bus::SpeedMapService* GetSpeedMapService() const { return speedMapService_.get(); }
     Bus::LocalIRMResourceController* GetLocalIRMResourceController() const { return localIrmController_.get(); }
+    Bus::IRMBootstrapCoordinator* GetIRMBootstrapCoordinator() const { return irmBootstrap_.get(); }
     Bus::IRMFallbackCoordinator* GetIRMFallbackCoordinator() const { return irmFallback_.get(); }
     Bus::CyclePolicyCoordinator* GetCyclePolicyCoordinator() const { return cyclePolicy_.get(); }
     Bus::RootSelectionCoordinator* GetRootSelectionCoordinator() const { return rootSelection_.get(); }
@@ -371,6 +373,7 @@ class ControllerCore final : private Role::IPhyConfigReset,
     std::unique_ptr<Bus::BusManagerPolicyCoordinator> bmPolicyCoordinator_;
     std::shared_ptr<Bus::BroadcastChannelCSR> broadcastChannel_;
     std::unique_ptr<Bus::LocalIRMResourceController> localIrmController_;
+    std::unique_ptr<Bus::IRMBootstrapCoordinator> irmBootstrap_;
     std::shared_ptr<Bus::IRMFallbackCoordinator> irmFallback_;
     std::unique_ptr<Bus::CyclePolicyCoordinator> cyclePolicy_;
     std::unique_ptr<Bus::RootSelectionCoordinator> rootSelection_;
@@ -382,6 +385,9 @@ class ControllerCore final : private Role::IPhyConfigReset,
         uint8_t targetRoot{0x3F};
         bool longReset{false};
         std::optional<uint8_t> gapCount;
+        std::optional<bool> setContender;
+        std::optional<bool> rootHoldoff;
+        std::string reason;
     };
     std::optional<PendingReset> pendingReset_;
 };

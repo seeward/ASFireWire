@@ -388,6 +388,9 @@ ControllerCore::ControllerCore(ControllerConfig config, RolePolicy initialPolicy
         ASFW_LOG(Controller, "✅ IRMFallbackCoordinator created");
     }
 
+    irmBootstrap_ = std::make_unique<Bus::IRMBootstrapCoordinator>();
+    ASFW_LOG(Controller, "✅ IRMBootstrapCoordinator created");
+
     cyclePolicy_ = std::make_unique<Bus::CyclePolicyCoordinator>();
     ASFW_LOG(Controller, "✅ CyclePolicyCoordinator created");
 

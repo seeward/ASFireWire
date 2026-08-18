@@ -36,3 +36,9 @@ add_irm_test(IRMFallbackCoordinatorTests
     "${ASFW_DRIVER_DIR}/Scheduling/Scheduler.cpp"
     "../support/BusResetCoordinatorStub.cpp"
 )
+
+# IRM Bootstrap Coordinator Tests
+add_irm_test(IRMBootstrapCoordinatorTests
+    IRMBootstrapCoordinatorTests.cpp
+    "${ASFW_DRIVER_DIR}/Bus/IRM/IRMBootstrapCoordinator.cpp"
+)
