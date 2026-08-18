@@ -87,10 +87,16 @@ struct IRMClient::BandwidthLockState {
 IRMClient::IRMClient(Async::IFireWireBus& bus, LocalIRMAccess localIRMAccess)
     : bus_(bus)
     , localIRMAccess_(std::move(localIRMAccess))
+    , epochLock_(::IOLockAlloc())
 {
 }
 
-IRMClient::~IRMClient() = default;
+IRMClient::~IRMClient() {
+    if (epochLock_) {
+        ::IOLockFree(epochLock_);
+        epochLock_ = nullptr;
+    }
+}
 
 AllocationStatus IRMClient::MapAsyncStatus(const Async::AsyncStatus status) noexcept {
     switch (status) {
@@ -171,10 +177,23 @@ void IRMClient::ReadIRMQuadlet(
     uint32_t addressLo,
     std::function<void(AllocationStatus status, uint32_t value)> callback)
 {
+    ReadIRMQuadletForEpoch(CurrentEpoch(), addressLo, std::move(callback));
+}
+
+void IRMClient::ReadIRMQuadletForEpoch(
+    const IRMEpoch& epoch,
+    uint32_t addressLo,
+    std::function<void(AllocationStatus status, uint32_t value)> callback)
+{
+    if (epoch.irmNodeId == 0xFF) {
+        callback(AllocationStatus::NoIRM, 0);
+        return;
+    }
+
     if (IsLocalIRMNode()) {
         const auto selector = LocalIRMSelectorForAddress(addressLo);
         if (selector.has_value()) {
-            if (bus_.GetGeneration() != FW::Generation{generation_.value}) {
+            if (bus_.GetGeneration() != FW::Generation{epoch.generation.value}) {
                 callback(AllocationStatus::GenerationMismatch, 0u);
                 return;
             }
@@ -210,8 +229,8 @@ void IRMClient::ReadIRMQuadlet(
     }};
 
     FW::FwSpeed speed{0};
-    FW::NodeId node{irmNodeId_};
-    FW::Generation gen{generation_};
+    FW::NodeId node{epoch.irmNodeId};
+    FW::Generation gen{epoch.generation};
 
     bus_.ReadQuad(gen, node, addr, speed,
         [callbackState](Async::AsyncStatus status, std::span<const uint8_t> payload) {
@@ -243,7 +262,7 @@ void IRMClient::CompareSwapIRMQuadlet(
     if (IsLocalIRMNode()) {
         const auto selector = LocalIRMSelectorForAddress(addressLo);
         if (selector.has_value()) {
-            if (bus_.GetGeneration() != FW::Generation{generation_.value}) {
+            if (bus_.GetGeneration() != FW::Generation{CurrentEpoch().generation.value}) {
                 callback(AllocationStatus::GenerationMismatch, 0u);
                 return;
             }
@@ -283,8 +302,9 @@ void IRMClient::CompareSwapIRMQuadlet(
     }};
 
     FW::FwSpeed speed{0};
-    FW::NodeId node{irmNodeId_};
-    FW::Generation gen{generation_};
+    const auto epoch = CurrentEpoch();
+    FW::NodeId node{epoch.irmNodeId};
+    FW::Generation gen{epoch.generation};
 
     std::array<uint8_t, 8> operand;
     uint32_t expectedBE = OSSwapHostToBigInt32(expected);
@@ -314,16 +334,28 @@ void IRMClient::CompareSwapIRMQuadlet(
 }
 
 IRMEpoch IRMClient::CurrentEpoch() const noexcept {
-    return IRMEpoch{
+    if (epochLock_) {
+        ::IOLockLock(epochLock_);
+    }
+    const IRMEpoch epoch{
         .generation = generation_,
         .irmNodeId = irmNodeId_,
         .lastBusResetNs = lastBusResetNs_
     };
+    if (epochLock_) {
+        ::IOLockUnlock(epochLock_);
+    }
+    return epoch;
 }
 
 void IRMClient::ReadIRMWindow(ResourceSnapshotCallback callback)
 {
-    if (irmNodeId_ == 0xFF) {
+    ReadIRMWindowForEpoch(CurrentEpoch(), std::move(callback));
+}
+
+void IRMClient::ReadIRMWindowForEpoch(const IRMEpoch& targetEpoch, ResourceSnapshotCallback callback)
+{
+    if (targetEpoch.irmNodeId == 0xFF) {
         callback(AllocationStatus::NoIRM, {});
         return;
     }
@@ -331,23 +363,23 @@ void IRMClient::ReadIRMWindow(ResourceSnapshotCallback callback)
     auto callbackState = Common::ShareCallback(std::move(callback));
     auto snapshot = std::make_shared<ResourceSnapshot>();
 
-    ReadIRMQuadlet(IRMRegisters::kBandwidthAvailable,
-        [this, callbackState, snapshot](AllocationStatus status, uint32_t bandwidthAvailable) {
+    ReadIRMQuadletForEpoch(targetEpoch, IRMRegisters::kBandwidthAvailable,
+        [this, targetEpoch, callbackState, snapshot](AllocationStatus status, uint32_t bandwidthAvailable) {
             if (status != AllocationStatus::Success) {
                 Common::InvokeSharedCallback(callbackState, status, ResourceSnapshot{});
                 return;
             }
 
             snapshot->bandwidthAvailable = bandwidthAvailable;
-            ReadIRMQuadlet(IRMRegisters::kChannelsAvailable31_0,
-                [this, callbackState, snapshot](AllocationStatus status, uint32_t channelsAvailable31_0) {
+            ReadIRMQuadletForEpoch(targetEpoch, IRMRegisters::kChannelsAvailable31_0,
+                [this, targetEpoch, callbackState, snapshot](AllocationStatus status, uint32_t channelsAvailable31_0) {
                     if (status != AllocationStatus::Success) {
                         Common::InvokeSharedCallback(callbackState, status, ResourceSnapshot{});
                         return;
                     }
 
                     snapshot->channelsAvailable31_0 = channelsAvailable31_0;
-                    ReadIRMQuadlet(IRMRegisters::kChannelsAvailable63_32,
+                    ReadIRMQuadletForEpoch(targetEpoch, IRMRegisters::kChannelsAvailable63_32,
                         [callbackState, snapshot](AllocationStatus status, uint32_t channelsAvailable63_32) {
                             if (status != AllocationStatus::Success) {
                                 Common::InvokeSharedCallback(callbackState, status, ResourceSnapshot{});
@@ -362,9 +394,15 @@ void IRMClient::ReadIRMWindow(ResourceSnapshotCallback callback)
 }
 
 void IRMClient::SetIRMNode(uint8_t irmNodeId, Generation generation, uint64_t lastBusResetNs) {
+    if (epochLock_) {
+        ::IOLockLock(epochLock_);
+    }
     irmNodeId_ = irmNodeId;
     generation_ = generation;
     lastBusResetNs_ = lastBusResetNs;
+    if (epochLock_) {
+        ::IOLockUnlock(epochLock_);
+    }
 
     ASFW_LOG(IRM, "IRMClient: Set IRM node=%u generation=%u resetNs=%llu",
              irmNodeId, generation.value, lastBusResetNs);
@@ -380,7 +418,7 @@ void IRMClient::AllocateChannel(uint8_t channel,
         return;
     }
 
-    if (irmNodeId_ == 0xFF) {
+    if (CurrentEpoch().irmNodeId == 0xFF) {
         ASFW_LOG_ERROR(IRM, "AllocateChannel: No IRM node on bus");
         callback(AllocationStatus::NoIRM);
         return;
@@ -390,6 +428,7 @@ void IRMClient::AllocateChannel(uint8_t channel,
 }
 
 void IRMClient::ReleaseChannel(uint8_t channel,
+                                Generation generation,
                                 AllocationCallback callback,
                                 const RetryPolicy& retryPolicy)
 {
@@ -399,13 +438,28 @@ void IRMClient::ReleaseChannel(uint8_t channel,
         return;
     }
 
-    if (irmNodeId_ == 0xFF) {
-        ASFW_LOG(IRM, "ReleaseChannel: No IRM node on bus");
+    const auto current = CurrentEpoch();
+    if (generation.value != 0 && generation != current.generation) {
+        ASFW_LOG(IRM, "ReleaseChannel: Benign release for stale gen %u (current=%u)",
+                 generation.value, current.generation.value);
+        callback(AllocationStatus::Success);
+        return;
+    }
+
+    if (current.irmNodeId == 0xFF) {
+        ASFW_LOG_ERROR(IRM, "ReleaseChannel: No IRM node on bus (gen=%u)", current.generation.value);
         callback(AllocationStatus::NoIRM);
         return;
     }
 
     PerformChannelLock(channel, false, callback, retryPolicy);
+}
+
+void IRMClient::ReleaseChannel(uint8_t channel,
+                                AllocationCallback callback,
+                                const RetryPolicy& retryPolicy)
+{
+    ReleaseChannel(channel, Generation{0}, std::move(callback), retryPolicy);
 }
 
 void IRMClient::AllocateBandwidth(uint32_t units,
@@ -417,7 +471,7 @@ void IRMClient::AllocateBandwidth(uint32_t units,
         return;
     }
 
-    if (irmNodeId_ == 0xFF) {
+    if (CurrentEpoch().irmNodeId == 0xFF) {
         ASFW_LOG_ERROR(IRM, "AllocateBandwidth: No IRM node on bus");
         callback(AllocationStatus::NoIRM);
         return;
@@ -427,6 +481,7 @@ void IRMClient::AllocateBandwidth(uint32_t units,
 }
 
 void IRMClient::ReleaseBandwidth(uint32_t units,
+                                  Generation generation,
                                   AllocationCallback callback,
                                   const RetryPolicy& retryPolicy)
 {
@@ -435,13 +490,28 @@ void IRMClient::ReleaseBandwidth(uint32_t units,
         return;
     }
 
-    if (irmNodeId_ == 0xFF) {
-        ASFW_LOG(IRM, "ReleaseBandwidth: No IRM node on bus");
+    const auto current = CurrentEpoch();
+    if (generation.value != 0 && generation != current.generation) {
+        ASFW_LOG(IRM, "ReleaseBandwidth: Benign release for stale gen %u (current=%u)",
+                 generation.value, current.generation.value);
+        callback(AllocationStatus::Success);
+        return;
+    }
+
+    if (current.irmNodeId == 0xFF) {
+        ASFW_LOG_ERROR(IRM, "ReleaseBandwidth: No IRM node on bus (gen=%u)", current.generation.value);
         callback(AllocationStatus::NoIRM);
         return;
     }
 
     PerformBandwidthLock(units, false, callback, retryPolicy);
+}
+
+void IRMClient::ReleaseBandwidth(uint32_t units,
+                                  AllocationCallback callback,
+                                  const RetryPolicy& retryPolicy)
+{
+    ReleaseBandwidth(units, Generation{0}, std::move(callback), retryPolicy);
 }
 
 void IRMClient::AllocateResources(uint8_t channel,
@@ -455,7 +525,7 @@ void IRMClient::AllocateResources(uint8_t channel,
         Common::InvokeSharedCallback(callbackState, AllocationStatus::Failed);
         return;
     }
-    if (irmNodeId_ == 0xFF) {
+    if (CurrentEpoch().irmNodeId == 0xFF) {
         Common::InvokeSharedCallback(callbackState, AllocationStatus::NoIRM);
         return;
     }
@@ -499,6 +569,55 @@ void IRMClient::AllocateResources(uint8_t channel,
         retryPolicy);
 }
 
+void IRMClient::ReleaseResources(uint8_t channel,
+                                 uint32_t bandwidthUnits,
+                                 Generation generation,
+                                 AllocationCallback callback,
+                                 const RetryPolicy& retryPolicy)
+{
+    auto callbackState = Common::ShareCallback(std::move(callback));
+
+    if (channel >= 64) {
+        Common::InvokeSharedCallback(callbackState, AllocationStatus::Failed);
+        return;
+    }
+
+    const auto current = CurrentEpoch();
+    if (generation.value != 0 && generation != current.generation) {
+        ASFW_LOG(IRM, "ReleaseResources: Benign release for stale gen %u (current=%u)",
+                 generation.value, current.generation.value);
+        Common::InvokeSharedCallback(callbackState, AllocationStatus::Success);
+        return;
+    }
+
+    if (current.irmNodeId == 0xFF) {
+        Common::InvokeSharedCallback(callbackState, AllocationStatus::NoIRM);
+        return;
+    }
+
+    ReleaseChannel(channel, generation,
+        [this, callbackState, bandwidthUnits, generation, retryPolicy](AllocationStatus channelStatus) mutable {
+            ReleaseBandwidth(bandwidthUnits, generation,
+                [callbackState, channelStatus](AllocationStatus bandwidthStatus) mutable {
+                    if (channelStatus != AllocationStatus::Success) {
+                        Common::InvokeSharedCallback(callbackState, channelStatus);
+                    } else {
+                        Common::InvokeSharedCallback(callbackState, bandwidthStatus);
+                    }
+                },
+                retryPolicy);
+        },
+        retryPolicy);
+}
+
+void IRMClient::ReleaseResources(uint8_t channel,
+                                 uint32_t bandwidthUnits,
+                                 AllocationCallback callback,
+                                 const RetryPolicy& retryPolicy)
+{
+    ReleaseResources(channel, bandwidthUnits, Generation{0}, std::move(callback), retryPolicy);
+}
+
 void IRMClient::ReadResourcesSnapshot(ResourceSnapshotCallback callback)
 {
     constexpr uint64_t kQuietPeriodNs = 1'000'000'000ULL;
@@ -532,7 +651,14 @@ void IRMClient::ReadResourcesSnapshot(ResourceSnapshotCallback callback)
             }
         }
 
-        ReadIRMWindow(std::move(callback));
+        ReadIRMWindowForEpoch(epoch, [this, callback = std::move(callback)](AllocationStatus status, ResourceSnapshot snapshot) mutable {
+            if (status == AllocationStatus::GenerationMismatch) {
+                // Raced with a bus reset: re-evaluate against new generation
+                ReadResourcesSnapshot(std::move(callback));
+                return;
+            }
+            callback(status, snapshot);
+        });
         return;
     }
 }
@@ -578,28 +704,6 @@ void IRMClient::CompareSwapChannel(uint8_t channel,
                                                          : AllocationStatus::NoResources;
                               Common::InvokeSharedCallback(callbackState, result, oldValue);
                           });
-}
-
-// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-void IRMClient::ReleaseResources(uint8_t channel,
-                                 uint32_t bandwidthUnits,
-                                 AllocationCallback callback,
-                                 const RetryPolicy& retryPolicy)
-{
-    ReleaseBandwidth(bandwidthUnits,
-        [this, channel, callback = std::move(callback), retryPolicy](AllocationStatus bandwidthStatus) mutable {
-            if (bandwidthStatus != AllocationStatus::Success) {
-                callback(bandwidthStatus);
-                return;
-            }
-
-            ReleaseChannel(channel,
-                [callback = std::move(callback)](AllocationStatus channelStatus) mutable {
-                    callback(channelStatus);
-                },
-                retryPolicy);
-        },
-        retryPolicy);
 }
 
 void IRMClient::PerformChannelLock(uint8_t channel, bool allocate,

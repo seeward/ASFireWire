@@ -707,29 +707,43 @@ void ControllerCore::EvaluateActivePolicies() noexcept {
                 .connectivityHash = connectivityHash
             };
 
-            const bool localIrmCsrReady = localIrmController_
-                ? (localIrmController_->Snapshot().state != Bus::LocalIRMResourceState::Disabled)
-                : true;
-            const bool currentRHB = false;
+            bool localIrmcReady = false;
+            bool localCmcReady = false;
+            if (deps_.configRomStager) {
+                const auto decoded = ASFW::FW::DecodeBusOptions(deps_.configRomStager->ExpectedBusOptions());
+                localIrmcReady = decoded.irmc;
+                localCmcReady = decoded.cmc;
+            }
+
+            const bool localIrmCsrReady = localIrmController_ &&
+                (localIrmController_->Snapshot().state != Bus::LocalIRMResourceState::Disabled) &&
+                localIrmcReady;
+
+            const bool currentRHB = deps_.hardware ? deps_.hardware->GetRootHoldOff() : false;
 
             Bus::IRMBootstrapInputs in{
                 .roleMode = rolePolicy_.roleMode,
                 .topologyValid = (topo->graphStatus == Driver::TopologyGraphStatus::Valid),
                 .generation = topo->generation,
-                .provenanceResetRequestId = 0,
+                .provenanceResetRequestId = topo->provenanceResetRequestId,
                 .localNodeId = topo->localNodeId,
                 .irmNodeId = topo->irmNodeId,
                 .rootNodeId = topo->rootNodeId,
                 .gapCount = topo->gapCount,
                 .hasUsableContender = hasUsableContender,
                 .physicalTopology = physSig,
-                .localCmcReady = true,
+                .localCmcReady = localCmcReady,
                 .localIrmCsrHostReady = localIrmCsrReady,
                 .currentRootHoldOff = currentRHB,
                 .nowNs = BusResetCoordinator::MonotonicNow()
             };
 
             const auto bootstrapDecision = irmBootstrap_->Evaluate(in);
+            if (bootstrapDecision.restoreRootHoldoff && deps_.hardware) {
+                ASFW_LOG(IRM, "[IRM Bootstrap] Restoring RHB to %d", bootstrapDecision.rootHoldoffToRestore ? 1 : 0);
+                deps_.hardware->SetRootHoldOff(bootstrapDecision.rootHoldoffToRestore);
+            }
+
             if (bootstrapDecision.resetRequested) {
                 pendingReset_ = PendingReset{
                     .targetRoot = bootstrapDecision.targetRoot,
@@ -756,7 +770,9 @@ void ControllerCore::EvaluateActivePolicies() noexcept {
         EvaluateGapPolicy();
 
         // 4. Power Management / Link-On (M8)
-        EvaluatePowerLinkPolicy();
+        if (!pendingReset_) {
+            EvaluatePowerLinkPolicy();
+        }
     }
 
     // 5. Execution of combined reset

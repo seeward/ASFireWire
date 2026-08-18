@@ -119,6 +119,7 @@ AwaitResourceSnapshot(IRM::IRMClient& irm) {
     case IRM::AllocationStatus::NoIRM: return kIOReturnNotReady;
     case IRM::AllocationStatus::Failed: return kIOReturnError;
     }
+    return kIOReturnError;
 }
 
 [[nodiscard]] kern_return_t ToIOReturn(CMP::CMPStatus status) noexcept {
@@ -130,6 +131,7 @@ AwaitResourceSnapshot(IRM::IRMClient& irm) {
     case CMP::CMPStatus::NotFound: return kIOReturnNotFound;
     case CMP::CMPStatus::Failed: return kIOReturnError;
     }
+    return kIOReturnError;
 }
 
 struct PlugSelection {

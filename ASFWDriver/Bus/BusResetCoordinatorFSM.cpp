@@ -30,6 +30,8 @@ void BusResetCoordinator::BeginNewResetCycle() {
     stopFlushIssued_ = false;
     filtersEnabled_ = false;
     atArmed_ = false;
+    inFlightResetRequestId_ = dispatchedResetRequestId_;
+    dispatchedResetRequestId_ = 0;
     cycle_.ResetForNewEdge();
     // A new reset edge invalidates all post-reset timing gates from the prior
     // generation; no gate reopens until Self-ID completion is observed for the
@@ -219,6 +221,8 @@ BusResetCoordinator::StepResult BusResetCoordinator::StepComplete() {
     }
 
     SendGlobalResumeIfNeeded();
+    lastExecutedResetRequestId_ = inFlightResetRequestId_;
+    inFlightResetRequestId_ = 0;
     TransitionTo(State::Idle, "bus reset cycle complete");
 
     if (topologyCallback_ && cycle_.acceptedTopology.has_value() && (workQueue_.get() != nullptr)) {

@@ -204,6 +204,7 @@ struct NormalizedTopologyGraph {
 struct TopologySnapshot {
     uint32_t generation{0};
     uint64_t capturedAt{0};
+    uint64_t provenanceResetRequestId{0};
 
     SelfIDStreamStatus selfIdStatus{SelfIDStreamStatus::Unknown};
     TopologyGraphStatus graphStatus{TopologyGraphStatus::Unknown};

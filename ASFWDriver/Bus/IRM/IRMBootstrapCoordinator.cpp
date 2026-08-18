@@ -35,6 +35,9 @@ IRMBootstrapDecision IRMBootstrapCoordinator::Evaluate(const IRMBootstrapInputs&
         using T = std::decay_t<decltype(state)>;
 
         if constexpr (std::is_same_v<T, IRMBootstrapStateAwaitingGeneration>) {
+            const bool shouldRestoreRHB = state.assertedRootHoldoff;
+            const bool targetRHB = state.previousRootHoldoff;
+
             if (irmValid) {
                 // Success! A valid IRM exists on the bus.
                 lastSuccessfulGeneration_ = in.generation;
@@ -42,21 +45,29 @@ IRMBootstrapDecision IRMBootstrapCoordinator::Evaluate(const IRMBootstrapInputs&
                 ASFW_LOG(IRM, "✅ [IRM Bootstrap] Succeeded in gen %u (IRM node=%u). Bootstrap going dormant.",
                          in.generation, in.irmNodeId);
                 state_ = IRMBootstrapStateIdle{};
-                return IRMBootstrapDecision{.resetRequested = false};
+                return IRMBootstrapDecision{
+                    .resetRequested = false,
+                    .restoreRootHoldoff = shouldRestoreRHB,
+                    .rootHoldoffToRestore = targetRHB
+                };
             }
 
             // Still no IRM! Check if this generation was caused by our bootstrap reset.
             if (in.provenanceResetRequestId == state.resetRequestId) {
                 // Our own reset failed to produce an IRM. Suppress further resets to prevent loops.
-                ASFW_LOG(IRM, "⚠️ [IRM Bootstrap] Bootstrap reset in gen %u produced no usable IRM. Entering SuppressedFailed.",
-                         in.generation);
+                ASFW_LOG(IRM, "⚠️ [IRM Bootstrap] Bootstrap reset in gen %u (reqId=%llu) produced no usable IRM. Entering SuppressedFailed.",
+                         in.generation, state.resetRequestId);
                 state_ = IRMBootstrapStateSuppressedFailed{
                     .failedGeneration = in.generation,
                     .failedResetRequestId = state.resetRequestId,
                     .physicalTopology = in.physicalTopology,
                     .reason = "Zero usable contenders persisted after bootstrap reset"
                 };
-                return IRMBootstrapDecision{.resetRequested = false};
+                return IRMBootstrapDecision{
+                    .resetRequested = false,
+                    .restoreRootHoldoff = shouldRestoreRHB,
+                    .rootHoldoffToRestore = targetRHB
+                };
             }
 
             // An external reset happened while awaiting generation; fall through to evaluate as fresh attempt.
@@ -98,13 +109,14 @@ IRMBootstrapDecision IRMBootstrapCoordinator::Evaluate(const IRMBootstrapInputs&
         }
 
         // IRM is absent (zero usable contenders on bus) and role mode is active (IRMResourceHost / FullBusManager).
-        // Verify local readiness before promoting wire eligibility:
-        if (!in.localIrmCsrHostReady) {
-            ASFW_LOG(IRM, "⚠️ [IRM Bootstrap] Local IRM CSR host not ready; bootstrap suppressed");
+        // Verify local readiness before promoting wire eligibility (fail-closed):
+        if (!in.localIrmCsrHostReady || !in.localCmcReady) {
+            ASFW_LOG(IRM, "⚠️ [IRM Bootstrap] Local IRM readiness check failed (csrHost=%d, cmc=%d); bootstrap suppressed",
+                     in.localIrmCsrHostReady ? 1 : 0, in.localCmcReady ? 1 : 0);
             return IRMBootstrapDecision{.resetRequested = false};
         }
 
-        const uint64_t reqId = nextResetRequestId_++;
+        const uint64_t reqId = in.provenanceResetRequestId != 0 ? in.provenanceResetRequestId : nextResetRequestId_++;
         attemptsCount_++;
 
         ASFW_LOG(IRM, "🚀 [IRM Bootstrap] Zero usable contenders in gen %u. Requesting bootstrap reset (reqId=%llu, targetRoot=%u)",

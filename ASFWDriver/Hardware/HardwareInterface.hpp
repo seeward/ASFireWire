@@ -112,6 +112,7 @@ class HardwareInterface {
     void InitializePhyReg4Cache();
 
     void SetRootHoldOff(bool enable);
+    [[nodiscard]] bool GetRootHoldOff() const;
 
     [[nodiscard]] std::optional<uint8_t> ReadPhyRegister(uint8_t address);
     [[nodiscard]] bool WritePhyRegister(uint8_t address, uint8_t value);

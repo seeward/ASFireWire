@@ -204,7 +204,9 @@ bool BusResetCoordinator::BuildTopology() {
         return false;
     }
 
-    cycle_.acceptedTopology = *snapshot;
+    auto topologySnapshot = *snapshot;
+    topologySnapshot.provenanceResetRequestId = inFlightResetRequestId_;
+    cycle_.acceptedTopology = topologySnapshot;
     lastAcceptedGeneration_ = snapshot->generation;
     lastTopologyNodeCount_ =
         static_cast<uint8_t>(std::min<std::size_t>(snapshot->physical.nodes.size(), 0xFFU));
@@ -446,6 +448,8 @@ BusResetCoordinator::ResetRequest BusResetCoordinator::MergeResetRequests(
         merged.gapDecisionReason = incoming.gapDecisionReason;
     }
 
+    merged.requestId = incoming.requestId != 0 ? incoming.requestId : current.requestId;
+
     if (!incoming.reason.empty()) {
         merged.reason = incoming.reason;
     }
@@ -545,6 +549,8 @@ bool BusResetCoordinator::DispatchSoftwareReset(const ResetRequest& request) {
         ClearSoftwareResetTracking(request, carriesDelegation);
         return false;
     }
+
+    dispatchedResetRequestId_ = request.requestId;
 
     NoteIssuedGapReset(request);
 
@@ -725,10 +731,11 @@ void BusResetCoordinator::RequestConfigRomRestageReset(const char* reason) {
                           reason != nullptr ? reason : "Config ROM re-stage", std::nullopt});
 }
 
-void BusResetCoordinator::RequestRolePolicyReset(uint8_t targetRoot, bool longReset,
-                                                 std::optional<uint8_t> gapCount,
-                                                 std::optional<bool> setContender,
-                                                 std::string reason) {
+uint64_t BusResetCoordinator::RequestRolePolicyReset(uint8_t targetRoot, bool longReset,
+                                                     std::optional<uint8_t> gapCount,
+                                                     std::optional<bool> setContender,
+                                                     std::string reason) {
+    const uint64_t reqId = nextResetRequestId_++;
     BusManager::PhyConfigCommand command{};
     command.forceRootNodeID = targetRoot;
     command.gapCount = gapCount;
@@ -742,7 +749,9 @@ void BusResetCoordinator::RequestRolePolicyReset(uint8_t targetRoot, bool longRe
                           longReset ? ResetFlavor::Long : ResetFlavor::Short,
                           command,
                           std::move(reason),
-                          std::nullopt});
+                          std::nullopt,
+                          reqId});
+    return reqId;
 }
 
 void BusResetCoordinator::ResetDelegationRetryCounter() {

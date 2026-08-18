@@ -55,6 +55,8 @@ struct IRMBootstrapDecision {
     uint8_t targetRoot{0xFF};
     bool setContender{false};
     bool rootHoldoff{false};
+    bool restoreRootHoldoff{false};
+    bool rootHoldoffToRestore{false};
     const char* reason{""};
 };
 

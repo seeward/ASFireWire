@@ -564,6 +564,14 @@ void HardwareInterface::SetRootHoldOff(bool enable) {
     }
 }
 
+bool HardwareInterface::GetRootHoldOff() const {
+    const auto currentOpt = const_cast<HardwareInterface*>(this)->ReadPhyRegister(kPhyReg1Address);
+    if (!currentOpt.has_value()) {
+        return false;
+    }
+    return (currentOpt.value() & kPhyRootHoldOff) != 0;
+}
+
 std::optional<uint8_t> HardwareInterface::ReadPhyRegister(uint8_t address) {
     IOLockGuard guard(phyLock_);
     return ReadPhyRegisterUnlocked(address);

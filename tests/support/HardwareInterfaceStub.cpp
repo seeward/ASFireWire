@@ -315,6 +315,14 @@ void HardwareInterface::InitializePhyReg4Cache() {}
 
 void HardwareInterface::SetRootHoldOff(bool) {}
 
+bool HardwareInterface::GetRootHoldOff() const {
+    const auto currentOpt = const_cast<HardwareInterface*>(this)->ReadPhyRegister(1);
+    if (!currentOpt.has_value()) {
+        return false;
+    }
+    return (currentOpt.value() & 0x40) != 0;
+}
+
 std::optional<uint8_t> HardwareInterface::ReadPhyRegister(uint8_t address) {
     return WithState(this, [address](HardwareTestState& state) -> std::optional<uint8_t> {
         const auto it = state.phyRegisters.find(address);

@@ -54,6 +54,7 @@ enum class CMPStatus : uint8_t {
     case CMPStatus::NotFound: return "NotFound";
     case CMPStatus::Failed: return "Failed";
     }
+    return "Unknown";
 }
 
 using CMPCallback = std::function<void(CMPStatus status)>;

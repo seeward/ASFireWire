@@ -210,11 +210,13 @@ class BusResetCoordinator {
     /// debug-only "unsafe bus resets" property is set.
     void RequestConfigRomRestageReset(const char* reason = "Config ROM re-stage");
 
-    /// Request a RoleCoordinator-initiated PHY config + bus reset.
-    void RequestRolePolicyReset(uint8_t targetRoot, bool longReset,
-                                std::optional<uint8_t> gapCount,
-                                std::optional<bool> setContender,
-                                std::string reason);
+    /// Request a RoleCoordinator-initiated PHY config + bus reset. Returns the unique request ID.
+    uint64_t RequestRolePolicyReset(uint8_t targetRoot, bool longReset,
+                                    std::optional<uint8_t> gapCount,
+                                    std::optional<bool> setContender,
+                                    std::string reason);
+
+    [[nodiscard]] uint64_t LastExecutedResetRequestId() const noexcept { return lastExecutedResetRequestId_; }
 
     static uint64_t MonotonicNow() noexcept;
 
@@ -267,6 +269,7 @@ class BusResetCoordinator {
         std::optional<BusManager::PhyConfigCommand> phyConfig;
         std::string reason;
         std::optional<BusManager::GapDecisionReason> gapDecisionReason;
+        uint64_t requestId{0};
     };
 
     struct ResetCycleState {
@@ -400,6 +403,10 @@ class BusResetCoordinator {
     uint32_t resetEpoch_{0};
     uint32_t manualResetEpoch_{0};
     uint32_t softwareResetIssuedCount_{0};
+    uint64_t nextResetRequestId_{1};
+    uint64_t dispatchedResetRequestId_{0};
+    uint64_t inFlightResetRequestId_{0};
+    uint64_t lastExecutedResetRequestId_{0};
     uint32_t busResetIrqCount_{0};
     uint32_t lastAcceptedGeneration_{0};
     uint8_t lastTopologyNodeCount_{0};

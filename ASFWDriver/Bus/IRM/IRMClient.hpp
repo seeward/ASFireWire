@@ -3,6 +3,7 @@
 #include "IRMTypes.hpp"
 #include "../../Async/Interfaces/IFireWireBus.hpp"
 #include "../../Hardware/HardwareInterface.hpp"
+#include <DriverKit/IOLib.h>
 #include <functional>
 #include <memory>
 #include <utility>
@@ -60,11 +61,21 @@ public:
                        AllocationCallback callback,
                        const RetryPolicy& retryPolicy = RetryPolicy::Default());
 
+    void ReleaseChannel(uint8_t channel,
+                       Generation generation,
+                       AllocationCallback callback,
+                       const RetryPolicy& retryPolicy = RetryPolicy::Default());
+
     void AllocateBandwidth(uint32_t units,
                           AllocationCallback callback,
                           const RetryPolicy& retryPolicy = RetryPolicy::Default());
 
     void ReleaseBandwidth(uint32_t units,
+                         AllocationCallback callback,
+                         const RetryPolicy& retryPolicy = RetryPolicy::Default());
+
+    void ReleaseBandwidth(uint32_t units,
+                         Generation generation,
                          AllocationCallback callback,
                          const RetryPolicy& retryPolicy = RetryPolicy::Default());
 
@@ -78,7 +89,15 @@ public:
                          AllocationCallback callback,
                          const RetryPolicy& retryPolicy = RetryPolicy::Default());
 
+    void ReleaseResources(uint8_t channel,
+                         uint32_t bandwidthUnits,
+                         Generation generation,
+                         AllocationCallback callback,
+                         const RetryPolicy& retryPolicy = RetryPolicy::Default());
+
     void ReadResourcesSnapshot(ResourceSnapshotCallback callback);
+
+    void ReadIRMWindowForEpoch(const IRMEpoch& targetEpoch, ResourceSnapshotCallback callback);
 
     void CompareSwapBandwidth(uint32_t expected,
                               uint32_t desired,
@@ -89,9 +108,13 @@ public:
                             uint32_t desired,
                             CompareSwapCallback callback);
 
-    [[nodiscard]] uint8_t GetIRMNodeID() const { return irmNodeId_; }
+    [[nodiscard]] uint8_t GetIRMNodeID() const {
+        return CurrentEpoch().irmNodeId;
+    }
 
-    [[nodiscard]] Generation GetGeneration() const { return generation_; }
+    [[nodiscard]] Generation GetGeneration() const {
+        return CurrentEpoch().generation;
+    }
 
 private:
     struct ChannelLockState;
@@ -100,11 +123,17 @@ private:
     Async::IFireWireBus& bus_;
     LocalIRMAccess localIRMAccess_;
 
+    IOLock* epochLock_{nullptr};
     uint8_t irmNodeId_{0xFF};
     Generation generation_{0};
     uint64_t lastBusResetNs_{0};
 
     void ReadIRMQuadlet(
+        uint32_t addressLo,
+        std::function<void(AllocationStatus status, uint32_t value)> callback);
+
+    void ReadIRMQuadletForEpoch(
+        const IRMEpoch& epoch,
         uint32_t addressLo,
         std::function<void(AllocationStatus status, uint32_t value)> callback);
 

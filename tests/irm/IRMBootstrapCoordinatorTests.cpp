@@ -31,6 +31,7 @@ TEST_F(IRMBootstrapCoordinatorTests, ClientOnlyModeRemainsStrictlyPassive) {
         .irmNodeId = 0xFF,
         .hasUsableContender = false,
         .physicalTopology = {.nodeCount = 3, .connectivityHash = 0x1234},
+        .localCmcReady = true,
         .localIrmCsrHostReady = true,
     };
 
@@ -38,6 +39,36 @@ TEST_F(IRMBootstrapCoordinatorTests, ClientOnlyModeRemainsStrictlyPassive) {
     EXPECT_FALSE(decision.resetRequested);
     EXPECT_TRUE(std::holds_alternative<IRMBootstrapStateIdle>(coordinator_.State()));
     EXPECT_EQ(coordinator_.AttemptsCount(), 0);
+}
+
+TEST_F(IRMBootstrapCoordinatorTests, FailClosedWhenLocalCmcOrCsrHostNotReady) {
+    // 1. localCmcReady = false
+    IRMBootstrapInputs in1{
+        .roleMode = RoleMode::IRMResourceHost,
+        .topologyValid = true,
+        .generation = 1,
+        .localNodeId = 0,
+        .irmNodeId = 0xFF,
+        .hasUsableContender = false,
+        .physicalTopology = {.nodeCount = 3, .connectivityHash = 0x1234},
+        .localCmcReady = false,
+        .localIrmCsrHostReady = true,
+    };
+    EXPECT_FALSE(coordinator_.Evaluate(in1).resetRequested);
+
+    // 2. localIrmCsrHostReady = false
+    IRMBootstrapInputs in2{
+        .roleMode = RoleMode::IRMResourceHost,
+        .topologyValid = true,
+        .generation = 1,
+        .localNodeId = 0,
+        .irmNodeId = 0xFF,
+        .hasUsableContender = false,
+        .physicalTopology = {.nodeCount = 3, .connectivityHash = 0x1234},
+        .localCmcReady = true,
+        .localIrmCsrHostReady = false,
+    };
+    EXPECT_FALSE(coordinator_.Evaluate(in2).resetRequested);
 }
 
 TEST_F(IRMBootstrapCoordinatorTests, IRMResourceHostBootstrapsWhenZeroUsableContenders) {
@@ -49,6 +80,7 @@ TEST_F(IRMBootstrapCoordinatorTests, IRMResourceHostBootstrapsWhenZeroUsableCont
         .irmNodeId = 0xFF,
         .hasUsableContender = false, // e.g. Node 1 has C=1, L=0 (inactive) and Node 2 has C=0, L=1
         .physicalTopology = {.nodeCount = 3, .connectivityHash = 0x1234},
+        .localCmcReady = true,
         .localIrmCsrHostReady = true,
         .currentRootHoldOff = false,
         .nowNs = 100'000'000ULL
@@ -65,8 +97,8 @@ TEST_F(IRMBootstrapCoordinatorTests, IRMResourceHostBootstrapsWhenZeroUsableCont
     EXPECT_EQ(coordinator_.AttemptsCount(), 1);
 }
 
-TEST_F(IRMBootstrapCoordinatorTests, BootstrapSucceedsWhenNextGenEdictsLocalIRM) {
-    // Gen 1: Bootstrap requested
+TEST_F(IRMBootstrapCoordinatorTests, BootstrapSucceedsWhenNextGenEdictsLocalIRMAndRestoresRHB) {
+    // Gen 1: Bootstrap requested with initial RHB = false
     IRMBootstrapInputs inGen1{
         .roleMode = RoleMode::IRMResourceHost,
         .topologyValid = true,
@@ -75,10 +107,13 @@ TEST_F(IRMBootstrapCoordinatorTests, BootstrapSucceedsWhenNextGenEdictsLocalIRM)
         .irmNodeId = 0xFF,
         .hasUsableContender = false,
         .physicalTopology = {.nodeCount = 3, .connectivityHash = 0x1234},
-        .localIrmCsrHostReady = true
+        .localCmcReady = true,
+        .localIrmCsrHostReady = true,
+        .currentRootHoldOff = false
     };
     const auto d1 = coordinator_.Evaluate(inGen1);
     ASSERT_TRUE(d1.resetRequested);
+    EXPECT_TRUE(d1.rootHoldoff);
 
     // Gen 2: Erupted from bootstrap reset (local node is IRM=0)
     IRMBootstrapInputs inGen2{
@@ -90,16 +125,19 @@ TEST_F(IRMBootstrapCoordinatorTests, BootstrapSucceedsWhenNextGenEdictsLocalIRM)
         .irmNodeId = 0,
         .hasUsableContender = true,
         .physicalTopology = {.nodeCount = 3, .connectivityHash = 0x1234},
+        .localCmcReady = true,
         .localIrmCsrHostReady = true
     };
     const auto d2 = coordinator_.Evaluate(inGen2);
     EXPECT_FALSE(d2.resetRequested);
+    EXPECT_TRUE(d2.restoreRootHoldoff);
+    EXPECT_FALSE(d2.rootHoldoffToRestore); // Restores to previous RHB (false)
     EXPECT_TRUE(std::holds_alternative<IRMBootstrapStateIdle>(coordinator_.State()));
     EXPECT_EQ(coordinator_.LastSuccessfulGeneration(), 2);
     EXPECT_EQ(coordinator_.LastElectedIrmNodeId(), 0);
 }
 
-TEST_F(IRMBootstrapCoordinatorTests, BootstrapSuppressesWhenResetFailsToProduceIRM) {
+TEST_F(IRMBootstrapCoordinatorTests, BootstrapSuppressesWhenResetFailsToProduceIRMAndRestoresRHB) {
     // Gen 1: Bootstrap requested
     IRMBootstrapInputs inGen1{
         .roleMode = RoleMode::IRMResourceHost,
@@ -109,7 +147,9 @@ TEST_F(IRMBootstrapCoordinatorTests, BootstrapSuppressesWhenResetFailsToProduceI
         .irmNodeId = 0xFF,
         .hasUsableContender = false,
         .physicalTopology = {.nodeCount = 3, .connectivityHash = 0x1234},
-        .localIrmCsrHostReady = true
+        .localCmcReady = true,
+        .localIrmCsrHostReady = true,
+        .currentRootHoldOff = false
     };
     coordinator_.Evaluate(inGen1);
 
@@ -123,10 +163,13 @@ TEST_F(IRMBootstrapCoordinatorTests, BootstrapSuppressesWhenResetFailsToProduceI
         .irmNodeId = 0xFF,
         .hasUsableContender = false,
         .physicalTopology = {.nodeCount = 3, .connectivityHash = 0x1234},
+        .localCmcReady = true,
         .localIrmCsrHostReady = true
     };
     const auto d2 = coordinator_.Evaluate(inGen2);
     EXPECT_FALSE(d2.resetRequested);
+    EXPECT_TRUE(d2.restoreRootHoldoff);
+    EXPECT_FALSE(d2.rootHoldoffToRestore);
     EXPECT_TRUE(std::holds_alternative<IRMBootstrapStateSuppressedFailed>(coordinator_.State()));
 
     // Gen 3: Same physical topology, no external reset -> remains suppressed
@@ -134,6 +177,7 @@ TEST_F(IRMBootstrapCoordinatorTests, BootstrapSuppressesWhenResetFailsToProduceI
     inGen3.generation = 3;
     const auto d3 = coordinator_.Evaluate(inGen3);
     EXPECT_FALSE(d3.resetRequested);
+    EXPECT_FALSE(d3.restoreRootHoldoff);
     EXPECT_TRUE(std::holds_alternative<IRMBootstrapStateSuppressedFailed>(coordinator_.State()));
 }
 
@@ -147,6 +191,7 @@ TEST_F(IRMBootstrapCoordinatorTests, ExternalResetRearmsSuppressedBootstrap) {
         .irmNodeId = 0xFF,
         .hasUsableContender = false,
         .physicalTopology = {.nodeCount = 3, .connectivityHash = 0x1234},
+        .localCmcReady = true,
         .localIrmCsrHostReady = true
     };
     coordinator_.Evaluate(in);
@@ -175,6 +220,7 @@ TEST_F(IRMBootstrapCoordinatorTests, PhysicalTopologyChangeRearmsSuppressedBoots
         .irmNodeId = 0xFF,
         .hasUsableContender = false,
         .physicalTopology = {.nodeCount = 3, .connectivityHash = 0x1234},
+        .localCmcReady = true,
         .localIrmCsrHostReady = true
     };
     coordinator_.Evaluate(in);
@@ -203,6 +249,7 @@ TEST_F(IRMBootstrapCoordinatorTests, SubsequentIRMLossReevaluatesBootstrap) {
         .irmNodeId = 2,
         .hasUsableContender = true,
         .physicalTopology = {.nodeCount = 3, .connectivityHash = 0x1234},
+        .localCmcReady = true,
         .localIrmCsrHostReady = true
     };
     const auto d1 = coordinator_.Evaluate(in);
