@@ -591,7 +591,7 @@ void ApogeeDuetDuplex::ProgramRx(StageCallback callback) {
                 ASFW_LOG(Oxfw, "ProgramRx: oPCR0 connected ch=%u", channel);
             } else {
                 ASFW_LOG_ERROR(Oxfw, "ProgramRx: oPCR0 ch=%u failed (%{public}s)", channel,
-                               IRM::ToString(status));
+                               CMP::ToString(status));
             }
 
             AudioStreamRuntimeCaps caps{};
@@ -622,7 +622,7 @@ void ApogeeDuetDuplex::ProgramTxAndEnableDuplex(StageCallback callback) {
                 ASFW_LOG(Oxfw, "ProgramTx: iPCR0 connected ch=%u", channel);
             } else {
                 ASFW_LOG_ERROR(Oxfw, "ProgramTx: iPCR0 ch=%u failed (%{public}s)", channel,
-                               IRM::ToString(status));
+                               CMP::ToString(status));
             }
 
             AudioStreamRuntimeCaps caps{};
@@ -691,7 +691,7 @@ void ApogeeDuetDuplex::DisconnectPlayback(VoidCallback callback) {
             // this status, so without a line here the cause is unrecoverable.
             if (status != CMP::CMPStatus::Success) {
                 ASFW_LOG_ERROR(Oxfw, "DisconnectPlayback: iPCR0 break failed (%{public}s)",
-                               IRM::ToString(status));
+                               CMP::ToString(status));
             }
             callback(MapCMPStatus(status));
         });
@@ -710,7 +710,7 @@ void ApogeeDuetDuplex::DisconnectCapture(VoidCallback callback) {
         [callback = std::move(callback)](CMP::CMPStatus status) mutable {
             if (status != CMP::CMPStatus::Success) {
                 ASFW_LOG_ERROR(Oxfw, "DisconnectCapture: oPCR0 break failed (%{public}s)",
-                               IRM::ToString(status));
+                               CMP::ToString(status));
             }
             callback(MapCMPStatus(status));
         });

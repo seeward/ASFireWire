@@ -36,7 +36,26 @@ struct CMPDevice {
     [[nodiscard]] bool IsValid() const noexcept { return static_cast<bool>(route); }
 };
 
-using CMPStatus = IRM::AllocationStatus;
+enum class CMPStatus : uint8_t {
+    Success,
+    Timeout,
+    GenerationMismatch,
+    NoResources,
+    NotFound,
+    Failed,
+};
+
+[[nodiscard]] constexpr const char* ToString(CMPStatus status) noexcept {
+    switch (status) {
+    case CMPStatus::Success: return "Success";
+    case CMPStatus::Timeout: return "Timeout";
+    case CMPStatus::GenerationMismatch: return "GenerationMismatch";
+    case CMPStatus::NoResources: return "NoResources";
+    case CMPStatus::NotFound: return "NotFound";
+    case CMPStatus::Failed: return "Failed";
+    }
+}
+
 using CMPCallback = std::function<void(CMPStatus status)>;
 using PCRReadCallback = std::function<void(bool success, uint32_t value)>;
 

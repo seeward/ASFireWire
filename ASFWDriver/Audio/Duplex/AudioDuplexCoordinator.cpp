@@ -1096,6 +1096,11 @@ IOReturn DuplexStartTransaction::Run(const StartRequest& request) noexcept {
             endpointId, *irmClient, geometry.allowedIsoChannels, geometry.bandwidthUnits,
             assignedChannel);
         if (reservePlaybackStatus != kIOReturnSuccess) {
+            if (reservePlaybackStatus == kIOReturnNotReady) {
+                ASFW_LOG(Audio,
+                         "ReservePlayback: no IRM in generation %u (endpoint=%llx)",
+                         topologyGeneration.value, endpointId.value);
+            }
             return rollbackToFailure(reservePlaybackStatus,
                                      DuplexRestartPhase::kReservingPlaybackResources,
                                      DuplexRestartFailureCause::kReservePlayback);
@@ -1125,6 +1130,11 @@ IOReturn DuplexStartTransaction::Run(const StartRequest& request) noexcept {
             endpointId, *irmClient, geometry.allowedIsoChannels, geometry.bandwidthUnits,
             assignedChannel);
         if (reserveCaptureStatus != kIOReturnSuccess) {
+            if (reserveCaptureStatus == kIOReturnNotReady) {
+                ASFW_LOG(Audio,
+                         "ReserveCapture: no IRM in generation %u (endpoint=%llx)",
+                         topologyGeneration.value, endpointId.value);
+            }
             return rollbackToFailure(reserveCaptureStatus,
                                      DuplexRestartPhase::kReservingCaptureResources,
                                      DuplexRestartFailureCause::kReserveCapture);

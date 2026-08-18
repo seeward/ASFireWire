@@ -213,8 +213,8 @@ class DuplexIRMReservations final {
                 return kIOReturnOffline;
             case IRM::AllocationStatus::Timeout:
                 return kIOReturnTimeout;
-            case IRM::AllocationStatus::NotFound:
-                return kIOReturnNoDevice;
+            case IRM::AllocationStatus::NoIRM:
+                return kIOReturnNotReady;
             case IRM::AllocationStatus::Failed:
                 return kIOReturnError;
         }

@@ -1481,4 +1481,50 @@ TEST_F(AudioDuplexCoordinatorTests, NonRetryableFailedSessionDoesNotRestartOnRec
     EXPECT_EQ(hostTransport_.stopCalls, 1);
 }
 
+TEST_F(AudioDuplexCoordinatorTests, ColdStartWithNoIRMReturnsNotReadyAndTerminatesCleanly) {
+    hostTransport_.reservePlaybackStatus = kIOReturnNotReady;
+    EXPECT_EQ(coordinator_.StartStreaming(kTestEndpointId), kIOReturnNotReady);
+
+    const auto session = GetSession();
+    ASSERT_TRUE(session.has_value());
+    EXPECT_EQ(session->phase, DiceRestartPhase::kFailed);
+    EXPECT_EQ(session->state, DiceRestartState::kFailed);
+    ASSERT_TRUE(session->lastFailure.has_value());
+    EXPECT_EQ(session->lastFailure->cause, DiceRestartFailureCause::kReservePlayback);
+    EXPECT_TRUE(session->lastFailure->retryable);
+    EXPECT_EQ(hostTransport_.stopCalls, 1);
+    EXPECT_FALSE(session->hostPlaybackReserved);
+}
+
+TEST_F(AudioDuplexCoordinatorTests, MultiGenerationProgressionMatchingHardwareReproduction) {
+    // Generation 1: IRM absent -> StartStreaming returns kIOReturnNotReady
+    hostTransport_.reservePlaybackStatus = kIOReturnNotReady;
+    EXPECT_EQ(coordinator_.StartStreaming(kTestEndpointId), kIOReturnNotReady);
+
+    auto session = GetSession();
+    ASSERT_TRUE(session.has_value());
+    EXPECT_EQ(session->phase, DiceRestartPhase::kFailed);
+
+    // Generation 2: Bus reset occurs, still no IRM -> RecoverStreaming returns kIOReturnNotReady
+    ClearLog();
+    EXPECT_EQ(coordinator_.RecoverStreaming(kTestEndpointId, DiceRestartReason::kBusResetRebind),
+              kIOReturnNotReady);
+
+    session = GetSession();
+    ASSERT_TRUE(session.has_value());
+    EXPECT_EQ(session->phase, DiceRestartPhase::kFailed);
+
+    // Generation 3: Bus reset occurs, IRM elected -> RecoverStreaming succeeds
+    ClearLog();
+    hostTransport_.reservePlaybackStatus = kIOReturnSuccess;
+    EXPECT_EQ(coordinator_.RecoverStreaming(kTestEndpointId, DiceRestartReason::kBusResetRebind),
+              kIOReturnSuccess);
+
+    session = GetSession();
+    ASSERT_TRUE(session.has_value());
+    EXPECT_EQ(session->phase, DiceRestartPhase::kRunning);
+    EXPECT_EQ(session->state, DiceRestartState::kRunning);
+    EXPECT_TRUE(session->hostPlaybackReserved);
+}
+
 } // namespace

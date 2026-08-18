@@ -165,8 +165,8 @@ enum class AllocationStatus : uint8_t {
     /// IRM node didn't respond within timeout
     Timeout,
 
-    /// No IRM node on bus, or CSR access returns address_error
-    NotFound,
+    /// No IRM node on bus (irmNodeId == kInvalidPhysicalId)
+    NoIRM,
 
     /// Generic failure (unexpected state, hardware error, etc.)
     Failed
@@ -182,8 +182,8 @@ enum class AllocationStatus : uint8_t {
             return "generation_mismatch";
         case AllocationStatus::Timeout:
             return "timeout";
-        case AllocationStatus::NotFound:
-            return "not_found";
+        case AllocationStatus::NoIRM:
+            return "no_irm";
         case AllocationStatus::Failed:
             return "failed";
     }

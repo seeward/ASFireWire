@@ -63,19 +63,29 @@ template <typename Start>
     return state->value.load(std::memory_order_relaxed);
 }
 
-template <typename Start>
-[[nodiscard]] IRM::AllocationStatus AwaitAllocation(Start&& start) {
+template <typename Status, typename Start>
+[[nodiscard]] Status AwaitAsync(Start&& start) {
     struct State {
         std::atomic<bool> done{false};
-        std::atomic<IRM::AllocationStatus> status{IRM::AllocationStatus::Failed};
+        std::atomic<Status> status{Status::Failed};
     };
     auto state = std::make_shared<State>();
-    start([state](IRM::AllocationStatus status) {
+    start([state](Status status) {
         state->status.store(status, std::memory_order_relaxed);
         state->done.store(true, std::memory_order_release);
     });
-    if (!WaitUntilDone(state)) return IRM::AllocationStatus::Timeout;
+    if (!WaitUntilDone(state)) return Status::Timeout;
     return state->status.load(std::memory_order_relaxed);
+}
+
+template <typename Start>
+[[nodiscard]] IRM::AllocationStatus AwaitAllocation(Start&& start) {
+    return AwaitAsync<IRM::AllocationStatus>(std::forward<Start>(start));
+}
+
+template <typename Start>
+[[nodiscard]] CMP::CMPStatus AwaitCMP(Start&& start) {
+    return AwaitAsync<CMP::CMPStatus>(std::forward<Start>(start));
 }
 
 [[nodiscard]] std::optional<IRM::ResourceSnapshot>
@@ -106,10 +116,20 @@ AwaitResourceSnapshot(IRM::IRMClient& irm) {
     case IRM::AllocationStatus::NoResources: return kIOReturnNoResources;
     case IRM::AllocationStatus::GenerationMismatch: return kIOReturnAborted;
     case IRM::AllocationStatus::Timeout: return kIOReturnTimeout;
-    case IRM::AllocationStatus::NotFound: return kIOReturnNotFound;
+    case IRM::AllocationStatus::NoIRM: return kIOReturnNotReady;
     case IRM::AllocationStatus::Failed: return kIOReturnError;
     }
-    return kIOReturnError;
+}
+
+[[nodiscard]] kern_return_t ToIOReturn(CMP::CMPStatus status) noexcept {
+    switch (status) {
+    case CMP::CMPStatus::Success: return kIOReturnSuccess;
+    case CMP::CMPStatus::NoResources: return kIOReturnNoResources;
+    case CMP::CMPStatus::GenerationMismatch: return kIOReturnAborted;
+    case CMP::CMPStatus::Timeout: return kIOReturnTimeout;
+    case CMP::CMPStatus::NotFound: return kIOReturnNotFound;
+    case CMP::CMPStatus::Failed: return kIOReturnError;
+    }
 }
 
 struct PlugSelection {
@@ -298,12 +318,12 @@ kern_return_t DVCaptureService::Start(
     }
 
     if (shouldConnectPCR) {
-        const auto status = AwaitAllocation(
+        const auto status = AwaitCMP(
             [&cmp, cmpDevice, outputPlug, channel](CMP::CMPCallback callback) {
                 cmp.ConnectOPCR(cmpDevice, outputPlug, channel,
                                 std::move(callback));
             });
-        if (status != IRM::AllocationStatus::Success) {
+        if (status != CMP::CMPStatus::Success) {
             const kern_return_t stopStatus =
                 isoch.StopPacketReceive(&sink_);
             sink_.MarkTerminal(CaptureState::Failed);
@@ -407,12 +427,12 @@ kern_return_t DVCaptureService::TeardownConnection(
     }
 
     if (!generationInvalid && pcrConnected_ && cmp_ && outputPlug_ <= 30) {
-        const auto status = AwaitAllocation(
+        const auto status = AwaitCMP(
             [this, cmpDevice](CMP::CMPCallback callback) {
                 cmp_->DisconnectOPCR(cmpDevice, outputPlug_,
                                      std::move(callback));
             });
-        mayReleaseResources = status == IRM::AllocationStatus::Success;
+        mayReleaseResources = status == CMP::CMPStatus::Success;
         if (!mayReleaseResources) result = ToIOReturn(status);
     }
     pcrConnected_ = false;
