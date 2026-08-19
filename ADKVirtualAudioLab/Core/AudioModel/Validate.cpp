@@ -1,0 +1,575 @@
+#include "Validate.hpp"
+
+#include <format>
+#include <unordered_map>
+#include <unordered_set>
+
+namespace ASFW::AudioModel {
+
+namespace {
+
+void validateStructure(const Topology& topology,
+                       std::unordered_map<NodeId, const Node*>& nodeMap,
+                       std::unordered_map<PortId, const Port*>& portMap,
+                       std::unordered_map<CrosspointId, const MixerCrosspoint*>& crosspointMap,
+                       std::vector<TopologyError>& errors) {
+    // 1. Validate Nodes
+    for (const auto& node : topology.nodes) {
+        if (auto [it, inserted] = nodeMap.emplace(node.id, &node); !inserted) {
+            errors.push_back({
+                TopologyErrorKind::DuplicateId,
+                std::format("Duplicate NodeId: {}", node.id.value)
+            });
+        }
+    }
+
+    // 2. Validate Ports
+    for (const auto& port : topology.ports) {
+        if (auto [it, inserted] = portMap.emplace(port.id, &port); !inserted) {
+            errors.push_back({
+                TopologyErrorKind::DuplicateId,
+                std::format("Duplicate PortId: {}", port.id.value)
+            });
+        }
+
+        if (port.channels == 0) {
+            errors.push_back({
+                TopologyErrorKind::InvalidChannelCount,
+                std::format("Port {} '{}' has zero channels", port.id.value, port.name)
+            });
+        }
+
+        auto nodeIt = nodeMap.find(port.owner);
+        if (nodeIt == nodeMap.end()) {
+            errors.push_back({
+                TopologyErrorKind::NonexistentNode,
+                std::format("Port {} '{}' references nonexistent owner NodeId {}",
+                            port.id.value, port.name, port.owner.value)
+            });
+        }
+    }
+
+    // 3. Validate Node Bodies (Ports ownership and direction)
+    for (const auto& node : topology.nodes) {
+        std::visit([&](const auto& body) {
+            using T = std::decay_t<decltype(body)>;
+            if constexpr (std::is_same_v<T, EndpointNode>) {
+                // Endpoint has no dedicated port tables in body
+            } else if constexpr (std::is_same_v<T, RouterNode>) {
+                std::unordered_set<PortId> inSet;
+                for (const auto& inPortId : body.inputs) {
+                    if (auto [_, ins] = inSet.insert(inPortId); !ins) {
+                        errors.push_back({
+                            TopologyErrorKind::ForeignPortReference,
+                            std::format("Router Node {} has duplicate input PortId {}", node.id.value, inPortId.value)
+                        });
+                    }
+                    auto pIt = portMap.find(inPortId);
+                    if (pIt == portMap.end()) {
+                        errors.push_back({
+                            TopologyErrorKind::NonexistentPort,
+                            std::format("Router Node {} input PortId {} does not exist", node.id.value, inPortId.value)
+                        });
+                    } else {
+                        if (pIt->second->owner != node.id) {
+                            errors.push_back({
+                                TopologyErrorKind::ForeignPortReference,
+                                std::format("Router Node {} input PortId {} is not owned by this node",
+                                            node.id.value, inPortId.value)
+                            });
+                        }
+                        if (pIt->second->direction != PortDirection::Input) {
+                            errors.push_back({
+                                TopologyErrorKind::InvalidPortDirection,
+                                std::format("Router Node {} input PortId {} is not PortDirection::Input",
+                                            node.id.value, inPortId.value)
+                            });
+                        }
+                    }
+                }
+
+                std::unordered_set<PortId> outSet;
+                for (const auto& outPortId : body.outputs) {
+                    if (auto [_, ins] = outSet.insert(outPortId); !ins) {
+                        errors.push_back({
+                            TopologyErrorKind::ForeignPortReference,
+                            std::format("Router Node {} has duplicate output PortId {}", node.id.value, outPortId.value)
+                        });
+                    }
+                    auto pIt = portMap.find(outPortId);
+                    if (pIt == portMap.end()) {
+                        errors.push_back({
+                            TopologyErrorKind::NonexistentPort,
+                            std::format("Router Node {} output PortId {} does not exist", node.id.value, outPortId.value)
+                        });
+                    } else {
+                        if (pIt->second->owner != node.id) {
+                            errors.push_back({
+                                TopologyErrorKind::ForeignPortReference,
+                                std::format("Router Node {} output PortId {} is not owned by this node",
+                                            node.id.value, outPortId.value)
+                            });
+                        }
+                        if (pIt->second->direction != PortDirection::Output) {
+                            errors.push_back({
+                                TopologyErrorKind::InvalidPortDirection,
+                                std::format("Router Node {} output PortId {} is not PortDirection::Output",
+                                            node.id.value, outPortId.value)
+                            });
+                        }
+                    }
+                }
+            } else if constexpr (std::is_same_v<T, MixerNode>) {
+                std::unordered_set<PortId> inSet;
+                for (const auto& inPortId : body.inputs) {
+                    if (auto [_, ins] = inSet.insert(inPortId); !ins) {
+                        errors.push_back({
+                            TopologyErrorKind::ForeignPortReference,
+                            std::format("Mixer Node {} has duplicate input PortId {}", node.id.value, inPortId.value)
+                        });
+                    }
+                    auto pIt = portMap.find(inPortId);
+                    if (pIt == portMap.end()) {
+                        errors.push_back({
+                            TopologyErrorKind::NonexistentPort,
+                            std::format("Mixer Node {} input PortId {} does not exist", node.id.value, inPortId.value)
+                        });
+                    } else {
+                        if (pIt->second->owner != node.id) {
+                            errors.push_back({
+                                TopologyErrorKind::ForeignPortReference,
+                                std::format("Mixer Node {} input PortId {} is not owned by this node",
+                                            node.id.value, inPortId.value)
+                            });
+                        }
+                        if (pIt->second->direction != PortDirection::Input) {
+                            errors.push_back({
+                                TopologyErrorKind::InvalidPortDirection,
+                                std::format("Mixer Node {} input PortId {} is not PortDirection::Input",
+                                            node.id.value, inPortId.value)
+                            });
+                        }
+                    }
+                }
+
+                std::unordered_set<PortId> outSet;
+                for (const auto& outPortId : body.outputs) {
+                    if (auto [_, ins] = outSet.insert(outPortId); !ins) {
+                        errors.push_back({
+                            TopologyErrorKind::ForeignPortReference,
+                            std::format("Mixer Node {} has duplicate output PortId {}", node.id.value, outPortId.value)
+                        });
+                    }
+                    auto pIt = portMap.find(outPortId);
+                    if (pIt == portMap.end()) {
+                        errors.push_back({
+                            TopologyErrorKind::NonexistentPort,
+                            std::format("Mixer Node {} output PortId {} does not exist", node.id.value, outPortId.value)
+                        });
+                    } else {
+                        if (pIt->second->owner != node.id) {
+                            errors.push_back({
+                                TopologyErrorKind::ForeignPortReference,
+                                std::format("Mixer Node {} output PortId {} is not owned by this node",
+                                            node.id.value, outPortId.value)
+                            });
+                        }
+                        if (pIt->second->direction != PortDirection::Output) {
+                            errors.push_back({
+                                TopologyErrorKind::InvalidPortDirection,
+                                std::format("Mixer Node {} output PortId {} is not PortDirection::Output",
+                                            node.id.value, outPortId.value)
+                            });
+                        }
+                    }
+                }
+
+                std::unordered_set<uint64_t> seenCrosspoints;
+                for (const auto& cp : body.crosspoints) {
+                    if (auto [it, inserted] = crosspointMap.emplace(cp.id, &cp); !inserted) {
+                        errors.push_back({
+                            TopologyErrorKind::DuplicateId,
+                            std::format("Duplicate CrosspointId: {}", cp.id.value)
+                        });
+                    }
+
+                    const uint64_t cpKey = (static_cast<uint64_t>(cp.input.value) << 32) | cp.output.value;
+                    if (auto [_, inserted] = seenCrosspoints.insert(cpKey); !inserted) {
+                        errors.push_back({
+                            TopologyErrorKind::DuplicateRouteOrCrosspoint,
+                            std::format("Mixer Node {} has duplicate crosspoint (input {}, output {})",
+                                        node.id.value, cp.input.value, cp.output.value)
+                        });
+                    }
+
+                    if (!inSet.contains(cp.input)) {
+                        errors.push_back({
+                            TopologyErrorKind::ForeignPortReference,
+                            std::format("Mixer Node {} crosspoint {} references input PortId {} not in mixer inputs",
+                                        node.id.value, cp.id.value, cp.input.value)
+                        });
+                    }
+                    if (!outSet.contains(cp.output)) {
+                        errors.push_back({
+                            TopologyErrorKind::ForeignPortReference,
+                            std::format("Mixer Node {} crosspoint {} references output PortId {} not in mixer outputs",
+                                        node.id.value, cp.id.value, cp.output.value)
+                        });
+                    }
+                }
+            } else if constexpr (std::is_same_v<T, ProcessorNode>) {
+                for (const auto& inPortId : body.inputs) {
+                    auto pIt = portMap.find(inPortId);
+                    if (pIt == portMap.end()) {
+                        errors.push_back({
+                            TopologyErrorKind::NonexistentPort,
+                            std::format("Processor Node {} input PortId {} does not exist", node.id.value, inPortId.value)
+                        });
+                    } else {
+                        if (pIt->second->owner != node.id) {
+                            errors.push_back({
+                                TopologyErrorKind::ForeignPortReference,
+                                std::format("Processor Node {} input PortId {} is not owned by this node",
+                                            node.id.value, inPortId.value)
+                            });
+                        }
+                        if (pIt->second->direction != PortDirection::Input) {
+                            errors.push_back({
+                                TopologyErrorKind::InvalidPortDirection,
+                                std::format("Processor Node {} input PortId {} is not PortDirection::Input",
+                                            node.id.value, inPortId.value)
+                            });
+                        }
+                    }
+                }
+
+                for (const auto& outPortId : body.outputs) {
+                    auto pIt = portMap.find(outPortId);
+                    if (pIt == portMap.end()) {
+                        errors.push_back({
+                            TopologyErrorKind::NonexistentPort,
+                            std::format("Processor Node {} output PortId {} does not exist", node.id.value, outPortId.value)
+                        });
+                    } else {
+                        if (pIt->second->owner != node.id) {
+                            errors.push_back({
+                                TopologyErrorKind::ForeignPortReference,
+                                std::format("Processor Node {} output PortId {} is not owned by this node",
+                                            node.id.value, outPortId.value)
+                            });
+                        }
+                        if (pIt->second->direction != PortDirection::Output) {
+                            errors.push_back({
+                                TopologyErrorKind::InvalidPortDirection,
+                                std::format("Processor Node {} output PortId {} is not PortDirection::Output",
+                                            node.id.value, outPortId.value)
+                            });
+                        }
+                    }
+                }
+            }
+        }, node.body);
+    }
+}
+
+void validateRouting(const Topology& topology,
+                     const std::unordered_map<NodeId, const Node*>& nodeMap,
+                     const std::unordered_map<PortId, const Port*>& portMap,
+                     std::vector<TopologyError>& errors) {
+    // 1. Validate Fixed Links
+    std::unordered_set<PortId> connectedDestinations;
+    for (const auto& link : topology.fixedLinks) {
+        auto srcIt = portMap.find(link.source);
+        auto dstIt = portMap.find(link.destination);
+
+        if (srcIt == portMap.end()) {
+            errors.push_back({
+                TopologyErrorKind::NonexistentPort,
+                std::format("FixedLink source PortId {} does not exist", link.source.value)
+            });
+        } else if (srcIt->second->direction != PortDirection::Output) {
+            errors.push_back({
+                TopologyErrorKind::InvalidPortDirection,
+                std::format("FixedLink source PortId {} is not an Output", link.source.value)
+            });
+        }
+
+        if (dstIt == portMap.end()) {
+            errors.push_back({
+                TopologyErrorKind::NonexistentPort,
+                std::format("FixedLink destination PortId {} does not exist", link.destination.value)
+            });
+        } else if (dstIt->second->direction != PortDirection::Input) {
+            errors.push_back({
+                TopologyErrorKind::InvalidPortDirection,
+                std::format("FixedLink destination PortId {} is not an Input", link.destination.value)
+            });
+        }
+
+        if (srcIt != portMap.end() && dstIt != portMap.end()) {
+            if (link.source == link.destination) {
+                errors.push_back({
+                    TopologyErrorKind::ForeignPortReference,
+                    std::format("FixedLink connects PortId {} to itself", link.source.value)
+                });
+            }
+
+            if (srcIt->second->channels != dstIt->second->channels) {
+                errors.push_back({
+                    TopologyErrorKind::IncompatibleChannelCount,
+                    std::format("FixedLink channel mismatch: source {} has {} ch, destination {} has {} ch",
+                                link.source.value, srcIt->second->channels,
+                                link.destination.value, dstIt->second->channels)
+                });
+            }
+
+            if (auto [_, inserted] = connectedDestinations.insert(link.destination); !inserted) {
+                errors.push_back({
+                    TopologyErrorKind::MultipleDriversOnInput,
+                    std::format("Multiple FixedLinks drive destination PortId {}", link.destination.value)
+                });
+            }
+        }
+    }
+
+    // 2. Validate Router Nodes (legalBundles and constraints)
+    for (const auto& node : topology.nodes) {
+        if (const auto* router = std::get_if<RouterNode>(&node.body)) {
+            const std::unordered_set<PortId> inSet(router->inputs.begin(), router->inputs.end());
+            const std::unordered_set<PortId> outSet(router->outputs.begin(), router->outputs.end());
+
+            // RouteBundleId is router-local
+            std::unordered_set<RouteBundleId> seenBundleIds;
+
+            for (const auto& bundle : router->legalBundles) {
+                if (auto [_, inserted] = seenBundleIds.insert(bundle.id); !inserted) {
+                    errors.push_back({
+                        TopologyErrorKind::DuplicateId,
+                        std::format("Router Node {} has duplicate RouteBundleId: {}", node.id.value, bundle.id.value)
+                    });
+                }
+
+                if (bundle.routes.empty()) {
+                    errors.push_back({
+                        TopologyErrorKind::InvalidConstraint,
+                        std::format("Router Node {} RouteBundle {} has empty routes", node.id.value, bundle.id.value)
+                    });
+                }
+
+                std::unordered_set<uint64_t> seenRoutesInBundle;
+                for (const auto& route : bundle.routes) {
+                    const uint64_t routeKey = (static_cast<uint64_t>(route.input.value) << 32) | route.output.value;
+                    if (auto [_, inserted] = seenRoutesInBundle.insert(routeKey); !inserted) {
+                        errors.push_back({
+                            TopologyErrorKind::DuplicateRouteOrCrosspoint,
+                            std::format("Router Node {} RouteBundle {} has duplicate route (input {}, output {})",
+                                        node.id.value, bundle.id.value, route.input.value, route.output.value)
+                        });
+                    }
+
+                    if (!inSet.contains(route.input)) {
+                        errors.push_back({
+                            TopologyErrorKind::ForeignPortReference,
+                            std::format("Router Node {} RouteBundle {} references input PortId {} not in router inputs",
+                                        node.id.value, bundle.id.value, route.input.value)
+                        });
+                    }
+                    if (!outSet.contains(route.output)) {
+                        errors.push_back({
+                            TopologyErrorKind::ForeignPortReference,
+                            std::format("Router Node {} RouteBundle {} references output PortId {} not in router outputs",
+                                        node.id.value, bundle.id.value, route.output.value)
+                        });
+                    }
+
+                    auto inPortIt = portMap.find(route.input);
+                    auto outPortIt = portMap.find(route.output);
+                    if (inPortIt != portMap.end() && outPortIt != portMap.end()) {
+                        if (inPortIt->second->channels != outPortIt->second->channels) {
+                            errors.push_back({
+                                TopologyErrorKind::IncompatibleChannelCount,
+                                std::format("Router Node {} RouteBundle {} channel mismatch: input {} ({} ch) vs output {} ({} ch)",
+                                            node.id.value, bundle.id.value, route.input.value, inPortIt->second->channels,
+                                            route.output.value, outPortIt->second->channels)
+                            });
+                        }
+                    }
+                }
+            }
+
+            if (router->constraints.maxActiveBundles.has_value() && *router->constraints.maxActiveBundles == 0) {
+                errors.push_back({
+                    TopologyErrorKind::InvalidConstraint,
+                    std::format("Router Node {} maxActiveBundles constraint is 0", node.id.value)
+                });
+            }
+            if (router->constraints.maxActiveRoutes.has_value() && *router->constraints.maxActiveRoutes == 0) {
+                errors.push_back({
+                    TopologyErrorKind::InvalidConstraint,
+                    std::format("Router Node {} maxActiveRoutes constraint is 0", node.id.value)
+                });
+            }
+            if (router->constraints.maxSourcesPerOutput.has_value() && *router->constraints.maxSourcesPerOutput == 0) {
+                errors.push_back({
+                    TopologyErrorKind::InvalidConstraint,
+                    std::format("Router Node {} maxSourcesPerOutput constraint is 0", node.id.value)
+                });
+            }
+            if (router->constraints.maxDestinationsPerInput.has_value() && *router->constraints.maxDestinationsPerInput == 0) {
+                errors.push_back({
+                    TopologyErrorKind::InvalidConstraint,
+                    std::format("Router Node {} maxDestinationsPerInput constraint is 0", node.id.value)
+                });
+            }
+        }
+    }
+}
+
+void validateParameters(const Topology& topology,
+                        const std::unordered_map<NodeId, const Node*>& nodeMap,
+                        const std::unordered_map<PortId, const Port*>& portMap,
+                        const std::unordered_map<CrosspointId, const MixerCrosspoint*>& crosspointMap,
+                        std::vector<TopologyError>& errors) {
+    // 1. Validate Parameters
+    std::unordered_set<ParameterId> parameterSet;
+    for (const auto& param : topology.parameters) {
+        if (auto [_, inserted] = parameterSet.insert(param.id); !inserted) {
+            errors.push_back({
+                TopologyErrorKind::DuplicateId,
+                std::format("Duplicate ParameterId: {}", param.id.value)
+            });
+        }
+
+        std::visit([&](const auto& targetId) {
+            using T = std::decay_t<decltype(targetId)>;
+            if constexpr (std::is_same_v<T, NodeId>) {
+                if (!nodeMap.contains(targetId)) {
+                    errors.push_back({
+                        TopologyErrorKind::NonexistentNode,
+                        std::format("Parameter {} '{}' targets nonexistent NodeId {}",
+                                    param.id.value, param.name, targetId.value)
+                    });
+                }
+            } else if constexpr (std::is_same_v<T, PortId>) {
+                if (!portMap.contains(targetId)) {
+                    errors.push_back({
+                        TopologyErrorKind::NonexistentPort,
+                        std::format("Parameter {} '{}' targets nonexistent PortId {}",
+                                    param.id.value, param.name, targetId.value)
+                    });
+                }
+            } else if constexpr (std::is_same_v<T, CrosspointId>) {
+                if (!crosspointMap.contains(targetId)) {
+                    errors.push_back({
+                        TopologyErrorKind::NonexistentCrosspoint,
+                        std::format("Parameter {} '{}' targets nonexistent CrosspointId {}",
+                                    param.id.value, param.name, targetId.value)
+                    });
+                }
+            }
+        }, param.target);
+
+        std::visit([&](const auto& domain) {
+            using D = std::decay_t<decltype(domain)>;
+            if constexpr (std::is_same_v<D, ScalarDomain>) {
+                if (domain.min > domain.max) {
+                    errors.push_back({
+                        TopologyErrorKind::InvalidDomain,
+                        std::format("Parameter {} '{}' ScalarDomain min ({}) > max ({})",
+                                    param.id.value, param.name, domain.min, domain.max)
+                    });
+                }
+                if (domain.step.has_value() && *domain.step <= 0) {
+                    errors.push_back({
+                        TopologyErrorKind::InvalidDomain,
+                        std::format("Parameter {} '{}' ScalarDomain step ({}) <= 0",
+                                    param.id.value, param.name, *domain.step)
+                    });
+                }
+            } else if constexpr (std::is_same_v<D, EnumDomain>) {
+                if (domain.values.empty()) {
+                    errors.push_back({
+                        TopologyErrorKind::InvalidDomain,
+                        std::format("Parameter {} '{}' EnumDomain has no values",
+                                    param.id.value, param.name)
+                    });
+                }
+                std::unordered_set<int64_t> seenEnumValues;
+                for (const auto& item : domain.values) {
+                    if (auto [_, inserted] = seenEnumValues.insert(item.value); !inserted) {
+                        errors.push_back({
+                            TopologyErrorKind::InvalidDomain,
+                            std::format("Parameter {} '{}' EnumDomain has duplicate value {}",
+                                        param.id.value, param.name, item.value)
+                        });
+                    }
+                }
+            }
+        }, param.domain);
+    }
+
+    // 2. Validate Meters
+    std::unordered_set<MeterId> meterSet;
+    for (const auto& meter : topology.meters) {
+        if (auto [_, inserted] = meterSet.insert(meter.id); !inserted) {
+            errors.push_back({
+                TopologyErrorKind::DuplicateId,
+                std::format("Duplicate MeterId: {}", meter.id.value)
+            });
+        }
+
+        std::visit([&](const auto& targetId) {
+            using T = std::decay_t<decltype(targetId)>;
+            if constexpr (std::is_same_v<T, NodeId>) {
+                if (!nodeMap.contains(targetId)) {
+                    errors.push_back({
+                        TopologyErrorKind::NonexistentNode,
+                        std::format("Meter {} '{}' targets nonexistent NodeId {}",
+                                    meter.id.value, meter.name, targetId.value)
+                    });
+                }
+            } else if constexpr (std::is_same_v<T, PortId>) {
+                if (!portMap.contains(targetId)) {
+                    errors.push_back({
+                        TopologyErrorKind::NonexistentPort,
+                        std::format("Meter {} '{}' targets nonexistent PortId {}",
+                                    meter.id.value, meter.name, targetId.value)
+                    });
+                }
+            }
+        }, meter.target);
+
+        if (meter.domain.min > meter.domain.max) {
+            errors.push_back({
+                TopologyErrorKind::InvalidDomain,
+                std::format("Meter {} '{}' ScalarDomain min ({}) > max ({})",
+                            meter.id.value, meter.name, meter.domain.min, meter.domain.max)
+            });
+        }
+    }
+}
+
+} // namespace
+
+std::vector<TopologyError> validateAll(const Topology& topology) {
+    std::vector<TopologyError> errors;
+    std::unordered_map<NodeId, const Node*> nodeMap;
+    std::unordered_map<PortId, const Port*> portMap;
+    std::unordered_map<CrosspointId, const MixerCrosspoint*> crosspointMap;
+
+    validateStructure(topology, nodeMap, portMap, crosspointMap, errors);
+    validateRouting(topology, nodeMap, portMap, errors);
+    validateParameters(topology, nodeMap, portMap, crosspointMap, errors);
+
+    return errors;
+}
+
+std::expected<void, TopologyError> validate(const Topology& topology) {
+    auto errors = validateAll(topology);
+    if (!errors.empty()) {
+        return std::unexpected(errors.front());
+    }
+    return {};
+}
+
+} // namespace ASFW::AudioModel

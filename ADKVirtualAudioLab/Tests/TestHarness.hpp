@@ -46,3 +46,14 @@ struct TestContext final {
                         static_cast<unsigned long long>(e_));                  \
         }                                                                      \
     } while (0)
+
+#define REQUIRE(ctx, cond)                                                     \
+    do {                                                                       \
+        ++(ctx).checks;                                                        \
+        if (!(cond)) {                                                         \
+            ++(ctx).failures;                                                  \
+            std::printf("FATAL REQUIRE FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
+            return;                                                            \
+        }                                                                      \
+    } while (0)
+

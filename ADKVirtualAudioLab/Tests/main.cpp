@@ -18,6 +18,10 @@ void RunVerifierScenarioTests(TestContext& ctx);
 void RunTxTimingModelTests(TestContext& ctx);
 void RunWriteEndTraceReplayerTests(TestContext& ctx);
 void RunPacketDumpBlobTests(TestContext& ctx);
+void RunDuetTopologyTests(TestContext& ctx);
+void RunPhase88TopologyTests(TestContext& ctx);
+void RunFW1814TopologyTests(TestContext& ctx);
+void RunSaffireTopologyTests(TestContext& ctx);
 
 } // namespace ASFW::LabTests
 
@@ -40,7 +44,12 @@ int main() {
     RunWriteEndTraceReplayerTests(ctx);
     RunVerifierScenarioTests(ctx);
     RunPacketDumpBlobTests(ctx);
+    RunDuetTopologyTests(ctx);
+    RunPhase88TopologyTests(ctx);
+    RunFW1814TopologyTests(ctx);
+    RunSaffireTopologyTests(ctx);
 
     std::printf("%d checks, %d failures\n", ctx.checks, ctx.failures);
     return ctx.failures == 0 ? 0 : 1;
 }
+
