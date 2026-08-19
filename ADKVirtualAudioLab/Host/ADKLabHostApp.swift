@@ -1,23 +1,33 @@
 import SwiftUI
 import SystemExtensions
 
-// Minimal activation host for the lab dext (Milestone 3). A DriverKit
-// extension can only be activated by an app that embeds it in
-// Contents/Library/SystemExtensions — this app does exactly that and nothing
-// else. All observation happens via the dext's IOLog output:
-//   log stream --predicate 'sender == "net.mrmidi.ASFW.ADKVirtualAudioLab"'
-
 @main
 struct ADKLabHostApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .frame(minWidth: 760, minHeight: 560)
+            MainContainerView()
+                .frame(minWidth: 960, minHeight: 700)
         }
     }
 }
 
-struct ContentView: View {
+struct MainContainerView: View {
+    var body: some View {
+        TabView {
+            GenericLabDashboardView()
+                .tabItem {
+                    Label("Generic Device Lab", systemImage: "waveform.path.ecg.rectangle")
+                }
+
+            DextManagementView()
+                .tabItem {
+                    Label("Dext Activation & Packets", systemImage: "cpu")
+                }
+        }
+    }
+}
+
+struct DextManagementView: View {
     @StateObject private var manager = ExtensionManager()
 
     var body: some View {
@@ -52,8 +62,6 @@ struct ContentView: View {
 }
 
 final class ExtensionManager: NSObject, ObservableObject, OSSystemExtensionRequestDelegate {
-    // Discovered from the embedded dext so signing lanes that override the
-    // bundle identifier (BENCH.md Lane B) keep working without code edits.
     static let dextIdentifier: String = {
         let dir = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Library/SystemExtensions")

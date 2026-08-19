@@ -22,6 +22,8 @@ void RunDuetTopologyTests(TestContext& ctx);
 void RunPhase88TopologyTests(TestContext& ctx);
 void RunFW1814TopologyTests(TestContext& ctx);
 void RunSaffireTopologyTests(TestContext& ctx);
+void RunVirtualDeviceRuntimeTests(TestContext& ctx);
+void RunProjectionTests(TestContext& ctx);
 
 } // namespace ASFW::LabTests
 
@@ -48,8 +50,9 @@ int main() {
     RunPhase88TopologyTests(ctx);
     RunFW1814TopologyTests(ctx);
     RunSaffireTopologyTests(ctx);
+    RunVirtualDeviceRuntimeTests(ctx);
+    RunProjectionTests(ctx);
 
     std::printf("%d checks, %d failures\n", ctx.checks, ctx.failures);
     return ctx.failures == 0 ? 0 : 1;
 }
-

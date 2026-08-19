@@ -8,6 +8,9 @@ targets:
     deploymentTarget: "15.0"
     sources:
       - path: Core
+      - path: Devices
+      - path: Runtime
+      - path: ADK
       - path: Driver
       - path: Lab
       - path: Ports
@@ -33,6 +36,9 @@ targets:
     sources:
       - path: Tests
       - path: Core
+      - path: Devices
+      - path: Runtime
+      - path: ADK
       - path: Protocols
       - path: Lab
       - path: Ports
@@ -48,6 +54,12 @@ targets:
     deploymentTarget: "15.0"
     sources:
       - path: Host
+      - path: Lab
+      - path: Core
+      - path: Devices
+      - path: Runtime
+      - path: ADK
+      - path: Protocols
     dependencies:
       - target: net.mrmidi.ASFW.ADKVirtualAudioLab
         embed: true
@@ -63,3 +75,5 @@ targets:
       CODE_SIGN_STYLE: Automatic
       CODE_SIGN_ENTITLEMENTS: Host/ADKLabHost.entitlements
       SWIFT_VERSION: "5.9"
+      SWIFT_OBJC_BRIDGING_HEADER: Host/ADKLabHost-Bridging-Header.h
+      CLANG_CXX_LANGUAGE_STANDARD: gnu++2b

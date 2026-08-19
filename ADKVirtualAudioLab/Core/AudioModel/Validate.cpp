@@ -572,4 +572,232 @@ std::expected<void, TopologyError> validate(const Topology& topology) {
     return {};
 }
 
+std::expected<void, StateError> validateParameterValue(
+    const Topology& topology,
+    ParameterId id,
+    const ParameterValue& value) {
+
+    const Parameter* found = nullptr;
+    for (const auto& param : topology.parameters) {
+        if (param.id == id) {
+            found = &param;
+            break;
+        }
+    }
+
+    if (found == nullptr) {
+        return std::unexpected(StateError{
+            StateErrorKind::NonexistentParameter,
+            std::format("ParameterId {} does not exist in topology", id.value)
+        });
+    }
+
+    // Validate value against domain
+    return std::visit([&](const auto& domain) -> std::expected<void, StateError> {
+        using D = std::decay_t<decltype(domain)>;
+        if constexpr (std::is_same_v<D, BooleanDomain>) {
+            if (!std::holds_alternative<bool>(value)) {
+                return std::unexpected(StateError{
+                    StateErrorKind::InvalidParameterValue,
+                    std::format("Parameter {} '{}' expects boolean value", id.value, found->name)
+                });
+            }
+        } else if constexpr (std::is_same_v<D, ScalarDomain>) {
+            if (!std::holds_alternative<double>(value)) {
+                return std::unexpected(StateError{
+                    StateErrorKind::InvalidParameterValue,
+                    std::format("Parameter {} '{}' expects double scalar value", id.value, found->name)
+                });
+            }
+            const double v = std::get<double>(value);
+            if (v < domain.min || v > domain.max) {
+                return std::unexpected(StateError{
+                    StateErrorKind::InvalidParameterValue,
+                    std::format("Parameter {} '{}' value {} out of range [{}, {}]",
+                                id.value, found->name, v, domain.min, domain.max)
+                });
+            }
+        } else if constexpr (std::is_same_v<D, EnumDomain>) {
+            if (!std::holds_alternative<int64_t>(value)) {
+                return std::unexpected(StateError{
+                    StateErrorKind::InvalidParameterValue,
+                    std::format("Parameter {} '{}' expects int64_t enum value", id.value, found->name)
+                });
+            }
+            const int64_t v = std::get<int64_t>(value);
+            bool match = false;
+            for (const auto& item : domain.values) {
+                if (item.value == v) {
+                    match = true;
+                    break;
+                }
+            }
+            if (!match) {
+                return std::unexpected(StateError{
+                    StateErrorKind::InvalidParameterValue,
+                    std::format("Parameter {} '{}' enum value {} is not in legal enum items",
+                                id.value, found->name, v)
+                });
+            }
+        }
+        return {};
+    }, found->domain);
+}
+
+std::expected<void, StateError> validateRouterState(
+    const Topology& topology,
+    const RouterState& routerState) {
+
+    const RouterNode* router = nullptr;
+    for (const auto& node : topology.nodes) {
+        if (node.id == routerState.node) {
+            router = std::get_if<RouterNode>(&node.body);
+            break;
+        }
+    }
+
+    if (router == nullptr) {
+        return std::unexpected(StateError{
+            StateErrorKind::NonexistentRouter,
+            std::format("NodeId {} is not a RouterNode in topology", routerState.node.value)
+        });
+    }
+
+    std::unordered_map<RouteBundleId, const RouteBundle*> legalMap;
+    for (const auto& b : router->legalBundles) {
+        legalMap[b.id] = &b;
+    }
+
+    // Check all active bundles exist
+    std::vector<const RouteBundle*> activeBundleList;
+    for (const auto& bId : routerState.activeBundles) {
+        auto it = legalMap.find(bId);
+        if (it == legalMap.end()) {
+            return std::unexpected(StateError{
+                StateErrorKind::NonexistentRouteBundle,
+                std::format("Router Node {} has active RouteBundleId {} which is not in legalBundles",
+                            routerState.node.value, bId.value)
+            });
+        }
+        activeBundleList.push_back(it->second);
+    }
+
+    // Check maxActiveBundles constraint
+    if (router->constraints.maxActiveBundles.has_value()) {
+        if (routerState.activeBundles.size() > *router->constraints.maxActiveBundles) {
+            return std::unexpected(StateError{
+                StateErrorKind::RoutingConstraintViolated,
+                std::format("Router Node {} active bundles ({}) exceeds maxActiveBundles ({})",
+                            routerState.node.value, routerState.activeBundles.size(),
+                            *router->constraints.maxActiveBundles)
+            });
+        }
+    }
+
+    // Collect all active routes
+    std::unordered_map<PortId, uint32_t> sourcesPerOutput;
+    std::unordered_map<PortId, uint32_t> destinationsPerInput;
+    uint32_t totalRoutes = 0;
+
+    for (const auto* bundle : activeBundleList) {
+        for (const auto& r : bundle->routes) {
+            ++totalRoutes;
+            ++sourcesPerOutput[r.output];
+            ++destinationsPerInput[r.input];
+        }
+    }
+
+    // Check maxActiveRoutes
+    if (router->constraints.maxActiveRoutes.has_value()) {
+        if (totalRoutes > *router->constraints.maxActiveRoutes) {
+            return std::unexpected(StateError{
+                StateErrorKind::RoutingConstraintViolated,
+                std::format("Router Node {} total active routes ({}) exceeds maxActiveRoutes ({})",
+                            routerState.node.value, totalRoutes,
+                            *router->constraints.maxActiveRoutes)
+            });
+        }
+    }
+
+    // Check maxSourcesPerOutput
+    if (router->constraints.maxSourcesPerOutput.has_value()) {
+        for (const auto& [outPort, count] : sourcesPerOutput) {
+            if (count > *router->constraints.maxSourcesPerOutput) {
+                return std::unexpected(StateError{
+                    StateErrorKind::RoutingConstraintViolated,
+                    std::format("Router Node {} output PortId {} has {} active sources (max is {})",
+                                routerState.node.value, outPort.value, count,
+                                *router->constraints.maxSourcesPerOutput)
+                });
+            }
+        }
+    }
+
+    // Check maxDestinationsPerInput
+    if (router->constraints.maxDestinationsPerInput.has_value()) {
+        for (const auto& [inPort, count] : destinationsPerInput) {
+            if (count > *router->constraints.maxDestinationsPerInput) {
+                return std::unexpected(StateError{
+                    StateErrorKind::RoutingConstraintViolated,
+                    std::format("Router Node {} input PortId {} has {} active destinations (max is {})",
+                                routerState.node.value, inPort.value, count,
+                                *router->constraints.maxDestinationsPerInput)
+                });
+            }
+        }
+    }
+
+    return {};
+}
+
+std::expected<void, StateError> validateState(
+    const Topology& topology,
+    const DeviceState& state) {
+
+    if (state.topologyRevision != topology.revision) {
+        return std::unexpected(StateError{
+            StateErrorKind::TopologyRevisionMismatch,
+            std::format("DeviceState topologyRevision ({}) does not match Topology revision ({})",
+                        state.topologyRevision, topology.revision)
+        });
+    }
+
+    // 1. Validate all parameters in state
+    for (const auto& [paramId, val] : state.parameters) {
+        if (auto res = validateParameterValue(topology, paramId, val); !res) {
+            return res;
+        }
+    }
+
+    // 2. Validate all routers in state
+    for (const auto& [nodeId, rState] : state.routers) {
+        if (rState.node != nodeId) {
+            return std::unexpected(StateError{
+                StateErrorKind::NonexistentRouter,
+                std::format("RouterState key NodeId {} does not match struct node {}",
+                            nodeId.value, rState.node.value)
+            });
+        }
+        if (auto res = validateRouterState(topology, rState); !res) {
+            return res;
+        }
+    }
+
+    // 3. Validate all meters in state
+    std::unordered_set<MeterId> meterSet;
+    for (const auto& m : topology.meters) {
+        meterSet.insert(m.id);
+    }
+    for (const auto& [meterId, _] : state.meters) {
+        if (!meterSet.contains(meterId)) {
+            return std::unexpected(StateError{
+                StateErrorKind::NonexistentMeter,
+                std::format("MeterId {} in state does not exist in topology", meterId.value)
+            });
+        }
+    }
+
+    return {};
+}
+
 } // namespace ASFW::AudioModel

@@ -18,7 +18,7 @@ struct RouterState {
 struct DeviceState {
     uint64_t topologyRevision{};
 
-    std::vector<RouterState> routers;
+    std::unordered_map<NodeId, RouterState> routers;
     std::unordered_map<ParameterId, ParameterValue> parameters;
     std::unordered_map<MeterId, double> meters;
 };

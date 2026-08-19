@@ -1,5 +1,6 @@
 #pragma once
 
+#include "State.hpp"
 #include "Topology.hpp"
 
 #include <expected>
@@ -13,12 +14,12 @@ enum class TopologyErrorKind {
     NonexistentNode,
     NonexistentPort,
     NonexistentCrosspoint,
-    InvalidPortDirection,
     InvalidChannelCount,
-    IncompatibleChannelCount,
-    MultipleDriversOnInput,
+    InvalidPortDirection,
     ForeignPortReference,
     DuplicateRouteOrCrosspoint,
+    IncompatibleChannelCount,
+    MultipleDriversOnInput,
     InvalidDomain,
     InvalidConstraint,
 };
@@ -28,7 +29,37 @@ struct TopologyError {
     std::string message;
 };
 
+enum class StateErrorKind {
+    NonexistentParameter,
+    InvalidParameterValue,
+    NonexistentRouter,
+    NonexistentRouteBundle,
+    RoutingConstraintViolated,
+    NonexistentMeter,
+    TopologyRevisionMismatch,
+};
+
+struct StateError {
+    StateErrorKind kind;
+    std::string message;
+};
+
+// Structural Topology Validation
 std::vector<TopologyError> validateAll(const Topology& topology);
 std::expected<void, TopologyError> validate(const Topology& topology);
+
+// Dynamic State Legality Validation
+std::expected<void, StateError> validateParameterValue(
+    const Topology& topology,
+    ParameterId id,
+    const ParameterValue& value);
+
+std::expected<void, StateError> validateRouterState(
+    const Topology& topology,
+    const RouterState& routerState);
+
+std::expected<void, StateError> validateState(
+    const Topology& topology,
+    const DeviceState& state);
 
 } // namespace ASFW::AudioModel
