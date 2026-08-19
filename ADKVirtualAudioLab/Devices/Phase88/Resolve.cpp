@@ -72,33 +72,72 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         mixerCrosspoints.push_back(MixerCrosspoint{CrosspointId{cpId++}, PortId{60 + i}, PortId{76}});
     }
 
-    // Output Selector
+    // Output Selector: 5 physical output pairs, each selectable between:
+    // 0: DAW Stream Playback (WavePlay)
+    // 1: Direct Thru: Analog In 1/2
+    // 2: Direct Thru: Analog In 3/4
+    // 3: Direct Thru: Analog In 5/6
+    // 4: Direct Thru: Analog In 7/8
+    // 5: Direct Thru: Digital In (SPDIF)
+    // 6: Digital Mixer Master Mix L/R
     std::vector<PortId> selInputs;
-    for (uint32_t i = 1; i <= 10; ++i) selInputs.push_back(PortId{80 + i});
-    selInputs.push_back(PortId{91});
-    selInputs.push_back(PortId{92});
+    for (uint32_t i = 1; i <= 10; ++i) selInputs.push_back(PortId{80 + i}); // DAW Playback 1..10
+    for (uint32_t i = 1; i <= 10; ++i) selInputs.push_back(PortId{130 + i}); // Physical Thru 1..10
+    selInputs.push_back(PortId{91}); // Mixer Out L
+    selInputs.push_back(PortId{92}); // Mixer Out R
 
     std::vector<PortId> selOutputs;
     for (uint32_t i = 1; i <= 10; ++i) selOutputs.push_back(PortId{92 + i});
 
     std::vector<RouteBundle> outSelBundles;
-    uint32_t bundleId = 1;
+    std::vector<Presentation::RouteBundleGroup> outBundleGroups;
+    const std::vector<std::string> outGroupNames = {
+        "Analog Out 1/2 Source", "Analog Out 3/4 Source", "Analog Out 5/6 Source", "Analog Out 7/8 Source", "Digital S/PDIF Out Source"
+    };
+
+    uint32_t bId = 1;
     for (uint32_t pair = 0; pair < 5; ++pair) {
+        std::vector<RouteBundleId> pairBundleIds;
+        const PortId destL{93 + pair * 2};
+        const PortId destR{94 + pair * 2};
+
+        // Option 0: DAW Playback
+        const auto bDaw = RouteBundleId{bId++};
+        pairBundleIds.push_back(bDaw);
         outSelBundles.push_back(RouteBundle{
-            RouteBundleId{bundleId++},
-            {
-                Route{PortId{81 + pair * 2}, PortId{93 + pair * 2}},
-                Route{PortId{82 + pair * 2}, PortId{94 + pair * 2}},
-            },
+            bDaw,
+            {Route{PortId{81 + pair * 2}, destL}, Route{PortId{82 + pair * 2}, destR}},
         });
-    }
-    for (uint32_t pair = 0; pair < 5; ++pair) {
+
+        // Option 1..4: Direct Analog Inputs
+        for (uint32_t inPair = 0; inPair < 4; ++inPair) {
+            const auto bThru = RouteBundleId{bId++};
+            pairBundleIds.push_back(bThru);
+            outSelBundles.push_back(RouteBundle{
+                bThru,
+                {Route{PortId{131 + inPair * 2}, destL}, Route{PortId{132 + inPair * 2}, destR}},
+            });
+        }
+
+        // Option 5: Direct Digital In
+        const auto bDigThru = RouteBundleId{bId++};
+        pairBundleIds.push_back(bDigThru);
         outSelBundles.push_back(RouteBundle{
-            RouteBundleId{bundleId++},
-            {
-                Route{PortId{91}, PortId{93 + pair * 2}},
-                Route{PortId{92}, PortId{94 + pair * 2}},
-            },
+            bDigThru,
+            {Route{PortId{139}, destL}, Route{PortId{140}, destR}},
+        });
+
+        // Option 6: Digital Mixer Master Mix
+        const auto bMix = RouteBundleId{bId++};
+        pairBundleIds.push_back(bMix);
+        outSelBundles.push_back(RouteBundle{
+            bMix,
+            {Route{PortId{91}, destL}, Route{PortId{92}, destR}},
+        });
+
+        outBundleGroups.push_back(Presentation::RouteBundleGroup{
+            .name = outGroupNames[pair],
+            .bundles = std::move(pairBundleIds),
         });
     }
 
@@ -138,7 +177,7 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
                 .constraints = RouterConstraints{
                     .maxActiveBundles = 5,
                     .maxSourcesPerOutput = 1,
-                    .maxDestinationsPerInput = 1,
+                    .maxDestinationsPerInput = 5,
                 },
             },
         },
@@ -178,6 +217,9 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
     for (uint32_t i = 1; i <= 10; ++i) {
         t.ports.push_back(Port{PortId{80 + i}, nOutSelector, PortDirection::Input, 1, "OutMux In: Stream " + std::to_string(i)});
     }
+    for (uint32_t i = 1; i <= 10; ++i) {
+        t.ports.push_back(Port{PortId{130 + i}, nOutSelector, PortDirection::Input, 1, "OutMux In: Thru In " + std::to_string(i)});
+    }
     t.ports.push_back(Port{PortId{91}, nOutSelector, PortDirection::Input, 1, "OutMux In: Mixer Out L"});
     t.ports.push_back(Port{PortId{92}, nOutSelector, PortDirection::Input, 1, "OutMux In: Mixer Out R"});
     for (uint32_t i = 1; i <= 10; ++i) {
@@ -198,6 +240,9 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         t.fixedLinks.push_back(FixedLink{PortId{i}, PortId{60 + i}});
     }
     for (uint32_t i = 1; i <= 10; ++i) {
+        t.fixedLinks.push_back(FixedLink{PortId{i}, PortId{130 + i}});
+    }
+    for (uint32_t i = 1; i <= 10; ++i) {
         t.fixedLinks.push_back(FixedLink{PortId{30 + i}, PortId{40 + i}});
     }
     t.fixedLinks.push_back(FixedLink{PortId{51}, PortId{71}});
@@ -214,128 +259,216 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
     }
 
     // 3. Audio Semantics: Logical Channels & Buses
+    std::vector<std::string> chNames = {
+        "Analog In 1", "Analog In 2", "Analog In 3", "Analog In 4",
+        "Analog In 5", "Analog In 6", "Analog In 7", "Analog In 8",
+        "Digital In L", "Digital In R",
+        "WavePlay L", "WavePlay R",
+    };
+
     for (uint32_t i = 1; i <= 8; ++i) {
         t.channels.push_back(Channel{
             .id = ChannelId{i},
-            .name = "Analog In " + std::to_string(i),
+            .name = chNames[i - 1],
             .ports = {PortId{i}, PortId{60 + i}},
         });
     }
     t.channels.push_back(Channel{
         .id = ChannelId{9},
-        .name = "S/PDIF In L",
+        .name = "Digital In L",
         .ports = {PortId{9}, PortId{69}},
     });
     t.channels.push_back(Channel{
         .id = ChannelId{10},
-        .name = "S/PDIF In R",
+        .name = "Digital In R",
         .ports = {PortId{10}, PortId{70}},
     });
     t.channels.push_back(Channel{
         .id = ChannelId{11},
-        .name = "DAW Stream Return",
-        .ports = {PortId{51}, PortId{52}, PortId{71}, PortId{72}},
+        .name = "WavePlay L",
+        .ports = {PortId{51}, PortId{71}},
+    });
+    t.channels.push_back(Channel{
+        .id = ChannelId{12},
+        .name = "WavePlay R",
+        .ports = {PortId{52}, PortId{72}},
     });
 
     t.buses = {
         Bus{
             .id = BusId{1},
             .semantic = BusSemantic::Main,
-            .name = "Monitor Mix L/R",
+            .name = "Digital Mixer Master L/R",
             .ports = {PortId{75}, PortId{76}},
+        },
+        Bus{
+            .id = BusId{2},
+            .semantic = BusSemantic::Monitor,
+            .name = "Analog Out 1/2",
+            .ports = {PortId{93}, PortId{94}},
+        },
+        Bus{
+            .id = BusId{3},
+            .semantic = BusSemantic::Aux,
+            .name = "Analog Out 3/4",
+            .ports = {PortId{95}, PortId{96}},
+        },
+        Bus{
+            .id = BusId{4},
+            .semantic = BusSemantic::Aux,
+            .name = "Analog Out 5/6",
+            .ports = {PortId{97}, PortId{98}},
+        },
+        Bus{
+            .id = BusId{5},
+            .semantic = BusSemantic::Aux,
+            .name = "Analog Out 7/8",
+            .ports = {PortId{99}, PortId{100}},
+        },
+        Bus{
+            .id = BusId{6},
+            .semantic = BusSemantic::Aux,
+            .name = "Digital S/PDIF Out",
+            .ports = {PortId{101}, PortId{102}},
         },
     };
 
     // Parameters
-    t.parameters = {
-        Parameter{
-            .id = ParameterId{1},
-            .target = PortId{71},
-            .semantic = ParameterSemantic::Mute,
-            .domain = BooleanDomain{},
-            .name = "Stream Playback Left Mute",
-        },
-        Parameter{
-            .id = ParameterId{2},
-            .target = PortId{72},
-            .semantic = ParameterSemantic::Mute,
-            .domain = BooleanDomain{},
-            .name = "Stream Playback Right Mute",
-        },
-        Parameter{
-            .id = ParameterId{3},
-            .target = PortId{71},
+    uint32_t pId = 1;
+    std::vector<ParameterId> panParamIds;
+
+    // 1. Channel Strip Controls (12 Channels)
+    for (uint32_t i = 1; i <= 12; ++i) {
+        // Send Level to Mixer Master (Crosspoint parameter)
+        const uint32_t cpLeft = (i - 1) * 2 + 1;
+        t.parameters.push_back(Parameter{
+            .id = ParameterId{pId++},
+            .target = CrosspointId{cpLeft},
             .semantic = ParameterSemantic::Level,
             .domain = ScalarDomain{.min = -96.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
-            .name = "Stream Playback Left Volume",
-        },
-        Parameter{
-            .id = ParameterId{4},
-            .target = PortId{72},
-            .semantic = ParameterSemantic::Level,
-            .domain = ScalarDomain{.min = -96.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
-            .name = "Stream Playback Right Volume",
-        },
-        Parameter{
-            .id = ParameterId{5},
-            .target = PortId{75},
+            .name = chNames[i - 1] + " Mixer Send",
+        });
+
+        // Pan
+        const auto panPid = ParameterId{pId++};
+        panParamIds.push_back(panPid);
+        t.parameters.push_back(Parameter{
+            .id = panPid,
+            .target = PortId{60 + i},
+            .semantic = ParameterSemantic::Pan,
+            .domain = ScalarDomain{.min = -100.0, .max = 100.0, .step = 1.0, .unit = ScalarUnit::Percent},
+            .name = chNames[i - 1] + " Pan",
+        });
+
+        // Mute
+        t.parameters.push_back(Parameter{
+            .id = ParameterId{pId++},
+            .target = PortId{60 + i},
             .semantic = ParameterSemantic::Mute,
             .domain = BooleanDomain{},
-            .name = "Mixer Output Left Mute",
-        },
-        Parameter{
-            .id = ParameterId{6},
-            .target = PortId{76},
-            .semantic = ParameterSemantic::Mute,
-            .domain = BooleanDomain{},
-            .name = "Mixer Output Right Mute",
-        },
-        Parameter{
-            .id = ParameterId{7},
-            .target = PortId{75},
-            .semantic = ParameterSemantic::Level,
-            .domain = ScalarDomain{.min = -96.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
-            .name = "Mixer Output Left Volume",
-        },
-        Parameter{
-            .id = ParameterId{8},
-            .target = PortId{76},
-            .semantic = ParameterSemantic::Level,
-            .domain = ScalarDomain{.min = -96.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
-            .name = "Mixer Output Right Volume",
-        },
-        Parameter{
-            .id = ParameterId{9},
-            .target = nPhysIn,
-            .semantic = ParameterSemantic::ClockSource,
-            .domain = EnumDomain{
-                .values = {
-                    EnumItem{0, "Internal (32k/44.1k/48k/88.2k/96k)"},
-                    EnumItem{1, "S/PDIF Optical"},
-                    EnumItem{2, "Word Clock BNC"},
-                },
-            },
-            .name = "Clock Source",
-        },
+            .name = chNames[i - 1] + " Mute",
+        });
+    }
+
+    // 2. Output Master Controls (5 Physical Pairs + Digital Mixer Sum)
+    const auto pMasterVol = ParameterId{pId++};
+    t.parameters.push_back(Parameter{
+        .id = pMasterVol,
+        .target = PortId{75},
+        .semantic = ParameterSemantic::Level,
+        .domain = ScalarDomain{.min = -96.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
+        .name = "Master Mix Volume",
+    });
+
+    const auto pMasterMute = ParameterId{pId++};
+    t.parameters.push_back(Parameter{
+        .id = pMasterMute,
+        .target = PortId{75},
+        .semantic = ParameterSemantic::Mute,
+        .domain = BooleanDomain{},
+        .name = "Master Mix Mute",
+    });
+
+    const std::vector<std::string> outMasterNames = {
+        "Analog Out 1/2", "Analog Out 3/4", "Analog Out 5/6", "Analog Out 7/8", "Digital S/PDIF Out"
     };
 
+    for (uint32_t pair = 0; pair < 5; ++pair) {
+        const PortId pOutL{93 + pair * 2};
+        t.parameters.push_back(Parameter{
+            .id = ParameterId{pId++},
+            .target = pOutL,
+            .semantic = ParameterSemantic::Level,
+            .domain = ScalarDomain{.min = -96.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
+            .name = outMasterNames[pair] + " Master Volume",
+        });
+
+        t.parameters.push_back(Parameter{
+            .id = ParameterId{pId++},
+            .target = pOutL,
+            .semantic = ParameterSemantic::Mute,
+            .domain = BooleanDomain{},
+            .name = outMasterNames[pair] + " Master Mute",
+        });
+    }
+
+    const auto pClock = ParameterId{pId++};
+    t.parameters.push_back(Parameter{
+        .id = pClock,
+        .target = nPhysIn,
+        .semantic = ParameterSemantic::ClockSource,
+        .domain = EnumDomain{
+            .values = {
+                EnumItem{0, "Internal (32k/44.1k/48k/88.2k/96k)"},
+                EnumItem{1, "S/PDIF Coaxial"},
+                EnumItem{2, "Word Clock BNC"},
+            },
+        },
+        .name = "Clock Source",
+    });
+
     // Meters
-    t.meters = {
-        Meter{
-            .id = MeterId{1},
-            .target = PortId{75},
+    uint32_t mId = 1;
+    for (uint32_t i = 1; i <= 12; ++i) {
+        t.meters.push_back(Meter{
+            .id = MeterId{mId++},
+            .target = PortId{60 + i},
             .semantic = MeterSemantic::Peak,
             .domain = ScalarDomain{.min = -96.0, .max = 0.0, .unit = ScalarUnit::Decibels},
-            .name = "Mixer Out L Peak Meter",
-        },
-        Meter{
-            .id = MeterId{2},
-            .target = PortId{76},
+            .name = chNames[i - 1] + " Peak Meter",
+        });
+    }
+    t.meters.push_back(Meter{
+        .id = MeterId{mId++},
+        .target = PortId{75},
+        .semantic = MeterSemantic::Peak,
+        .domain = ScalarDomain{.min = -96.0, .max = 0.0, .unit = ScalarUnit::Decibels},
+        .name = "Master Mix Peak Meter L",
+    });
+    t.meters.push_back(Meter{
+        .id = MeterId{mId++},
+        .target = PortId{76},
+        .semantic = MeterSemantic::Peak,
+        .domain = ScalarDomain{.min = -96.0, .max = 0.0, .unit = ScalarUnit::Decibels},
+        .name = "Master Mix Peak Meter R",
+    });
+
+    for (uint32_t pair = 0; pair < 5; ++pair) {
+        t.meters.push_back(Meter{
+            .id = MeterId{mId++},
+            .target = PortId{93 + pair * 2},
             .semantic = MeterSemantic::Peak,
             .domain = ScalarDomain{.min = -96.0, .max = 0.0, .unit = ScalarUnit::Decibels},
-            .name = "Mixer Out R Peak Meter",
-        },
-    };
+            .name = outMasterNames[pair] + " Peak Meter L",
+        });
+        t.meters.push_back(Meter{
+            .id = MeterId{mId++},
+            .target = PortId{94 + pair * 2},
+            .semantic = MeterSemantic::Peak,
+            .domain = ScalarDomain{.min = -96.0, .max = 0.0, .unit = ScalarUnit::Decibels},
+            .name = outMasterNames[pair] + " Peak Meter R",
+        });
+    }
 
     // Presentation Metadata
     resolved.presentation = Presentation::DevicePresentation{
@@ -344,7 +477,7 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
                 .id = Presentation::PresentationGroupId{1},
                 .name = "Clock & Sync",
                 .kind = Presentation::PresentationGroupKind::Other,
-                .parameters = {ParameterId{9}},
+                .parameters = {pClock},
             },
         },
         .routers = {
@@ -353,7 +486,7 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
                 .style = Presentation::RouterPresentationStyle::Selector,
                 .bundleGroups = {
                     Presentation::RouteBundleGroup{
-                        .name = "Monitor Mix DAW Source",
+                        .name = "Mixer WavePlay Source",
                         .bundles = {RouteBundleId{1}, RouteBundleId{2}, RouteBundleId{3}, RouteBundleId{4}, RouteBundleId{5}},
                     },
                 },
@@ -361,13 +494,7 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
             Presentation::RouterPresentationHint{
                 .router = NodeId{5},
                 .style = Presentation::RouterPresentationStyle::Selector,
-                .bundleGroups = {
-                    Presentation::RouteBundleGroup{.name = "Out 1/2", .bundles = {RouteBundleId{1}, RouteBundleId{6}}},
-                    Presentation::RouteBundleGroup{.name = "Out 3/4", .bundles = {RouteBundleId{2}, RouteBundleId{7}}},
-                    Presentation::RouteBundleGroup{.name = "Out 5/6", .bundles = {RouteBundleId{3}, RouteBundleId{8}}},
-                    Presentation::RouteBundleGroup{.name = "Out 7/8", .bundles = {RouteBundleId{4}, RouteBundleId{9}}},
-                    Presentation::RouteBundleGroup{.name = "S/PDIF Out", .bundles = {RouteBundleId{5}, RouteBundleId{10}}},
-                },
+                .bundleGroups = std::move(outBundleGroups),
             },
         },
         .mixers = {
@@ -376,17 +503,14 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
                 .style = Presentation::MixerPresentationStyle::ChannelStrips,
             },
         },
-        .parameters = {
-            Presentation::ParameterPresentationHint{.parameter = ParameterId{1}, .presentation = Presentation::ControlPresentation::Toggle},
-            Presentation::ParameterPresentationHint{.parameter = ParameterId{2}, .presentation = Presentation::ControlPresentation::Toggle},
-            Presentation::ParameterPresentationHint{.parameter = ParameterId{3}, .presentation = Presentation::ControlPresentation::Fader},
-            Presentation::ParameterPresentationHint{.parameter = ParameterId{4}, .presentation = Presentation::ControlPresentation::Fader},
-            Presentation::ParameterPresentationHint{.parameter = ParameterId{5}, .presentation = Presentation::ControlPresentation::Toggle},
-            Presentation::ParameterPresentationHint{.parameter = ParameterId{6}, .presentation = Presentation::ControlPresentation::Toggle},
-            Presentation::ParameterPresentationHint{.parameter = ParameterId{7}, .presentation = Presentation::ControlPresentation::Fader},
-            Presentation::ParameterPresentationHint{.parameter = ParameterId{8}, .presentation = Presentation::ControlPresentation::Fader},
-        },
     };
+
+    for (const auto& pid : panParamIds) {
+        resolved.presentation.parameters.push_back(Presentation::ParameterPresentationHint{
+            .parameter = pid,
+            .presentation = Presentation::ControlPresentation::Rotary,
+        });
+    }
 
     return resolved;
 }
@@ -395,28 +519,42 @@ DeviceState makeInitialState(const ResolvedAudioConfiguration& resolved) {
     DeviceState state;
     state.topologyRevision = resolved.topology.revision;
 
-    state.parameters[ParameterId{1}] = false;
-    state.parameters[ParameterId{2}] = false;
-    state.parameters[ParameterId{3}] = 0.0;
-    state.parameters[ParameterId{4}] = 0.0;
-    state.parameters[ParameterId{5}] = false;
-    state.parameters[ParameterId{6}] = false;
-    state.parameters[ParameterId{7}] = 0.0;
-    state.parameters[ParameterId{8}] = 0.0;
-    state.parameters[ParameterId{9}] = int64_t{0}; // Internal clock
+    for (const auto& param : resolved.topology.parameters) {
+        if (std::holds_alternative<BooleanDomain>(param.domain)) {
+            state.parameters[param.id] = false;
+        } else if (std::holds_alternative<EnumDomain>(param.domain)) {
+            state.parameters[param.id] = int64_t{0};
+        } else if (auto* sc = std::get_if<ScalarDomain>(&param.domain)) {
+            if (param.semantic == ParameterSemantic::Pan) {
+                // Hard Left for odd digital/stream channels, hard right for even
+                if (param.name == "Digital In L Pan" || param.name == "WavePlay L Pan") {
+                    state.parameters[param.id] = -100.0;
+                } else if (param.name == "Digital In R Pan" || param.name == "WavePlay R Pan") {
+                    state.parameters[param.id] = 100.0;
+                } else {
+                    state.parameters[param.id] = 0.0;
+                }
+            } else if (param.semantic == ParameterSemantic::Level) {
+                state.parameters[param.id] = 0.0; // Default faders to 0 dB
+            } else {
+                state.parameters[param.id] = sc->min;
+            }
+        }
+    }
 
     // Pre-mixer Stream Source Selector (Node 3): Playback 1/2 (Bundle 1)
     state.routers[NodeId{3}] = RouterState{
         .activeBundles = {RouteBundleId{1}},
     };
 
-    // Output Selector (Node 5): 5 direct stream playback bundles (Bundles 1..5)
+    // Output Selector (Node 5): 5 direct stream playback bundles (Bundles 1, 8, 15, 22, 29)
     state.routers[NodeId{5}] = RouterState{
-        .activeBundles = {RouteBundleId{1}, RouteBundleId{2}, RouteBundleId{3}, RouteBundleId{4}, RouteBundleId{5}},
+        .activeBundles = {RouteBundleId{1}, RouteBundleId{8}, RouteBundleId{15}, RouteBundleId{22}, RouteBundleId{29}},
     };
 
-    state.meters[MeterId{1}] = -96.0;
-    state.meters[MeterId{2}] = -96.0;
+    for (const auto& meter : resolved.topology.meters) {
+        state.meters[meter.id] = -96.0;
+    }
 
     return state;
 }

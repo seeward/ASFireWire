@@ -426,4 +426,18 @@ final class VirtualLabState: ObservableObject {
         }
         refresh()
     }
+
+    func setRouterBundleInGroup(routerNodeId: UInt32, groupBundleIds: [UInt32], selectedBundleId: UInt32) {
+        guard let snap = snapshot, let router = snap.routers.first(where: { $0.id == routerNodeId }) else { return }
+        var active = router.activeBundleIds
+        for bId in groupBundleIds {
+            active.remove(bId)
+        }
+        active.insert(selectedBundleId)
+        let array = Array(active)
+        array.withUnsafeBufferPointer { ptr in
+            _ = asfw_lab_set_active_route_bundles(routerNodeId, ptr.baseAddress, UInt32(array.count))
+        }
+        refresh()
+    }
 }

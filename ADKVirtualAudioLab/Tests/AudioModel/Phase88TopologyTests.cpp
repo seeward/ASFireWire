@@ -31,11 +31,11 @@ void RunPhase88TopologyTests(TestContext& ctx) {
     REQUIRE(ctx, srcMux != nullptr);
     CHECK(ctx, srcMux->legalBundles.size() == 5);
 
-    // Verify Output Selector Router (5 direct playback bundles + 5 mixer destination bundles)
+    // Verify Output Selector Router (5 output pairs x 7 sources = 35 legal bundles)
     auto* outMux = std::get_if<RouterNode>(&phase88.nodes[4].body);
     REQUIRE(ctx, outMux != nullptr);
-    CHECK(ctx, outMux->legalBundles.size() == 10);
-    CHECK(ctx, outMux->constraints.maxDestinationsPerInput == 1);
+    CHECK(ctx, outMux->legalBundles.size() == 35);
+    CHECK(ctx, outMux->constraints.maxDestinationsPerInput == 5);
 
     // Invariant negative tests
     {

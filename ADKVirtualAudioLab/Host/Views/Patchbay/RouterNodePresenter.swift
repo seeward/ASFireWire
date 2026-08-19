@@ -31,27 +31,76 @@ struct RouterNodePresenter: View {
                 // Crossbar Matrix View (e.g. Saffire 46x46)
                 CrossbarMatrixGridView(router: router, hint: hint, snap: snap, state: state)
             } else if let bundleGroups = hint?.bundleGroups, !bundleGroups.isEmpty {
-                // Grouped Selector Destination Rows (e.g. Phase88, FW1814)
-                VStack(alignment: .leading, spacing: 8) {
+                // Grouped Destination Rows (e.g. Phase88, FW1814)
+                VStack(alignment: .leading, spacing: 10) {
                     ForEach(bundleGroups) { grp in
-                        HStack(spacing: 12) {
+                        HStack(spacing: 16) {
                             Text(grp.name)
                                 .font(.system(size: 11, weight: .bold))
                                 .foregroundStyle(.secondary)
-                                .frame(width: 140, alignment: .leading)
+                                .frame(width: 170, alignment: .leading)
 
-                            HStack(spacing: 8) {
-                                ForEach(grp.bundleIds, id: \.self) { bId in
-                                    if let bundle = router.legalBundles.first(where: { $0.id == bId }) {
-                                        RouteBundlePill(
-                                            routerId: router.id,
-                                            bundle: bundle,
-                                            isActive: router.activeBundleIds.contains(bundle.id),
-                                            label: shortBundleLabel(bundle),
-                                            state: state
-                                        )
+                            if grp.bundleIds.count <= 3 {
+                                // Compact Segmented Buttons for 2-3 options
+                                HStack(spacing: 8) {
+                                    ForEach(grp.bundleIds, id: \.self) { bId in
+                                        if let bundle = router.legalBundles.first(where: { $0.id == bId }) {
+                                            RouteBundlePill(
+                                                routerId: router.id,
+                                                bundle: bundle,
+                                                isActive: router.activeBundleIds.contains(bundle.id),
+                                                label: shortBundleLabel(bundle),
+                                                state: state
+                                            )
+                                        }
                                     }
                                 }
+                            } else {
+                                // Sleek Dropdown Menu for 4+ routing choices (e.g. Phase88 7-source matrix)
+                                let activeId = grp.bundleIds.first(where: { router.activeBundleIds.contains($0) })
+                                let activeBundle = activeId.flatMap { bId in router.legalBundles.first(where: { $0.id == bId }) }
+                                let currentLabel = activeBundle.map { shortBundleLabel($0) } ?? "Muted / None"
+
+                                Menu {
+                                    ForEach(grp.bundleIds, id: \.self) { bId in
+                                        if let bundle = router.legalBundles.first(where: { $0.id == bId }) {
+                                            let isSel = router.activeBundleIds.contains(bundle.id)
+                                            Button(action: {
+                                                state.setRouterBundleInGroup(
+                                                    routerNodeId: router.id,
+                                                    groupBundleIds: grp.bundleIds,
+                                                    selectedBundleId: bundle.id
+                                                )
+                                            }) {
+                                                if isSel {
+                                                    Label(shortBundleLabel(bundle), systemImage: "checkmark")
+                                                } else {
+                                                    Text(shortBundleLabel(bundle))
+                                                }
+                                            }
+                                        }
+                                    }
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        Text(currentLabel)
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(.primary)
+                                        Spacer()
+                                        Image(systemName: "chevron.up.chevron.down")
+                                            .font(.system(size: 8))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .frame(width: 250)
+                                    .background(Color.secondary.opacity(0.12))
+                                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                            .strokeBorder(Color.white.opacity(0.1), lineWidth: 1)
+                                    )
+                                }
+                                .menuStyle(.borderlessButton)
                             }
                         }
                         .padding(.vertical, 2)
@@ -86,8 +135,34 @@ struct RouterNodePresenter: View {
         if b.routes.isEmpty { return "Bundle #\(b.id)" }
         let first = b.routes[0]
         let inN = snap.portName(for: first.inputPortId)
-        if inN.contains("Stream") || inN.contains("Playback") { return "Direct Playback" }
-        if inN.contains("Mixer Out") || inN.contains("Mix ") { return "Mixer Out" }
+
+        // 1. Check Stream / Playback channel numbers
+        if inN.contains("1") || inN.contains("Stream 1") || inN.contains("Playback 1") {
+            if inN.contains("Stream") || inN.contains("Playback") { return "🎵 DAW Playback 1/2" }
+        }
+        if inN.contains("3") || inN.contains("Stream 3") || inN.contains("Playback 3") {
+            if inN.contains("Stream") || inN.contains("Playback") { return "🎵 DAW Playback 3/4" }
+        }
+        if inN.contains("5") || inN.contains("Stream 5") || inN.contains("Playback 5") {
+            if inN.contains("Stream") || inN.contains("Playback") { return "🎵 DAW Playback 5/6" }
+        }
+        if inN.contains("7") || inN.contains("Stream 7") || inN.contains("Playback 7") {
+            if inN.contains("Stream") || inN.contains("Playback") { return "🎵 DAW Playback 7/8" }
+        }
+        if inN.contains("9") || inN.contains("Stream 9") || inN.contains("Playback 9") {
+            if inN.contains("Stream") || inN.contains("Playback") { return "🎵 DAW Playback 9/10" }
+        }
+
+        // 2. Check Thru / Direct Inputs
+        if inN.contains("Thru In 1") || inN.contains("Analog In 1") { return "🎸 Direct: Analog 1/2" }
+        if inN.contains("Thru In 3") || inN.contains("Analog In 3") { return "🎸 Direct: Analog 3/4" }
+        if inN.contains("Thru In 5") || inN.contains("Analog In 5") { return "🎸 Direct: Analog 5/6" }
+        if inN.contains("Thru In 7") || inN.contains("Analog In 7") { return "🎸 Direct: Analog 7/8" }
+        if inN.contains("Thru In 9") || inN.contains("SPDIF In") || inN.contains("Digital In") { return "🎛 Direct: S/PDIF In" }
+
+        // 3. Check Mixer Sum
+        if inN.contains("Mixer Out") || inN.contains("Mix ") { return "🎚 Digital Master Mix L/R" }
+
         return cleanPortLabel(inN)
     }
 
