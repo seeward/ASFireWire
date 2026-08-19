@@ -316,6 +316,34 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         t.fixedLinks.push_back(FixedLink{PortId{206 + i}, PortId{236 + i}});
     }
 
+    // 3. Audio Semantics: Logical Channels & Buses
+    for (uint32_t i = 1; i <= 4; ++i) {
+        t.channels.push_back(Channel{
+            .id = ChannelId{i},
+            .name = "Analog In " + std::to_string(i),
+            .ports = {PortId{i}, PortId{50 + i}},
+        });
+    }
+    t.channels.push_back(Channel{
+        .id = ChannelId{5},
+        .name = "Loopback 1/2",
+        .ports = {PortId{5}, PortId{6}, PortId{55}, PortId{56}},
+    });
+    t.channels.push_back(Channel{
+        .id = ChannelId{6},
+        .name = "S/PDIF In L/R",
+        .ports = {PortId{7}, PortId{8}, PortId{57}, PortId{58}},
+    });
+
+    for (uint32_t i = 1; i <= 8; ++i) {
+        t.buses.push_back(Bus{
+            .id = BusId{i},
+            .semantic = (i == 1) ? BusSemantic::Main : BusSemantic::Aux,
+            .name = "Mix " + std::to_string(i * 2 - 1) + "/" + std::to_string(i * 2),
+            .ports = {PortId{170 + i * 2 - 1}, PortId{170 + i * 2}},
+        });
+    }
+
     // Parameters
     t.parameters = {
         Parameter{

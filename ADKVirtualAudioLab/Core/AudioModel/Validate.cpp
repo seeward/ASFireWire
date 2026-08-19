@@ -548,6 +548,46 @@ void validateParameters(const Topology& topology,
             });
         }
     }
+
+    // 3. Validate Channels
+    std::unordered_set<ChannelId> channelSet;
+    for (const auto& ch : topology.channels) {
+        if (auto [_, inserted] = channelSet.insert(ch.id); !inserted) {
+            errors.push_back({
+                TopologyErrorKind::DuplicateId,
+                std::format("Duplicate ChannelId: {}", ch.id.value)
+            });
+        }
+        for (const auto& pId : ch.ports) {
+            if (!portMap.contains(pId)) {
+                errors.push_back({
+                    TopologyErrorKind::NonexistentPort,
+                    std::format("Channel {} '{}' references nonexistent PortId {}",
+                                ch.id.value, ch.name, pId.value)
+                });
+            }
+        }
+    }
+
+    // 4. Validate Buses
+    std::unordered_set<BusId> busSet;
+    for (const auto& bus : topology.buses) {
+        if (auto [_, inserted] = busSet.insert(bus.id); !inserted) {
+            errors.push_back({
+                TopologyErrorKind::DuplicateId,
+                std::format("Duplicate BusId: {}", bus.id.value)
+            });
+        }
+        for (const auto& pId : bus.ports) {
+            if (!portMap.contains(pId)) {
+                errors.push_back({
+                    TopologyErrorKind::NonexistentPort,
+                    std::format("Bus {} '{}' references nonexistent PortId {}",
+                                bus.id.value, bus.name, pId.value)
+                });
+            }
+        }
+    }
 }
 
 } // namespace

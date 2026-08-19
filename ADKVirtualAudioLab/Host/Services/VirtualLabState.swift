@@ -303,8 +303,39 @@ final class VirtualLabState: ObservableObject {
                 paramHints.append(ParameterHintModel(
                     parameterId: ph.parameterId,
                     placement: ph.placement,
+                    presentation: ph.presentation,
                     section: sec
                 ))
+            }
+        }
+
+        var channels: [ChannelModel] = []
+        if let chPtr = dto.channels {
+            for i in 0..<Int(dto.channelCount) {
+                let ch = chPtr[i]
+                let chName = ch.name != nil ? String(cString: ch.name) : "Channel \(ch.id)"
+                var ptIds: [UInt32] = []
+                if let ptIdPtr = ch.portIds {
+                    for j in 0..<Int(ch.portCount) {
+                        ptIds.append(ptIdPtr[j])
+                    }
+                }
+                channels.append(ChannelModel(id: ch.id, name: chName, portIds: ptIds))
+            }
+        }
+
+        var buses: [BusModel] = []
+        if let bPtr = dto.buses {
+            for i in 0..<Int(dto.busCount) {
+                let bus = bPtr[i]
+                let bName = bus.name != nil ? String(cString: bus.name) : "Bus \(bus.id)"
+                var ptIds: [UInt32] = []
+                if let ptIdPtr = bus.portIds {
+                    for j in 0..<Int(bus.portCount) {
+                        ptIds.append(ptIdPtr[j])
+                    }
+                }
+                buses.append(BusModel(id: bus.id, semantic: bus.semantic, name: bName, portIds: ptIds))
             }
         }
 
@@ -337,6 +368,8 @@ final class VirtualLabState: ObservableObject {
             routers: routers,
             parameters: params,
             meters: meters,
+            channels: channels,
+            buses: buses,
             presentation: presModel
         )
     }

@@ -45,7 +45,54 @@ struct ParameterHintModel: Identifiable {
     var id: UInt32 { parameterId }
     let parameterId: UInt32
     let placement: ASFWControlPlacement
+    let presentation: ASFWControlPresentation
     let section: String
+}
+
+struct ChannelModel: Identifiable {
+    let id: UInt32
+    let name: String
+    let portIds: [UInt32]
+}
+
+struct BusModel: Identifiable {
+    let id: UInt32
+    let semantic: ASFWBusSemantic
+    let name: String
+    let portIds: [UInt32]
+}
+
+struct SendControlModel: Identifiable {
+    var id: UInt32 { crosspointId }
+    let crosspointId: UInt32
+    let busName: String
+    let busSemantic: ASFWBusSemantic
+    let parameter: ParameterModel
+    let presentation: ASFWControlPresentation
+}
+
+struct ChannelStripModel: Identifiable {
+    var id: UInt32 { channelId }
+    let channelId: UInt32
+    let name: String
+    let mainSend: SendControlModel?
+    let auxSends: [SendControlModel]
+    let pan: ParameterModel?
+    let mute: ParameterModel?
+    let solo: ParameterModel?
+    let phase: ParameterModel?
+    let phantom: ParameterModel?
+    let nominalLevel: ParameterModel?
+    let meter: MeterModel?
+}
+
+struct OutputMasterStripModel: Identifiable {
+    var id: String { name }
+    let name: String
+    let level: ParameterModel?
+    let mute: ParameterModel?
+    let dim: ParameterModel?
+    let meters: [MeterModel]
 }
 
 struct DevicePresentationModel {
@@ -175,6 +222,8 @@ struct LabDeviceSnapshot {
     let routers: [RouterModel]
     let parameters: [ParameterModel]
     let meters: [MeterModel]
+    let channels: [ChannelModel]
+    let buses: [BusModel]
     let presentation: DevicePresentationModel
 
     func portName(for portId: UInt32) -> String {

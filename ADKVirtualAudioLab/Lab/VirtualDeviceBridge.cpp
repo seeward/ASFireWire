@@ -57,6 +57,15 @@ struct SnapshotStorage {
     std::vector<std::string> meterNames;
     std::vector<ASFWMeterDTO> meterDTOs;
 
+    // Logical Channels & Busses
+    std::vector<std::string> channelNames;
+    std::vector<std::vector<uint32_t>> channelPortArrays;
+    std::vector<ASFWChannelDTO> channelDTOs;
+
+    std::vector<std::string> busNames;
+    std::vector<std::vector<uint32_t>> busPortArrays;
+    std::vector<ASFWBusDTO> busDTOs;
+
     // Presentation Storage
     std::vector<std::string> presGroupNames;
     std::vector<std::vector<uint32_t>> presGroupNodeArrays;
@@ -117,10 +126,32 @@ ASFWParameterSemantic toBridgeSemantic(ParameterSemantic sem) {
         case ParameterSemantic::Mute: return ASFW_SEMANTIC_MUTE;
         case ParameterSemantic::PhantomPower: return ASFW_SEMANTIC_PHANTOM_POWER;
         case ParameterSemantic::PhaseInvert: return ASFW_SEMANTIC_PHASE_INVERT;
+        case ParameterSemantic::Pan: return ASFW_SEMANTIC_PAN;
         case ParameterSemantic::Balance: return ASFW_SEMANTIC_BALANCE;
+        case ParameterSemantic::Solo: return ASFW_SEMANTIC_SOLO;
         case ParameterSemantic::NominalLevel: return ASFW_SEMANTIC_NOMINAL_LEVEL;
         case ParameterSemantic::ClockSource: return ASFW_SEMANTIC_CLOCK_SOURCE;
         case ParameterSemantic::Dim: return ASFW_SEMANTIC_DIM;
+    }
+}
+
+ASFWControlPresentation toBridgeControlPresentation(ControlPresentation cp) {
+    switch (cp) {
+        case ControlPresentation::Auto: return ASFW_CONTROL_AUTO;
+        case ControlPresentation::Fader: return ASFW_CONTROL_FADER;
+        case ControlPresentation::Rotary: return ASFW_CONTROL_ROTARY;
+        case ControlPresentation::Toggle: return ASFW_CONTROL_TOGGLE;
+        case ControlPresentation::Selector: return ASFW_CONTROL_SELECTOR;
+    }
+}
+
+ASFWBusSemantic toBridgeBusSemantic(BusSemantic bs) {
+    switch (bs) {
+        case BusSemantic::Unknown: return ASFW_BUS_SEMANTIC_UNKNOWN;
+        case BusSemantic::Main: return ASFW_BUS_SEMANTIC_MAIN;
+        case BusSemantic::Aux: return ASFW_BUS_SEMANTIC_AUX;
+        case BusSemantic::Monitor: return ASFW_BUS_SEMANTIC_MONITOR;
+        case BusSemantic::Cue: return ASFW_BUS_SEMANTIC_CUE;
     }
 }
 
@@ -192,6 +223,7 @@ bool asfw_lab_select_device(ASFWVirtualDeviceKind kind) {
 
     auto rt = VirtualDeviceRuntime::create(k);
     if (!rt.has_value()) {
+        std::fprintf(stderr, "asfw_lab_select_device failed: %s\n", rt.error().message.c_str());
         return false;
     }
     gRuntime = std::make_unique<VirtualDeviceRuntime>(std::move(*rt));
@@ -751,7 +783,47 @@ ASFWDeviceSnapshotDTO asfw_lab_get_snapshot(void) {
     snapshot.presentation.mixerHintCount = static_cast<uint32_t>(gStorage.mixerHintDTOs.size());
     snapshot.presentation.mixerHints = gStorage.mixerHintDTOs.data();
 
-    // 10. Parameter Presentation Hints
+    // 10. Channels & Buses
+    const size_t chCount = res.topology.channels.size();
+    gStorage.channelNames.resize(chCount);
+    gStorage.channelPortArrays.resize(chCount);
+    gStorage.channelDTOs.resize(chCount);
+    for (size_t i = 0; i < chCount; ++i) {
+        const auto& ch = res.topology.channels[i];
+        gStorage.channelNames[i] = ch.name;
+        gStorage.channelPortArrays[i].clear();
+        for (auto pid : ch.ports) gStorage.channelPortArrays[i].push_back(pid.value);
+        gStorage.channelDTOs[i] = ASFWChannelDTO{
+            .id = ch.id.value,
+            .name = gStorage.channelNames[i].c_str(),
+            .portCount = static_cast<uint32_t>(gStorage.channelPortArrays[i].size()),
+            .portIds = gStorage.channelPortArrays[i].data(),
+        };
+    }
+    snapshot.channelCount = static_cast<uint32_t>(gStorage.channelDTOs.size());
+    snapshot.channels = gStorage.channelDTOs.data();
+
+    const size_t bCount = res.topology.buses.size();
+    gStorage.busNames.resize(bCount);
+    gStorage.busPortArrays.resize(bCount);
+    gStorage.busDTOs.resize(bCount);
+    for (size_t i = 0; i < bCount; ++i) {
+        const auto& bus = res.topology.buses[i];
+        gStorage.busNames[i] = bus.name;
+        gStorage.busPortArrays[i].clear();
+        for (auto pid : bus.ports) gStorage.busPortArrays[i].push_back(pid.value);
+        gStorage.busDTOs[i] = ASFWBusDTO{
+            .id = bus.id.value,
+            .semantic = toBridgeBusSemantic(bus.semantic),
+            .name = gStorage.busNames[i].c_str(),
+            .portCount = static_cast<uint32_t>(gStorage.busPortArrays[i].size()),
+            .portIds = gStorage.busPortArrays[i].data(),
+        };
+    }
+    snapshot.busCount = static_cast<uint32_t>(gStorage.busDTOs.size());
+    snapshot.buses = gStorage.busDTOs.data();
+
+    // 11. Parameter Presentation Hints
     const size_t phCount = pres.parameters.size();
     gStorage.paramSectionNames.resize(phCount);
     gStorage.parameterHintDTOs.resize(phCount);
@@ -761,6 +833,7 @@ ASFWDeviceSnapshotDTO asfw_lab_get_snapshot(void) {
         gStorage.parameterHintDTOs[i] = ASFWParameterHintDTO{
             .parameterId = ph.parameter.value,
             .placement = toBridgeControlPlacement(ph.placement),
+            .presentation = toBridgeControlPresentation(ph.presentation),
             .section = gStorage.paramSectionNames[i].c_str(),
         };
     }

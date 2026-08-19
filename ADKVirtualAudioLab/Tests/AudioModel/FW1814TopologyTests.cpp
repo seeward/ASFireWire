@@ -19,10 +19,10 @@ void RunFW1814TopologyTests(TestContext& ctx) {
         std::printf("FW1814 validation failed: %s\n", result.error().message.c_str());
     }
 
-    // Verify Main Sum Matrix is a 22x4 MixerNode (11 stereo inputs x 2 stereo outputs = 22 crosspoints)
+    // Verify Main Sum Matrix is an 11x1 MixerNode (11 stereo inputs x 1 stereo output = 11 crosspoints)
     auto* sumMixer = std::get_if<MixerNode>(&fw1814.nodes[3].body);
     REQUIRE(ctx, sumMixer != nullptr);
-    CHECK(ctx, sumMixer->crosspoints.size() == 22);
+    CHECK(ctx, sumMixer->crosspoints.size() == 11);
 
     // Verify Aux Downmix Matrix is a 22x2 MixerNode (11 stereo inputs x 1 stereo output = 11 crosspoints)
     auto* auxMixer = std::get_if<MixerNode>(&fw1814.nodes[4].body);

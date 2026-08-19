@@ -223,6 +223,40 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         FixedLink{PortId{60}, PortId{64}},
     };
 
+    // 3. Audio Semantics: Logical Channels & Buses
+    t.channels = {
+        Channel{
+            .id = ChannelId{1},
+            .name = "Input 1",
+            .ports = {PortId{1}, PortId{2}, PortId{15}, PortId{21}, PortId{23}, PortId{41}},
+        },
+        Channel{
+            .id = ChannelId{2},
+            .name = "Input 2",
+            .ports = {PortId{3}, PortId{4}, PortId{16}, PortId{22}, PortId{24}, PortId{42}},
+        },
+        Channel{
+            .id = ChannelId{3},
+            .name = "DAW Playback 1/2",
+            .ports = {PortId{33}, PortId{34}, PortId{43}, PortId{44}},
+        },
+    };
+
+    t.buses = {
+        Bus{
+            .id = BusId{1},
+            .semantic = BusSemantic::Main,
+            .name = "Mixer Master L/R",
+            .ports = {PortId{45}, PortId{46}},
+        },
+        Bus{
+            .id = BusId{2},
+            .semantic = BusSemantic::Monitor,
+            .name = "Monitor Out L/R",
+            .ports = {PortId{59}, PortId{60}},
+        },
+    };
+
     // Parameters
     t.parameters = {
         Parameter{

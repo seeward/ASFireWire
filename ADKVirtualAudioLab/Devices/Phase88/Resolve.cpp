@@ -213,94 +213,127 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         t.fixedLinks.push_back(FixedLink{PortId{92 + i}, PortId{110 + i}});
     }
 
+    // 3. Audio Semantics: Logical Channels & Buses
+    for (uint32_t i = 1; i <= 8; ++i) {
+        t.channels.push_back(Channel{
+            .id = ChannelId{i},
+            .name = "Analog In " + std::to_string(i),
+            .ports = {PortId{i}, PortId{60 + i}},
+        });
+    }
+    t.channels.push_back(Channel{
+        .id = ChannelId{9},
+        .name = "S/PDIF In L",
+        .ports = {PortId{9}, PortId{69}},
+    });
+    t.channels.push_back(Channel{
+        .id = ChannelId{10},
+        .name = "S/PDIF In R",
+        .ports = {PortId{10}, PortId{70}},
+    });
+    t.channels.push_back(Channel{
+        .id = ChannelId{11},
+        .name = "DAW Stream Return",
+        .ports = {PortId{51}, PortId{52}, PortId{71}, PortId{72}},
+    });
+
+    t.buses = {
+        Bus{
+            .id = BusId{1},
+            .semantic = BusSemantic::Main,
+            .name = "Monitor Mix L/R",
+            .ports = {PortId{75}, PortId{76}},
+        },
+    };
+
     // Parameters
     t.parameters = {
         Parameter{
-            ParameterId{1},
-            PortId{71},
-            ParameterSemantic::Mute,
-            BooleanDomain{},
-            "Stream Playback Left Mute",
+            .id = ParameterId{1},
+            .target = PortId{71},
+            .semantic = ParameterSemantic::Mute,
+            .domain = BooleanDomain{},
+            .name = "Stream Playback Left Mute",
         },
         Parameter{
-            ParameterId{2},
-            PortId{72},
-            ParameterSemantic::Mute,
-            BooleanDomain{},
-            "Stream Playback Right Mute",
+            .id = ParameterId{2},
+            .target = PortId{72},
+            .semantic = ParameterSemantic::Mute,
+            .domain = BooleanDomain{},
+            .name = "Stream Playback Right Mute",
         },
         Parameter{
-            ParameterId{3},
-            PortId{71},
-            ParameterSemantic::Level,
-            ScalarDomain{.min = -96.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
-            "Stream Playback Left Volume",
+            .id = ParameterId{3},
+            .target = PortId{71},
+            .semantic = ParameterSemantic::Level,
+            .domain = ScalarDomain{.min = -96.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
+            .name = "Stream Playback Left Volume",
         },
         Parameter{
-            ParameterId{4},
-            PortId{72},
-            ParameterSemantic::Level,
-            ScalarDomain{.min = -96.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
-            "Stream Playback Right Volume",
+            .id = ParameterId{4},
+            .target = PortId{72},
+            .semantic = ParameterSemantic::Level,
+            .domain = ScalarDomain{.min = -96.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
+            .name = "Stream Playback Right Volume",
         },
         Parameter{
-            ParameterId{5},
-            PortId{75},
-            ParameterSemantic::Mute,
-            BooleanDomain{},
-            "Mixer Output Left Mute",
+            .id = ParameterId{5},
+            .target = PortId{75},
+            .semantic = ParameterSemantic::Mute,
+            .domain = BooleanDomain{},
+            .name = "Mixer Output Left Mute",
         },
         Parameter{
-            ParameterId{6},
-            PortId{76},
-            ParameterSemantic::Mute,
-            BooleanDomain{},
-            "Mixer Output Right Mute",
+            .id = ParameterId{6},
+            .target = PortId{76},
+            .semantic = ParameterSemantic::Mute,
+            .domain = BooleanDomain{},
+            .name = "Mixer Output Right Mute",
         },
         Parameter{
-            ParameterId{7},
-            PortId{75},
-            ParameterSemantic::Level,
-            ScalarDomain{.min = -96.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
-            "Mixer Output Left Volume",
+            .id = ParameterId{7},
+            .target = PortId{75},
+            .semantic = ParameterSemantic::Level,
+            .domain = ScalarDomain{.min = -96.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
+            .name = "Mixer Output Left Volume",
         },
         Parameter{
-            ParameterId{8},
-            PortId{76},
-            ParameterSemantic::Level,
-            ScalarDomain{.min = -96.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
-            "Mixer Output Right Volume",
+            .id = ParameterId{8},
+            .target = PortId{76},
+            .semantic = ParameterSemantic::Level,
+            .domain = ScalarDomain{.min = -96.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
+            .name = "Mixer Output Right Volume",
         },
         Parameter{
-            ParameterId{9},
-            nPhysIn,
-            ParameterSemantic::ClockSource,
-            EnumDomain{
+            .id = ParameterId{9},
+            .target = nPhysIn,
+            .semantic = ParameterSemantic::ClockSource,
+            .domain = EnumDomain{
                 .values = {
                     EnumItem{0, "Internal (32k/44.1k/48k/88.2k/96k)"},
                     EnumItem{1, "S/PDIF Optical"},
                     EnumItem{2, "Word Clock BNC"},
                 },
             },
-            "Clock Source",
+            .name = "Clock Source",
         },
     };
 
     // Meters
     t.meters = {
         Meter{
-            MeterId{1},
-            PortId{75},
-            MeterSemantic::Peak,
-            ScalarDomain{.min = -96.0, .max = 0.0, .unit = ScalarUnit::Decibels},
-            "Mixer Out L Peak Meter",
+            .id = MeterId{1},
+            .target = PortId{75},
+            .semantic = MeterSemantic::Peak,
+            .domain = ScalarDomain{.min = -96.0, .max = 0.0, .unit = ScalarUnit::Decibels},
+            .name = "Mixer Out L Peak Meter",
         },
         Meter{
-            MeterId{2},
-            PortId{76},
-            MeterSemantic::Peak,
-            ScalarDomain{.min = -96.0, .max = 0.0, .unit = ScalarUnit::Decibels},
-            "Mixer Out R Peak Meter",
+            .id = MeterId{2},
+            .target = PortId{76},
+            .semantic = MeterSemantic::Peak,
+            .domain = ScalarDomain{.min = -96.0, .max = 0.0, .unit = ScalarUnit::Decibels},
+            .name = "Mixer Out R Peak Meter",
         },
     };
 
@@ -309,21 +342,6 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         .groups = {
             Presentation::PresentationGroup{
                 .id = Presentation::PresentationGroupId{1},
-                .name = "DAW Stream Return",
-                .kind = Presentation::PresentationGroupKind::InputChannel,
-                .ports = {PortId{71}, PortId{72}},
-                .parameters = {ParameterId{1}, ParameterId{2}, ParameterId{3}, ParameterId{4}},
-            },
-            Presentation::PresentationGroup{
-                .id = Presentation::PresentationGroupId{2},
-                .name = "Monitor Mixer Master",
-                .kind = Presentation::PresentationGroupKind::Monitor,
-                .ports = {PortId{75}, PortId{76}},
-                .parameters = {ParameterId{5}, ParameterId{6}, ParameterId{7}, ParameterId{8}},
-                .meters = {MeterId{1}, MeterId{2}},
-            },
-            Presentation::PresentationGroup{
-                .id = Presentation::PresentationGroupId{3},
                 .name = "Clock & Sync",
                 .kind = Presentation::PresentationGroupKind::Other,
                 .parameters = {ParameterId{9}},
@@ -333,6 +351,12 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
             Presentation::RouterPresentationHint{
                 .router = NodeId{3},
                 .style = Presentation::RouterPresentationStyle::Selector,
+                .bundleGroups = {
+                    Presentation::RouteBundleGroup{
+                        .name = "Monitor Mix DAW Source",
+                        .bundles = {RouteBundleId{1}, RouteBundleId{2}, RouteBundleId{3}, RouteBundleId{4}, RouteBundleId{5}},
+                    },
+                },
             },
             Presentation::RouterPresentationHint{
                 .router = NodeId{5},
@@ -349,8 +373,18 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         .mixers = {
             Presentation::MixerPresentationHint{
                 .mixer = NodeId{4},
-                .style = Presentation::MixerPresentationStyle::Matrix,
+                .style = Presentation::MixerPresentationStyle::ChannelStrips,
             },
+        },
+        .parameters = {
+            Presentation::ParameterPresentationHint{.parameter = ParameterId{1}, .presentation = Presentation::ControlPresentation::Toggle},
+            Presentation::ParameterPresentationHint{.parameter = ParameterId{2}, .presentation = Presentation::ControlPresentation::Toggle},
+            Presentation::ParameterPresentationHint{.parameter = ParameterId{3}, .presentation = Presentation::ControlPresentation::Fader},
+            Presentation::ParameterPresentationHint{.parameter = ParameterId{4}, .presentation = Presentation::ControlPresentation::Fader},
+            Presentation::ParameterPresentationHint{.parameter = ParameterId{5}, .presentation = Presentation::ControlPresentation::Toggle},
+            Presentation::ParameterPresentationHint{.parameter = ParameterId{6}, .presentation = Presentation::ControlPresentation::Toggle},
+            Presentation::ParameterPresentationHint{.parameter = ParameterId{7}, .presentation = Presentation::ControlPresentation::Fader},
+            Presentation::ParameterPresentationHint{.parameter = ParameterId{8}, .presentation = Presentation::ControlPresentation::Fader},
         },
     };
 

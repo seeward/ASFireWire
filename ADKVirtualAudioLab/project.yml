@@ -78,3 +78,23 @@ targets:
       SWIFT_VERSION: "5.9"
       SWIFT_OBJC_BRIDGING_HEADER: Host/ADKLabHost-Bridging-Header.h
       CLANG_CXX_LANGUAGE_STANDARD: gnu++2b
+  ADKLabCLI:
+    type: com.apple.product-type.tool
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: CLI
+      - path: Host/Models/VirtualLabModels.swift
+      - path: Host/Services/VirtualLabState.swift
+      - path: Host/Services/GenericAudioPresenter.swift
+      - path: Lab/VirtualDeviceBridge.cpp
+      - path: Lab/VirtualDeviceBridge.hpp
+      - path: Core/AudioModel
+      - path: Core/Device
+      - path: Core/Presentation
+      - path: Devices
+      - path: Runtime
+    settings:
+      SWIFT_VERSION: "5.9"
+      SWIFT_OBJC_BRIDGING_HEADER: CLI/ADKLabCLI-Bridging-Header.h
+      CLANG_CXX_LANGUAGE_STANDARD: gnu++2b

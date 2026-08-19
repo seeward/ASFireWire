@@ -31,6 +31,14 @@ enum class MixerPresentationStyle {
     Matrix,
 };
 
+enum class ControlPresentation {
+    Auto,
+    Fader,
+    Rotary,
+    Toggle,
+    Selector,
+};
+
 enum class ControlPlacement {
     Auto,
     ChannelHeader,
@@ -81,6 +89,7 @@ struct MixerPresentationHint {
 struct ParameterPresentationHint {
     AudioModel::ParameterId parameter;
     ControlPlacement placement{ControlPlacement::Auto};
+    ControlPresentation presentation{ControlPresentation::Auto};
     std::string section;
 };
 

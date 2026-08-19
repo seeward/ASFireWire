@@ -52,35 +52,33 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
 
     std::vector<PortId> capInPorts;
     std::vector<PortId> capOutPorts;
-    for (uint32_t i = 1; i <= 9; ++i) {
+    for (uint32_t i = 1; i <= 7; ++i) {
         capInPorts.push_back(PortId{10 + i});
         capOutPorts.push_back(PortId{20 + i});
     }
 
-    // Main Sum Mixer: 22x4 (11 stereo inputs x 2 stereo outputs = 22 crosspoints)
+    // Main Sum Mixer: 11 stereo inputs -> 1 stereo output (Main Mix 1/2) = 11 crosspoints
     std::vector<PortId> sumMixerInputs;
     for (uint32_t i = 1; i <= 11; ++i) sumMixerInputs.push_back(PortId{50 + i});
-    std::vector<PortId> sumMixerOutputs = {PortId{71}, PortId{72}};
+    std::vector<PortId> sumMixerOutputs = {PortId{71}};
 
     std::vector<MixerCrosspoint> sumCrosspoints;
-    uint32_t cpId = 1;
     for (uint32_t src = 1; src <= 11; ++src) {
-        sumCrosspoints.push_back(MixerCrosspoint{CrosspointId{cpId++}, PortId{50 + src}, PortId{71}});
-        sumCrosspoints.push_back(MixerCrosspoint{CrosspointId{cpId++}, PortId{50 + src}, PortId{72}});
+        sumCrosspoints.push_back(MixerCrosspoint{CrosspointId{src}, PortId{50 + src}, PortId{71}});
     }
 
-    // Aux Downmix Mixer: 22x2 (11 stereo inputs x 1 stereo output = 11 crosspoints)
+    // Aux Downmix Mixer: 11 stereo inputs -> 1 stereo output (Aux Mix 3/4) = 11 crosspoints
     std::vector<PortId> auxInputs;
     for (uint32_t i = 1; i <= 11; ++i) auxInputs.push_back(PortId{100 + i});
     std::vector<PortId> auxOutputs = {PortId{112}};
 
     std::vector<MixerCrosspoint> auxCrosspoints;
     for (uint32_t src = 1; src <= 11; ++src) {
-        auxCrosspoints.push_back(MixerCrosspoint{CrosspointId{cpId++}, PortId{100 + src}, PortId{112}});
+        auxCrosspoints.push_back(MixerCrosspoint{CrosspointId{11 + src}, PortId{100 + src}, PortId{112}});
     }
 
     t.nodes = {
-        Node{nPhysIn, "Physical Inputs (8 Analog + 2 SPDIF + 8 ADAT)", EndpointNode{EndpointKind::Physical}},
+        Node{nPhysIn, "Physical Inputs (Line 1-4, SPDIF, ADAT 1-8)", EndpointNode{EndpointKind::Physical}},
         Node{
             nHostCaptureBus,
             "I18S Host Capture Bus",
@@ -92,7 +90,7 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         Node{nHostIO, "Host Audio Streams (18 In / 14 Out)", EndpointNode{EndpointKind::Host}},
         Node{
             nSumMixer,
-            "Main 22x4 Sum Matrix (11 Stereo Pairs -> 2 Stereo Destination Pairs)",
+            "Main 11x1 Sum Mixer",
             MixerNode{
                 .inputs = std::move(sumMixerInputs),
                 .outputs = std::move(sumMixerOutputs),
@@ -101,7 +99,7 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         },
         Node{
             nAuxMixer,
-            "Aux 22x2 Downmix Matrix (11 Stereo Pairs -> 1 Stereo Destination Pair)",
+            "Aux 11x1 Downmix Mixer",
             MixerNode{
                 .inputs = std::move(auxInputs),
                 .outputs = std::move(auxOutputs),
@@ -112,15 +110,15 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
             nHpMux,
             "Headphone 1 & 2 Source Selectors",
             RouterNode{
-                .inputs = {PortId{81}, PortId{82}, PortId{83}},
-                .outputs = {PortId{84}, PortId{85}},
+                .inputs = {PortId{81}, PortId{82}, PortId{83}, PortId{84}},
+                .outputs = {PortId{85}, PortId{86}},
                 .legalBundles = {
-                    RouteBundle{RouteBundleId{1}, {Route{PortId{81}, PortId{84}}}},
-                    RouteBundle{RouteBundleId{2}, {Route{PortId{82}, PortId{84}}}},
-                    RouteBundle{RouteBundleId{3}, {Route{PortId{83}, PortId{84}}}},
-                    RouteBundle{RouteBundleId{4}, {Route{PortId{81}, PortId{85}}}},
-                    RouteBundle{RouteBundleId{5}, {Route{PortId{82}, PortId{85}}}},
-                    RouteBundle{RouteBundleId{6}, {Route{PortId{83}, PortId{85}}}},
+                    RouteBundle{RouteBundleId{1}, {Route{PortId{81}, PortId{85}}}},
+                    RouteBundle{RouteBundleId{2}, {Route{PortId{82}, PortId{85}}}},
+                    RouteBundle{RouteBundleId{3}, {Route{PortId{83}, PortId{85}}}},
+                    RouteBundle{RouteBundleId{4}, {Route{PortId{81}, PortId{86}}}},
+                    RouteBundle{RouteBundleId{5}, {Route{PortId{82}, PortId{86}}}},
+                    RouteBundle{RouteBundleId{6}, {Route{PortId{84}, PortId{86}}}},
                 },
                 .constraints = RouterConstraints{
                     .maxActiveBundles = 2,
@@ -131,15 +129,15 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         },
         Node{
             nLineOutMux,
-            "Analog Line Out Source Selectors (analog_pair_sources)",
+            "Analog Line Out Source Selectors",
             RouterNode{
-                .inputs = {PortId{121}, PortId{122}, PortId{123}},
-                .outputs = {PortId{124}, PortId{125}},
+                .inputs = {PortId{121}, PortId{122}, PortId{123}, PortId{124}},
+                .outputs = {PortId{125}, PortId{126}},
                 .legalBundles = {
-                    RouteBundle{RouteBundleId{1}, {Route{PortId{121}, PortId{124}}}},
-                    RouteBundle{RouteBundleId{2}, {Route{PortId{123}, PortId{124}}}},
-                    RouteBundle{RouteBundleId{3}, {Route{PortId{122}, PortId{125}}}},
-                    RouteBundle{RouteBundleId{4}, {Route{PortId{123}, PortId{125}}}},
+                    RouteBundle{RouteBundleId{1}, {Route{PortId{121}, PortId{125}}}},
+                    RouteBundle{RouteBundleId{2}, {Route{PortId{123}, PortId{125}}}},
+                    RouteBundle{RouteBundleId{3}, {Route{PortId{122}, PortId{126}}}},
+                    RouteBundle{RouteBundleId{4}, {Route{PortId{124}, PortId{126}}}},
                 },
                 .constraints = RouterConstraints{
                     .maxActiveBundles = 2,
@@ -148,246 +146,305 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
                 },
             },
         },
-        Node{nPhysOut, "Physical Outputs (4 Analog + 2 SPDIF + 8 ADAT + 2 HP)", EndpointNode{EndpointKind::Physical}},
+        Node{nPhysOut, "Physical Outputs (Line 1-4, SPDIF, ADAT, HP 1/2)", EndpointNode{EndpointKind::Physical}},
     };
 
     // Ports (all stereo pairs = 2 channels)
-    for (uint32_t i = 1; i <= 4; ++i) {
-        t.ports.push_back(Port{PortId{i}, nPhysIn, PortDirection::Output, 2, "Line In " + std::to_string(i)});
-    }
-    t.ports.push_back(Port{PortId{5}, nPhysIn, PortDirection::Output, 2, "SPDIF In"});
-    for (uint32_t i = 1; i <= 4; ++i) {
-        t.ports.push_back(Port{PortId{5 + i}, nPhysIn, PortDirection::Output, 2, "ADAT In " + std::to_string(i)});
-    }
+    // Physical In: 1..9
+    t.ports.push_back(Port{PortId{1}, nPhysIn, PortDirection::Output, 2, "Line In 1/2"});
+    t.ports.push_back(Port{PortId{2}, nPhysIn, PortDirection::Output, 2, "Line In 3/4"});
+    t.ports.push_back(Port{PortId{3}, nPhysIn, PortDirection::Output, 2, "S/PDIF In"});
+    t.ports.push_back(Port{PortId{4}, nPhysIn, PortDirection::Output, 2, "ADAT In 1/2"});
+    t.ports.push_back(Port{PortId{5}, nPhysIn, PortDirection::Output, 2, "ADAT In 3/4"});
+    t.ports.push_back(Port{PortId{6}, nPhysIn, PortDirection::Output, 2, "ADAT In 5/6"});
+    t.ports.push_back(Port{PortId{7}, nPhysIn, PortDirection::Output, 2, "ADAT In 7/8"});
 
-    for (uint32_t i = 1; i <= 9; ++i) {
-        t.ports.push_back(Port{PortId{10 + i}, nHostCaptureBus, PortDirection::Input, 2, "I18S Bus In Pair " + std::to_string(i)});
-    }
-    for (uint32_t i = 1; i <= 9; ++i) {
-        t.ports.push_back(Port{PortId{20 + i}, nHostCaptureBus, PortDirection::Output, 2, "I18S Bus Out Pair " + std::to_string(i)});
-    }
-
-    for (uint32_t i = 1; i <= 9; ++i) {
-        t.ports.push_back(Port{PortId{30 + i}, nHostIO, PortDirection::Input, 2, "Host Capture Pair " + std::to_string(i)});
-    }
     for (uint32_t i = 1; i <= 7; ++i) {
-        t.ports.push_back(Port{PortId{40 + i}, nHostIO, PortDirection::Output, 2, "Host Playback Stream " + std::to_string(i * 2 - 1) + "/" + std::to_string(i * 2)});
+        t.ports.push_back(Port{PortId{10 + i}, nHostCaptureBus, PortDirection::Input, 2, "Capture Bus In " + std::to_string(i)});
+        t.ports.push_back(Port{PortId{20 + i}, nHostCaptureBus, PortDirection::Output, 2, "Capture Bus Out " + std::to_string(i)});
+        t.ports.push_back(Port{PortId{30 + i}, nHostIO, PortDirection::Input, 2, "Host Capture " + std::to_string(i)});
     }
 
-    for (uint32_t i = 1; i <= 4; ++i) {
-        t.ports.push_back(Port{PortId{50 + i}, nSumMixer, PortDirection::Input, 2, "Matrix In: LineIn " + std::to_string(i)});
+    for (uint32_t i = 1; i <= 7; ++i) {
+        t.ports.push_back(Port{PortId{40 + i}, nHostIO, PortDirection::Output, 2, "DAW Playback " + std::to_string(i * 2 - 1) + "/" + std::to_string(i * 2)});
     }
-    t.ports.push_back(Port{PortId{55}, nSumMixer, PortDirection::Input, 2, "Matrix In: SpdifIn"});
-    for (uint32_t i = 1; i <= 4; ++i) {
-        t.ports.push_back(Port{PortId{55 + i}, nSumMixer, PortDirection::Input, 2, "Matrix In: AdatIn " + std::to_string(i)});
+
+    // Main Sum Mixer Inputs: 51..61
+    const std::vector<std::string> chNames = {
+        "Line In 1/2", "Line In 3/4", "S/PDIF In",
+        "ADAT In 1/2", "ADAT In 3/4", "ADAT In 5/6", "ADAT In 7/8",
+        "DAW Playback 1/2", "DAW Playback 3/4", "DAW Playback 5/6", "DAW Playback 7/8"
+    };
+
+    for (uint32_t i = 1; i <= 11; ++i) {
+        t.ports.push_back(Port{PortId{50 + i}, nSumMixer, PortDirection::Input, 2, "Main In: " + chNames[i - 1]});
+        t.ports.push_back(Port{PortId{100 + i}, nAuxMixer, PortDirection::Input, 2, "Aux In: " + chNames[i - 1]});
     }
-    t.ports.push_back(Port{PortId{60}, nSumMixer, PortDirection::Input, 2, "Matrix In: Playback 1/2"});
-    t.ports.push_back(Port{PortId{61}, nSumMixer, PortDirection::Input, 2, "Matrix In: Playback 3/4"});
-    t.ports.push_back(Port{PortId{71}, nSumMixer, PortDirection::Output, 2, "Matrix Out: Mix 0 (LineOut 1/2)"});
-    t.ports.push_back(Port{PortId{72}, nSumMixer, PortDirection::Output, 2, "Matrix Out: Mix 1 (LineOut 3/4)"});
+    t.ports.push_back(Port{PortId{71}, nSumMixer, PortDirection::Output, 2, "Main Mix 1/2"});
+    t.ports.push_back(Port{PortId{112}, nAuxMixer, PortDirection::Output, 2, "Aux Mix 3/4"});
 
-    for (uint32_t i = 1; i <= 4; ++i) {
-        t.ports.push_back(Port{PortId{100 + i}, nAuxMixer, PortDirection::Input, 2, "Aux In: LineIn " + std::to_string(i)});
-    }
-    t.ports.push_back(Port{PortId{105}, nAuxMixer, PortDirection::Input, 2, "Aux In: SpdifIn"});
-    for (uint32_t i = 1; i <= 4; ++i) {
-        t.ports.push_back(Port{PortId{105 + i}, nAuxMixer, PortDirection::Input, 2, "Aux In: AdatIn " + std::to_string(i)});
-    }
-    t.ports.push_back(Port{PortId{110}, nAuxMixer, PortDirection::Input, 2, "Aux In: Playback 1/2"});
-    t.ports.push_back(Port{PortId{111}, nAuxMixer, PortDirection::Input, 2, "Aux In: Playback 3/4"});
-    t.ports.push_back(Port{PortId{112}, nAuxMixer, PortDirection::Output, 2, "Aux Out: Aux 0"});
+    // HP Router Ports
+    t.ports.push_back(Port{PortId{81}, nHpMux, PortDirection::Input, 2, "Main Mix 1/2"});
+    t.ports.push_back(Port{PortId{82}, nHpMux, PortDirection::Input, 2, "Aux Mix 3/4"});
+    t.ports.push_back(Port{PortId{83}, nHpMux, PortDirection::Input, 2, "DAW Playback 1/2"});
+    t.ports.push_back(Port{PortId{84}, nHpMux, PortDirection::Input, 2, "DAW Playback 3/4"});
+    t.ports.push_back(Port{PortId{85}, nHpMux, PortDirection::Output, 2, "Headphone 1 (A)"});
+    t.ports.push_back(Port{PortId{86}, nHpMux, PortDirection::Output, 2, "Headphone 2 (B)"});
 
-    t.ports.push_back(Port{PortId{81}, nHpMux, PortDirection::Input, 2, "HpMux In: Mix 0"});
-    t.ports.push_back(Port{PortId{82}, nHpMux, PortDirection::Input, 2, "HpMux In: Mix 1"});
-    t.ports.push_back(Port{PortId{83}, nHpMux, PortDirection::Input, 2, "HpMux In: Aux 0"});
-    t.ports.push_back(Port{PortId{84}, nHpMux, PortDirection::Output, 2, "HpMux Out: HP 1"});
-    t.ports.push_back(Port{PortId{85}, nHpMux, PortDirection::Output, 2, "HpMux Out: HP 2"});
+    // Line Out Router Ports
+    t.ports.push_back(Port{PortId{121}, nLineOutMux, PortDirection::Input, 2, "Main Mix 1/2"});
+    t.ports.push_back(Port{PortId{122}, nLineOutMux, PortDirection::Input, 2, "Aux Mix 3/4"});
+    t.ports.push_back(Port{PortId{123}, nLineOutMux, PortDirection::Input, 2, "DAW Playback 1/2"});
+    t.ports.push_back(Port{PortId{124}, nLineOutMux, PortDirection::Input, 2, "DAW Playback 3/4"});
+    t.ports.push_back(Port{PortId{125}, nLineOutMux, PortDirection::Output, 2, "Line Out 1/2"});
+    t.ports.push_back(Port{PortId{126}, nLineOutMux, PortDirection::Output, 2, "Line Out 3/4"});
 
-    t.ports.push_back(Port{PortId{121}, nLineOutMux, PortDirection::Input, 2, "LineMux In: Mix 0"});
-    t.ports.push_back(Port{PortId{122}, nLineOutMux, PortDirection::Input, 2, "LineMux In: Mix 1"});
-    t.ports.push_back(Port{PortId{123}, nLineOutMux, PortDirection::Input, 2, "LineMux In: Aux 0"});
-    t.ports.push_back(Port{PortId{124}, nLineOutMux, PortDirection::Output, 2, "LineMux Out: LineOut 1/2"});
-    t.ports.push_back(Port{PortId{125}, nLineOutMux, PortDirection::Output, 2, "LineMux Out: LineOut 3/4"});
-
-    t.ports.push_back(Port{PortId{91}, nPhysOut, PortDirection::Input, 2, "Phys Line Out 1/2"});
-    t.ports.push_back(Port{PortId{92}, nPhysOut, PortDirection::Input, 2, "Phys Line Out 3/4"});
-    t.ports.push_back(Port{PortId{93}, nPhysOut, PortDirection::Input, 2, "Phys S/PDIF Out"});
-    t.ports.push_back(Port{PortId{94}, nPhysOut, PortDirection::Input, 2, "Phys ADAT Out 1/2"});
-    t.ports.push_back(Port{PortId{95}, nPhysOut, PortDirection::Input, 2, "Phys ADAT Out 3/4"});
-    t.ports.push_back(Port{PortId{96}, nPhysOut, PortDirection::Input, 2, "Phys ADAT Out 5/6"});
-    t.ports.push_back(Port{PortId{97}, nPhysOut, PortDirection::Input, 2, "Phys ADAT Out 7/8"});
-    t.ports.push_back(Port{PortId{98}, nPhysOut, PortDirection::Input, 2, "Phys Headphone 1"});
-    t.ports.push_back(Port{PortId{99}, nPhysOut, PortDirection::Input, 2, "Phys Headphone 2"});
+    // Physical Outputs
+    t.ports.push_back(Port{PortId{91}, nPhysOut, PortDirection::Input, 2, "Line Out 1/2"});
+    t.ports.push_back(Port{PortId{92}, nPhysOut, PortDirection::Input, 2, "Line Out 3/4"});
+    t.ports.push_back(Port{PortId{93}, nPhysOut, PortDirection::Input, 2, "S/PDIF Out"});
+    t.ports.push_back(Port{PortId{98}, nPhysOut, PortDirection::Input, 2, "Headphone 1"});
+    t.ports.push_back(Port{PortId{99}, nPhysOut, PortDirection::Input, 2, "Headphone 2"});
 
     // Fixed Links
-    for (uint32_t i = 1; i <= 9; ++i) {
+    for (uint32_t i = 1; i <= 7; ++i) {
         t.fixedLinks.push_back(FixedLink{PortId{i}, PortId{10 + i}});
-    }
-    for (uint32_t i = 1; i <= 9; ++i) {
         t.fixedLinks.push_back(FixedLink{PortId{20 + i}, PortId{30 + i}});
-    }
-    for (uint32_t i = 1; i <= 9; ++i) {
         t.fixedLinks.push_back(FixedLink{PortId{i}, PortId{50 + i}});
         t.fixedLinks.push_back(FixedLink{PortId{i}, PortId{100 + i}});
     }
-    t.fixedLinks.push_back(FixedLink{PortId{41}, PortId{60}});
-    t.fixedLinks.push_back(FixedLink{PortId{42}, PortId{61}});
-    t.fixedLinks.push_back(FixedLink{PortId{41}, PortId{110}});
-    t.fixedLinks.push_back(FixedLink{PortId{42}, PortId{111}});
+    for (uint32_t i = 1; i <= 4; ++i) {
+        t.fixedLinks.push_back(FixedLink{PortId{40 + i}, PortId{57 + i}});
+        t.fixedLinks.push_back(FixedLink{PortId{40 + i}, PortId{107 + i}});
+    }
 
-    t.fixedLinks.push_back(FixedLink{PortId{43}, PortId{93}});
-    t.fixedLinks.push_back(FixedLink{PortId{44}, PortId{94}});
-    t.fixedLinks.push_back(FixedLink{PortId{45}, PortId{95}});
-    t.fixedLinks.push_back(FixedLink{PortId{46}, PortId{96}});
-    t.fixedLinks.push_back(FixedLink{PortId{47}, PortId{97}});
+    t.fixedLinks.push_back(FixedLink{PortId{43}, PortId{93}}); // Direct SPDIF Playback
 
     t.fixedLinks.push_back(FixedLink{PortId{71}, PortId{121}});
-    t.fixedLinks.push_back(FixedLink{PortId{72}, PortId{122}});
+    t.fixedLinks.push_back(FixedLink{PortId{112}, PortId{122}});
+    t.fixedLinks.push_back(FixedLink{PortId{41}, PortId{123}});
+    t.fixedLinks.push_back(FixedLink{PortId{42}, PortId{124}});
+
     t.fixedLinks.push_back(FixedLink{PortId{71}, PortId{81}});
-    t.fixedLinks.push_back(FixedLink{PortId{72}, PortId{82}});
+    t.fixedLinks.push_back(FixedLink{PortId{112}, PortId{82}});
+    t.fixedLinks.push_back(FixedLink{PortId{41}, PortId{83}});
+    t.fixedLinks.push_back(FixedLink{PortId{42}, PortId{84}});
 
-    t.fixedLinks.push_back(FixedLink{PortId{112}, PortId{123}});
-    t.fixedLinks.push_back(FixedLink{PortId{112}, PortId{83}});
+    t.fixedLinks.push_back(FixedLink{PortId{125}, PortId{91}});
+    t.fixedLinks.push_back(FixedLink{PortId{126}, PortId{92}});
+    t.fixedLinks.push_back(FixedLink{PortId{85}, PortId{98}});
+    t.fixedLinks.push_back(FixedLink{PortId{86}, PortId{99}});
 
-    t.fixedLinks.push_back(FixedLink{PortId{124}, PortId{91}});
-    t.fixedLinks.push_back(FixedLink{PortId{125}, PortId{92}});
+    // 3. Audio Semantics: Logical Channels (11) & Busses (2)
+    for (uint32_t i = 1; i <= 7; ++i) {
+        t.channels.push_back(Channel{
+            .id = ChannelId{i},
+            .name = chNames[i - 1],
+            .ports = {PortId{i}, PortId{50 + i}, PortId{100 + i}},
+        });
+    }
+    for (uint32_t i = 8; i <= 11; ++i) {
+        t.channels.push_back(Channel{
+            .id = ChannelId{i},
+            .name = chNames[i - 1],
+            .ports = {PortId{40 + i - 7}, PortId{50 + i}, PortId{100 + i}},
+        });
+    }
 
-    t.fixedLinks.push_back(FixedLink{PortId{84}, PortId{98}});
-    t.fixedLinks.push_back(FixedLink{PortId{85}, PortId{99}});
-
-    // Parameters
-    t.parameters = {
-        Parameter{
-            ParameterId{1},
-            PortId{60},
-            ParameterSemantic::Level,
-            ScalarDomain{.min = -128.0, .max = 0.0, .step = 1.0, .unit = ScalarUnit::Decibels},
-            "Stream Playback 1/2 Input Gain",
+    t.buses = {
+        Bus{
+            .id = BusId{1},
+            .semantic = BusSemantic::Main,
+            .name = "Main Mix 1/2",
+            .ports = {PortId{71}},
         },
-        Parameter{
-            ParameterId{2},
-            PortId{91},
-            ParameterSemantic::Level,
-            ScalarDomain{.min = -128.0, .max = 0.0, .step = 1.0, .unit = ScalarUnit::Decibels},
-            "Analog Output Volume 1/2",
-        },
-        Parameter{
-            ParameterId{3},
-            PortId{92},
-            ParameterSemantic::Level,
-            ScalarDomain{.min = -128.0, .max = 0.0, .step = 1.0, .unit = ScalarUnit::Decibels},
-            "Analog Output Volume 3/4",
-        },
-        Parameter{
-            ParameterId{4},
-            PortId{98},
-            ParameterSemantic::Level,
-            ScalarDomain{.min = -128.0, .max = 0.0, .step = 1.0, .unit = ScalarUnit::Decibels},
-            "Headphone 1 Volume",
-        },
-        Parameter{
-            ParameterId{5},
-            PortId{99},
-            ParameterSemantic::Level,
-            ScalarDomain{.min = -128.0, .max = 0.0, .step = 1.0, .unit = ScalarUnit::Decibels},
-            "Headphone 2 Volume",
+        Bus{
+            .id = BusId{2},
+            .semantic = BusSemantic::Aux,
+            .name = "Aux Mix 3/4",
+            .ports = {PortId{112}},
         },
     };
 
-    // Meters
-    t.meters = {
-        Meter{
-            MeterId{1},
-            PortId{1},
-            MeterSemantic::Peak,
-            ScalarDomain{.min = -128.0, .max = 0.0, .unit = ScalarUnit::Decibels},
-            "LineIn 1/2 Peak Meter",
-        },
-        Meter{
-            MeterId{2},
-            PortId{71},
-            MeterSemantic::Peak,
-            ScalarDomain{.min = -128.0, .max = 0.0, .unit = ScalarUnit::Decibels},
-            "Mixer 0 Peak Meter",
-        },
-        Meter{
-            MeterId{3},
-            PortId{84},
-            MeterSemantic::Peak,
-            ScalarDomain{.min = -128.0, .max = 0.0, .unit = ScalarUnit::Decibels},
-            "Headphone 1 Peak Meter",
-        },
+    // 4. Parameters
+    // 11 Main Sends (CrosspointId 1..11)
+    for (uint32_t i = 1; i <= 11; ++i) {
+        t.parameters.push_back(Parameter{
+            .id = ParameterId{i},
+            .target = CrosspointId{i},
+            .semantic = ParameterSemantic::Level,
+            .domain = ScalarDomain{.min = -128.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
+            .name = chNames[i - 1] + " Main Send",
+        });
+    }
+
+    // 11 Aux Sends (CrosspointId 12..22)
+    for (uint32_t i = 1; i <= 11; ++i) {
+        t.parameters.push_back(Parameter{
+            .id = ParameterId{11 + i},
+            .target = CrosspointId{11 + i},
+            .semantic = ParameterSemantic::Level,
+            .domain = ScalarDomain{.min = -128.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
+            .name = chNames[i - 1] + " Aux Send",
+        });
+    }
+
+    // 11 Pan Controls (PortId 51..61)
+    for (uint32_t i = 1; i <= 11; ++i) {
+        t.parameters.push_back(Parameter{
+            .id = ParameterId{22 + i},
+            .target = PortId{50 + i},
+            .semantic = ParameterSemantic::Pan,
+            .domain = ScalarDomain{.min = -100.0, .max = 100.0, .step = 1.0, .unit = ScalarUnit::Percent},
+            .name = chNames[i - 1] + " Pan",
+        });
+    }
+
+    // 11 Mute Controls (PortId 51..61)
+    for (uint32_t i = 1; i <= 11; ++i) {
+        t.parameters.push_back(Parameter{
+            .id = ParameterId{33 + i},
+            .target = PortId{50 + i},
+            .semantic = ParameterSemantic::Mute,
+            .domain = BooleanDomain{},
+            .name = chNames[i - 1] + " Mute",
+        });
+    }
+
+    // 11 Solo Controls (PortId 51..61)
+    for (uint32_t i = 1; i <= 11; ++i) {
+        t.parameters.push_back(Parameter{
+            .id = ParameterId{44 + i},
+            .target = PortId{50 + i},
+            .semantic = ParameterSemantic::Solo,
+            .domain = BooleanDomain{},
+            .name = chNames[i - 1] + " Solo",
+        });
+    }
+
+    // 5 Output Masters (Level + Mute)
+    const std::vector<std::pair<PortId, std::string>> outMasters = {
+        {PortId{91}, "Analog Out 1/2"},
+        {PortId{92}, "Analog Out 3/4"},
+        {PortId{98}, "Headphone 1 (A)"},
+        {PortId{99}, "Headphone 2 (B)"},
+        {PortId{93}, "S/PDIF Out"},
     };
 
-    // Presentation Metadata
-    resolved.presentation = Presentation::DevicePresentation{
-        .groups = {
-            Presentation::PresentationGroup{
-                .id = Presentation::PresentationGroupId{1},
-                .name = "DAW Playback 1/2",
-                .kind = Presentation::PresentationGroupKind::InputChannel,
-                .ports = {PortId{60}},
-                .parameters = {ParameterId{1}},
-            },
-            Presentation::PresentationGroup{
-                .id = Presentation::PresentationGroupId{2},
-                .name = "Analog Out 1/2",
-                .kind = Presentation::PresentationGroupKind::Monitor,
-                .ports = {PortId{91}},
-                .parameters = {ParameterId{2}},
-            },
-            Presentation::PresentationGroup{
-                .id = Presentation::PresentationGroupId{3},
-                .name = "Analog Out 3/4",
-                .kind = Presentation::PresentationGroupKind::OutputChannel,
-                .ports = {PortId{92}},
-                .parameters = {ParameterId{3}},
-            },
-            Presentation::PresentationGroup{
-                .id = Presentation::PresentationGroupId{4},
-                .name = "Headphone 1",
-                .kind = Presentation::PresentationGroupKind::Monitor,
-                .ports = {PortId{98}},
-                .parameters = {ParameterId{4}},
-                .meters = {MeterId{3}},
-            },
-            Presentation::PresentationGroup{
-                .id = Presentation::PresentationGroupId{5},
-                .name = "Headphone 2",
-                .kind = Presentation::PresentationGroupKind::Monitor,
-                .ports = {PortId{99}},
-                .parameters = {ParameterId{5}},
-            },
-        },
-        .routers = {
-            Presentation::RouterPresentationHint{
-                .router = NodeId{6},
-                .style = Presentation::RouterPresentationStyle::Selector,
-                .bundleGroups = {
-                    Presentation::RouteBundleGroup{.name = "Headphone 1 Source", .bundles = {RouteBundleId{1}, RouteBundleId{2}, RouteBundleId{3}}},
-                    Presentation::RouteBundleGroup{.name = "Headphone 2 Source", .bundles = {RouteBundleId{4}, RouteBundleId{5}, RouteBundleId{6}}},
+    uint32_t pId = 56;
+    for (const auto& [port, name] : outMasters) {
+        t.parameters.push_back(Parameter{
+            .id = ParameterId{pId++},
+            .target = port,
+            .semantic = ParameterSemantic::Level,
+            .domain = ScalarDomain{.min = -128.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
+            .name = name + " Level",
+        });
+        t.parameters.push_back(Parameter{
+            .id = ParameterId{pId++},
+            .target = port,
+            .semantic = ParameterSemantic::Mute,
+            .domain = BooleanDomain{},
+            .name = name + " Mute",
+        });
+    }
+
+    // 5. Meters (11 Channel Meters + 5 Output Meters)
+    for (uint32_t i = 1; i <= 7; ++i) {
+        t.meters.push_back(Meter{
+            .id = MeterId{i},
+            .target = PortId{i},
+            .semantic = MeterSemantic::Peak,
+            .domain = ScalarDomain{.min = -128.0, .max = 0.0, .unit = ScalarUnit::Decibels},
+            .name = chNames[i - 1] + " Peak Meter",
+        });
+    }
+    for (uint32_t i = 8; i <= 11; ++i) {
+        t.meters.push_back(Meter{
+            .id = MeterId{i},
+            .target = PortId{40 + i - 7},
+            .semantic = MeterSemantic::Peak,
+            .domain = ScalarDomain{.min = -128.0, .max = 0.0, .unit = ScalarUnit::Decibels},
+            .name = chNames[i - 1] + " Peak Meter",
+        });
+    }
+    uint32_t mId = 12;
+    for (const auto& [port, name] : outMasters) {
+        t.meters.push_back(Meter{
+            .id = MeterId{mId++},
+            .target = port,
+            .semantic = MeterSemantic::Peak,
+            .domain = ScalarDomain{.min = -128.0, .max = 0.0, .unit = ScalarUnit::Decibels},
+            .name = name + " Peak Meter",
+        });
+    }
+
+    // 6. Presentation Hints (Thin presentation hints only)
+    resolved.presentation.routers = {
+        Presentation::RouterPresentationHint{
+            .router = NodeId{6},
+            .style = Presentation::RouterPresentationStyle::Selector,
+            .bundleGroups = {
+                Presentation::RouteBundleGroup{
+                    .name = "Headphone 1 (A) Source",
+                    .bundles = {RouteBundleId{1}, RouteBundleId{2}, RouteBundleId{3}},
+                },
+                Presentation::RouteBundleGroup{
+                    .name = "Headphone 2 (B) Source",
+                    .bundles = {RouteBundleId{4}, RouteBundleId{5}, RouteBundleId{6}},
                 },
             },
-            Presentation::RouterPresentationHint{
-                .router = NodeId{7},
-                .style = Presentation::RouterPresentationStyle::Selector,
-                .bundleGroups = {
-                    Presentation::RouteBundleGroup{.name = "Line Out 1/2 Source", .bundles = {RouteBundleId{1}, RouteBundleId{2}}},
-                    Presentation::RouteBundleGroup{.name = "Line Out 3/4 Source", .bundles = {RouteBundleId{3}, RouteBundleId{4}}},
+        },
+        Presentation::RouterPresentationHint{
+            .router = NodeId{7},
+            .style = Presentation::RouterPresentationStyle::Selector,
+            .bundleGroups = {
+                Presentation::RouteBundleGroup{
+                    .name = "Line Out 1/2 Source",
+                    .bundles = {RouteBundleId{1}, RouteBundleId{2}},
+                },
+                Presentation::RouteBundleGroup{
+                    .name = "Line Out 3/4 Source",
+                    .bundles = {RouteBundleId{3}, RouteBundleId{4}},
                 },
             },
         },
-        .mixers = {
-            Presentation::MixerPresentationHint{
-                .mixer = NodeId{4},
-                .style = Presentation::MixerPresentationStyle::Matrix,
-            },
-            Presentation::MixerPresentationHint{
-                .mixer = NodeId{5},
-                .style = Presentation::MixerPresentationStyle::Matrix,
-            },
+    };
+
+    resolved.presentation.mixers = {
+        Presentation::MixerPresentationHint{
+            .mixer = NodeId{4},
+            .style = Presentation::MixerPresentationStyle::ChannelStrips,
+        },
+        Presentation::MixerPresentationHint{
+            .mixer = NodeId{5},
+            .style = Presentation::MixerPresentationStyle::ChannelStrips,
         },
     };
+
+    // Parameter Presentation Hints (Fader for Main, Rotary for Aux & Pan, Toggle for Mute & Solo)
+    for (uint32_t i = 1; i <= 11; ++i) {
+        resolved.presentation.parameters.push_back(Presentation::ParameterPresentationHint{
+            .parameter = ParameterId{i},
+            .presentation = Presentation::ControlPresentation::Fader,
+        });
+        resolved.presentation.parameters.push_back(Presentation::ParameterPresentationHint{
+            .parameter = ParameterId{11 + i},
+            .presentation = Presentation::ControlPresentation::Rotary,
+        });
+        resolved.presentation.parameters.push_back(Presentation::ParameterPresentationHint{
+            .parameter = ParameterId{22 + i},
+            .presentation = Presentation::ControlPresentation::Rotary,
+        });
+        resolved.presentation.parameters.push_back(Presentation::ParameterPresentationHint{
+            .parameter = ParameterId{33 + i},
+            .presentation = Presentation::ControlPresentation::Toggle,
+        });
+        resolved.presentation.parameters.push_back(Presentation::ParameterPresentationHint{
+            .parameter = ParameterId{44 + i},
+            .presentation = Presentation::ControlPresentation::Toggle,
+        });
+    }
 
     return resolved;
 }
@@ -396,11 +453,20 @@ DeviceState makeInitialState(const ResolvedAudioConfiguration& resolved) {
     DeviceState state;
     state.topologyRevision = resolved.topology.revision;
 
-    state.parameters[ParameterId{1}] = 0.0;
-    state.parameters[ParameterId{2}] = 0.0;
-    state.parameters[ParameterId{3}] = 0.0;
-    state.parameters[ParameterId{4}] = 0.0;
-    state.parameters[ParameterId{5}] = 0.0;
+    // Default Main Sends: Unity (0.0 dB) for DAW Playback 1/2 and Line In 1/2, -128 dB for others
+    for (uint32_t i = 1; i <= 11; ++i) {
+        state.parameters[ParameterId{i}] = (i == 1 || i == 8) ? 0.0 : -128.0;
+        state.parameters[ParameterId{11 + i}] = -128.0; // Aux sends at -inf
+        state.parameters[ParameterId{22 + i}] = 0.0;    // Pan center
+        state.parameters[ParameterId{33 + i}] = false;  // Unmuted
+        state.parameters[ParameterId{44 + i}] = false;  // Unsoloed
+    }
+
+    // Output Masters (56..65)
+    for (uint32_t p = 56; p < 66; p += 2) {
+        state.parameters[ParameterId{p}] = 0.0;      // Level 0.0 dB
+        state.parameters[ParameterId{p + 1}] = false; // Unmuted
+    }
 
     // Headphone Mux (Node 6): HP 1 <- Mix 0 (Bundle 1), HP 2 <- Mix 1 (Bundle 5)
     state.routers[NodeId{6}] = RouterState{
@@ -412,9 +478,9 @@ DeviceState makeInitialState(const ResolvedAudioConfiguration& resolved) {
         .activeBundles = {RouteBundleId{1}, RouteBundleId{3}},
     };
 
-    state.meters[MeterId{1}] = -128.0;
-    state.meters[MeterId{2}] = -128.0;
-    state.meters[MeterId{3}] = -128.0;
+    for (uint32_t m = 1; m <= 16; ++m) {
+        state.meters[MeterId{m}] = -128.0;
+    }
 
     return state;
 }

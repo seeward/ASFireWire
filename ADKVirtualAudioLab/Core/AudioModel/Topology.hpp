@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Bus.hpp"
+#include "Channel.hpp"
 #include "Id.hpp"
 #include "Link.hpp"
 #include "Meter.hpp"
@@ -23,6 +25,9 @@ struct Topology {
     std::vector<FixedLink> fixedLinks;
     std::vector<Parameter> parameters;
     std::vector<Meter> meters;
+
+    std::vector<Channel> channels;
+    std::vector<Bus> buses;
 };
 
 } // namespace ASFW::AudioModel

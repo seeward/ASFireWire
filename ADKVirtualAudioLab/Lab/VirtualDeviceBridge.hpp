@@ -34,10 +34,12 @@ typedef enum {
     ASFW_SEMANTIC_MUTE = 2,
     ASFW_SEMANTIC_PHANTOM_POWER = 3,
     ASFW_SEMANTIC_PHASE_INVERT = 4,
-    ASFW_SEMANTIC_BALANCE = 5,
-    ASFW_SEMANTIC_NOMINAL_LEVEL = 6,
-    ASFW_SEMANTIC_CLOCK_SOURCE = 7,
-    ASFW_SEMANTIC_DIM = 8,
+    ASFW_SEMANTIC_PAN = 5,
+    ASFW_SEMANTIC_BALANCE = 6,
+    ASFW_SEMANTIC_SOLO = 7,
+    ASFW_SEMANTIC_NOMINAL_LEVEL = 8,
+    ASFW_SEMANTIC_CLOCK_SOURCE = 9,
+    ASFW_SEMANTIC_DIM = 10,
 } ASFWParameterSemantic;
 
 typedef enum {
@@ -77,6 +79,37 @@ typedef enum {
     ASFW_MIXER_STYLE_CHANNEL_STRIPS = 1,
     ASFW_MIXER_STYLE_MATRIX = 2,
 } ASFWMixerStyle;
+
+typedef enum {
+    ASFW_CONTROL_AUTO = 0,
+    ASFW_CONTROL_FADER = 1,
+    ASFW_CONTROL_ROTARY = 2,
+    ASFW_CONTROL_TOGGLE = 3,
+    ASFW_CONTROL_SELECTOR = 4,
+} ASFWControlPresentation;
+
+typedef enum {
+    ASFW_BUS_SEMANTIC_UNKNOWN = 0,
+    ASFW_BUS_SEMANTIC_MAIN = 1,
+    ASFW_BUS_SEMANTIC_AUX = 2,
+    ASFW_BUS_SEMANTIC_MONITOR = 3,
+    ASFW_BUS_SEMANTIC_CUE = 4,
+} ASFWBusSemantic;
+
+typedef struct {
+    uint32_t id;
+    const char* name;
+    uint32_t portCount;
+    const uint32_t* portIds;
+} ASFWChannelDTO;
+
+typedef struct {
+    uint32_t id;
+    ASFWBusSemantic semantic;
+    const char* name;
+    uint32_t portCount;
+    const uint32_t* portIds;
+} ASFWBusDTO;
 
 typedef enum {
     ASFW_PLACEMENT_AUTO = 0,
@@ -137,6 +170,7 @@ typedef struct {
 typedef struct {
     uint32_t parameterId;
     ASFWControlPlacement placement;
+    ASFWControlPresentation presentation;
     const char* section;
 } ASFWParameterHintDTO;
 
@@ -283,6 +317,13 @@ typedef struct {
 
     uint32_t meterCount;
     const ASFWMeterDTO* meters;
+
+    // Logical Channels & Busses (Audio Semantics)
+    uint32_t channelCount;
+    const ASFWChannelDTO* channels;
+
+    uint32_t busCount;
+    const ASFWBusDTO* buses;
 
     // Presentation Layer & Surface Semantics
     ASFWDevicePresentationDTO presentation;
