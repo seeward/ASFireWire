@@ -39,12 +39,22 @@ std::vector<ProjectedControl> projectControls(
                     val = std::get<double>(it->second);
                 }
 
-                ctrl.kind = ProjectedControlKind::Volume;
-                ctrl.data = ProjectedVolumeControl{
-                    .minValue = domain.min,
-                    .maxValue = domain.max,
-                    .currentValue = val,
-                };
+                if (param.semantic == ParameterSemantic::Level) {
+                    ctrl.kind = ProjectedControlKind::Volume;
+                    ctrl.data = ProjectedVolumeControl{
+                        .minValue = domain.min,
+                        .maxValue = domain.max,
+                        .currentValue = val,
+                    };
+                } else {
+                    ctrl.kind = ProjectedControlKind::Scalar;
+                    ctrl.data = ProjectedScalarControl{
+                        .minValue = domain.min,
+                        .maxValue = domain.max,
+                        .currentValue = val,
+                        .step = domain.step.value_or(0.0),
+                    };
+                }
             } else if constexpr (std::is_same_v<D, EnumDomain>) {
                 int64_t val = domain.values.empty() ? 0 : domain.values.front().value;
                 if (it != state.parameters.end() && std::holds_alternative<int64_t>(it->second)) {

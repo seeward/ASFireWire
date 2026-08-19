@@ -11,7 +11,6 @@
 namespace ASFW::AudioModel {
 
 struct RouterState {
-    NodeId node;
     std::vector<RouteBundleId> activeBundles;
 };
 

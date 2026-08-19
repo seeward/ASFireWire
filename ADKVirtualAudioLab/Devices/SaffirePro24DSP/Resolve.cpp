@@ -19,8 +19,15 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         });
     }
 
-    const OpticalMode optIn = config.opticalInput.value_or(OpticalMode::Adat);
-    const OpticalMode optOut = config.opticalOutput.value_or(OpticalMode::Adat);
+    if (!config.opticalInput.has_value() || !config.opticalOutput.has_value()) {
+        return std::unexpected(ResolveError{
+            ResolveErrorKind::InvalidConfiguration,
+            "Saffire requires explicit optical input and output modes in configuration"
+        });
+    }
+
+    const OpticalMode optIn = *config.opticalInput;
+    const OpticalMode optOut = *config.opticalOutput;
 
     ResolvedAudioConfiguration resolved;
 
@@ -178,12 +185,31 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         t.ports.push_back(Port{PortId{40 + i}, nHostIO, PortDirection::Output, 1, "DAW Stream Playback " + std::to_string(i)});
     }
 
-    // Router Ports
+    // Router Ports with Semantic Hardware Source/Destination Names
     for (uint32_t i = 1; i <= 46; ++i) {
-        t.ports.push_back(Port{PortId{50 + i}, nDiceRouter, PortDirection::Input, 1, "Router In " + std::to_string(i)});
+        std::string srcName;
+        if (i <= 6) srcName = "Analog In " + std::to_string(i);
+        else if (i <= 8) srcName = (i == 7 ? "SPDIF In L" : "SPDIF In R");
+        else if (i <= 16) srcName = (optIn == OpticalMode::Adat ? "ADAT In " + std::to_string(i - 8) : "Opt SPDIF In " + std::to_string(i - 8));
+        else if (i <= 24) srcName = "DAW Playback " + std::to_string(i - 16);
+        else if (i <= 40) srcName = "Mixer Out " + std::to_string(i - 24);
+        else if (i <= 42) srcName = (i == 41 ? "ChStrip Out L" : "ChStrip Out R");
+        else if (i <= 44) srcName = (i == 43 ? "Reverb Out L" : "Reverb Out R");
+        else srcName = "Aux In " + std::to_string(i - 44);
+
+        t.ports.push_back(Port{PortId{50 + i}, nDiceRouter, PortDirection::Input, 1, "Router In: " + srcName});
     }
+
     for (uint32_t i = 1; i <= 46; ++i) {
-        t.ports.push_back(Port{PortId{100 + i}, nDiceRouter, PortDirection::Output, 1, "Router Out " + std::to_string(i)});
+        std::string dstName;
+        if (i <= 6) dstName = "Line/Monitor " + std::to_string(i);
+        else if (i <= 8) dstName = (i == 7 ? "Coax SPDIF L" : "Coax SPDIF R");
+        else if (i <= 24) dstName = "DAW Record " + std::to_string(i - 8);
+        else if (i <= 42) dstName = "Mixer In " + std::to_string(i - 24);
+        else if (i <= 44) dstName = (i == 43 ? "ChStrip In L" : "ChStrip In R");
+        else dstName = (i == 45 ? "Reverb In L" : "Reverb In R");
+
+        t.ports.push_back(Port{PortId{100 + i}, nDiceRouter, PortDirection::Output, 1, "Router Out: " + dstName});
     }
 
     // Mixer Ports
@@ -218,13 +244,24 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
 
     // Physical Outputs
     for (uint32_t i = 1; i <= 6; ++i) {
-        t.ports.push_back(Port{PortId{230 + i}, nPhysOut, PortDirection::Input, 1, "Phone Out " + std::to_string(i)});
+        t.ports.push_back(Port{PortId{230 + i}, nPhysOut, PortDirection::Input, 1, "Phys Out: Phone " + std::to_string(i)});
     }
     for (uint32_t i = 1; i <= 4; ++i) {
-        t.ports.push_back(Port{PortId{236 + i}, nPhysOut, PortDirection::Input, 1, "HP Out " + std::to_string(i)});
+        t.ports.push_back(Port{PortId{236 + i}, nPhysOut, PortDirection::Input, 1, "Phys Out: HP " + std::to_string(i)});
     }
-    t.ports.push_back(Port{PortId{241}, nPhysOut, PortDirection::Input, 1, "SPDIF Out L"});
-    t.ports.push_back(Port{PortId{242}, nPhysOut, PortDirection::Input, 1, "SPDIF Out R"});
+    t.ports.push_back(Port{PortId{241}, nPhysOut, PortDirection::Input, 1, "Phys Out: Coax SPDIF L"});
+    t.ports.push_back(Port{PortId{242}, nPhysOut, PortDirection::Input, 1, "Phys Out: Coax SPDIF R"});
+
+    const uint32_t optOutCount = (optOut == OpticalMode::Adat) ? 8 : 2;
+    for (uint32_t i = 1; i <= optOutCount; ++i) {
+        t.ports.push_back(Port{
+            PortId{242 + i},
+            nPhysOut,
+            PortDirection::Input,
+            1,
+            (optOut == OpticalMode::Adat) ? ("Phys Out: ADAT " + std::to_string(i)) : ("Phys Out: Opt SPDIF " + std::to_string(i))
+        });
+    }
 
     // Fixed Links
     for (uint32_t i = 1; i <= (8 + optInCount); ++i) {
@@ -246,6 +283,20 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
     }
     t.fixedLinks.push_back(FixedLink{PortId{107}, PortId{241}});
     t.fixedLinks.push_back(FixedLink{PortId{108}, PortId{242}});
+
+    // Optical Output Destination Wiring:
+    // In optical S/PDIF mode: Optical S/PDIF TX mirrors DICE Router Out 7/8 (Coax S/PDIF TX).
+    // In ADAT mode: ADAT Out 1..8 physical destinations are fed from Host Playback streams 1..8.
+    // NOTE: Verify against native DICE II hardware register routing map when hardware registers
+    // are mapped to determine if ADAT TX channels are exposed as discrete router output ports.
+    if (optOut == OpticalMode::Adat) {
+        for (uint32_t i = 1; i <= 8; ++i) {
+            t.fixedLinks.push_back(FixedLink{PortId{40 + i}, PortId{242 + i}});
+        }
+    } else {
+        t.fixedLinks.push_back(FixedLink{PortId{107}, PortId{243}});
+        t.fixedLinks.push_back(FixedLink{PortId{108}, PortId{244}});
+    }
 
     for (uint32_t i = 1; i <= 16; ++i) {
         t.fixedLinks.push_back(FixedLink{PortId{108 + i}, PortId{20 + i}});
@@ -285,39 +336,35 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
             ParameterId{3},
             PortId{201},
             ParameterSemantic::Level,
-            ScalarDomain{.min = 0.0, .max = 127.0, .step = 1.0, .unit = ScalarUnit::Generic},
+            ScalarDomain{.min = 0.0, .max = 100.0, .step = 1.0, .unit = ScalarUnit::Percent},
             "Monitor 1 Volume",
         },
         Parameter{
             ParameterId{4},
             PortId{202},
             ParameterSemantic::Level,
-            ScalarDomain{.min = 0.0, .max = 127.0, .step = 1.0, .unit = ScalarUnit::Generic},
+            ScalarDomain{.min = 0.0, .max = 100.0, .step = 1.0, .unit = ScalarUnit::Percent},
             "Monitor 2 Volume",
         },
         Parameter{
             ParameterId{5},
             PortId{1},
             ParameterSemantic::NominalLevel,
-            EnumDomain{
-                .values = {
-                    EnumItem{0, "Line (-10dB to +36dB)"},
-                    EnumItem{1, "Instrument (+13dB to +60dB)"},
-                },
-            },
-            "Ch 1 Input Level",
+            EnumDomain{{
+                {0, "Line"},
+                {1, "Instrument"},
+            }},
+            "Input 1 Preamp Mode",
         },
         Parameter{
             ParameterId{6},
             PortId{2},
             ParameterSemantic::NominalLevel,
-            EnumDomain{
-                .values = {
-                    EnumItem{0, "Line (-10dB to +36dB)"},
-                    EnumItem{1, "Instrument (+13dB to +60dB)"},
-                },
-            },
-            "Ch 2 Input Level",
+            EnumDomain{{
+                {0, "Line"},
+                {1, "Instrument"},
+            }},
+            "Input 2 Preamp Mode",
         },
     };
 
@@ -346,6 +393,107 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         },
     };
 
+    // Presentation Metadata
+    resolved.presentation = Presentation::DevicePresentation{
+        .groups = {
+            Presentation::PresentationGroup{
+                .id = Presentation::PresentationGroupId{1},
+                .name = "Input 1",
+                .kind = Presentation::PresentationGroupKind::InputChannel,
+                .ports = {PortId{1}},
+                .parameters = {ParameterId{5}},
+                .meters = {MeterId{1}},
+            },
+            Presentation::PresentationGroup{
+                .id = Presentation::PresentationGroupId{2},
+                .name = "Input 2",
+                .kind = Presentation::PresentationGroupKind::InputChannel,
+                .ports = {PortId{2}},
+                .parameters = {ParameterId{6}},
+                .meters = {MeterId{2}},
+            },
+            Presentation::PresentationGroup{
+                .id = Presentation::PresentationGroupId{3},
+                .name = "Monitor Master",
+                .kind = Presentation::PresentationGroupKind::Monitor,
+                .parameters = {ParameterId{1}, ParameterId{2}, ParameterId{3}, ParameterId{4}},
+                .meters = {MeterId{3}},
+            },
+            Presentation::PresentationGroup{
+                .id = Presentation::PresentationGroupId{4},
+                .name = "DSP Channel Strip",
+                .kind = Presentation::PresentationGroupKind::Processor,
+                .nodes = {NodeId{6}},
+            },
+            Presentation::PresentationGroup{
+                .id = Presentation::PresentationGroupId{5},
+                .name = "DSP Reverb",
+                .kind = Presentation::PresentationGroupKind::Processor,
+                .nodes = {NodeId{7}},
+            },
+        },
+        .routers = {
+            Presentation::RouterPresentationHint{
+                .router = NodeId{3},
+                .style = Presentation::RouterPresentationStyle::Matrix,
+                .inputGroups = {
+                    Presentation::PortPresentationGroup{
+                        .name = "Analog Inputs",
+                        .ports = {PortId{51}, PortId{52}, PortId{53}, PortId{54}, PortId{55}, PortId{56}},
+                    },
+                    Presentation::PortPresentationGroup{
+                        .name = "S/PDIF Inputs",
+                        .ports = {PortId{57}, PortId{58}},
+                    },
+                    Presentation::PortPresentationGroup{
+                        .name = "ADAT / Opt In",
+                        .ports = {PortId{59}, PortId{60}, PortId{61}, PortId{62}, PortId{63}, PortId{64}, PortId{65}, PortId{66}},
+                    },
+                    Presentation::PortPresentationGroup{
+                        .name = "DAW Playback",
+                        .ports = {PortId{67}, PortId{68}, PortId{69}, PortId{70}, PortId{71}, PortId{72}, PortId{73}, PortId{74}},
+                    },
+                    Presentation::PortPresentationGroup{
+                        .name = "Mixer Outputs",
+                        .ports = {PortId{75}, PortId{76}, PortId{77}, PortId{78}, PortId{79}, PortId{80}, PortId{81}, PortId{82}, PortId{83}, PortId{84}, PortId{85}, PortId{86}, PortId{87}, PortId{88}, PortId{89}, PortId{90}},
+                    },
+                    Presentation::PortPresentationGroup{
+                        .name = "DSP FX Returns",
+                        .ports = {PortId{91}, PortId{92}, PortId{93}, PortId{94}},
+                    },
+                },
+                .outputGroups = {
+                    Presentation::PortPresentationGroup{
+                        .name = "Monitor & Line Out",
+                        .ports = {PortId{101}, PortId{102}, PortId{103}, PortId{104}, PortId{105}, PortId{106}},
+                    },
+                    Presentation::PortPresentationGroup{
+                        .name = "Coax S/PDIF Out",
+                        .ports = {PortId{107}, PortId{108}},
+                    },
+                    Presentation::PortPresentationGroup{
+                        .name = "DAW Record",
+                        .ports = {PortId{109}, PortId{110}, PortId{111}, PortId{112}, PortId{113}, PortId{114}, PortId{115}, PortId{116}, PortId{117}, PortId{118}, PortId{119}, PortId{120}, PortId{121}, PortId{122}, PortId{123}, PortId{124}},
+                    },
+                    Presentation::PortPresentationGroup{
+                        .name = "Mixer Inputs",
+                        .ports = {PortId{125}, PortId{126}, PortId{127}, PortId{128}, PortId{129}, PortId{130}, PortId{131}, PortId{132}, PortId{133}, PortId{134}, PortId{135}, PortId{136}, PortId{137}, PortId{138}, PortId{139}, PortId{140}, PortId{141}, PortId{142}},
+                    },
+                    Presentation::PortPresentationGroup{
+                        .name = "DSP FX Inputs",
+                        .ports = {PortId{143}, PortId{144}, PortId{145}, PortId{146}},
+                    },
+                },
+            },
+        },
+        .mixers = {
+            Presentation::MixerPresentationHint{
+                .mixer = NodeId{4},
+                .style = Presentation::MixerPresentationStyle::Matrix,
+            },
+        },
+    };
+
     return resolved;
 }
 
@@ -360,22 +508,26 @@ DeviceState makeInitialState(const ResolvedAudioConfiguration& resolved) {
     state.parameters[ParameterId{5}] = int64_t{0}; // Line
     state.parameters[ParameterId{6}] = int64_t{0}; // Line
 
-    // Default 1-to-1 active bundles in DICE router (e.g. DAW Playback 1/2 -> Analog Out 1/2, Phys In 1..16 -> Stream Cap 1..16)
-    // Bundle ID for (In X, Out Y) = (X - 1) * 46 + Y
-    // In 17 (DAW 1) -> Out 1 (Analog 1): (17-1)*46 + 1 = 737
-    // In 18 (DAW 2) -> Out 2 (Analog 2): (18-1)*46 + 2 = 784
+    // Default 1-to-1 active bundles in DICE router (e.g. DAW Playback 1/2 -> Analog Out 1/2)
     std::vector<RouteBundleId> initialBundles = {
-        RouteBundleId{737},
-        RouteBundleId{784},
+        RouteBundleId{737}, // DAW 1 -> Analog 1
+        RouteBundleId{784}, // DAW 2 -> Analog 2
     };
-    // Phys In 1..16 (Inputs 1..16) -> Stream Capture 1..16 (Outputs 9..24):
-    for (uint32_t i = 1; i <= 16; ++i) {
+
+    // Count physical input ports connected to router inputs (1..N)
+    uint32_t activePhysIn = 0;
+    for (const auto& port : resolved.topology.ports) {
+        if (port.owner == NodeId{1} && port.direction == PortDirection::Output) {
+            ++activePhysIn;
+        }
+    }
+    // Only activate capture routes for actual connected physical inputs
+    for (uint32_t i = 1; i <= activePhysIn && i <= 16; ++i) {
         uint32_t bId = (i - 1) * 46 + (8 + i);
         initialBundles.push_back(RouteBundleId{bId});
     }
 
     state.routers[NodeId{3}] = RouterState{
-        .node = NodeId{3},
         .activeBundles = std::move(initialBundles),
     };
 

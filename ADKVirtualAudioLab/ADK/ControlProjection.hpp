@@ -12,6 +12,7 @@ namespace ASFW::ADK {
 
 enum class ProjectedControlKind {
     Volume,
+    Scalar,
     Mute,
     Boolean,
     Enum,
@@ -21,6 +22,13 @@ struct ProjectedVolumeControl {
     double minValue{0.0};
     double maxValue{1.0};
     double currentValue{1.0};
+};
+
+struct ProjectedScalarControl {
+    double minValue{0.0};
+    double maxValue{1.0};
+    double currentValue{0.0};
+    double step{0.0};
 };
 
 struct ProjectedMuteControl {
@@ -43,6 +51,7 @@ struct ProjectedEnumControl {
 
 using ProjectedControlData = std::variant<
     ProjectedVolumeControl,
+    ProjectedScalarControl,
     ProjectedMuteControl,
     ProjectedBooleanControl,
     ProjectedEnumControl

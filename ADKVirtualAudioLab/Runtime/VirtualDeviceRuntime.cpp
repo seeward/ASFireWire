@@ -132,11 +132,10 @@ std::expected<void, StateError> VirtualDeviceRuntime::setActiveRouteBundles(
     std::span<const RouteBundleId> bundles) {
 
     RouterState proposedState{
-        .node = routerNode,
         .activeBundles = std::vector<RouteBundleId>(bundles.begin(), bundles.end()),
     };
 
-    auto res = validateRouterState(resolved_.topology, proposedState);
+    auto res = validateRouterState(resolved_.topology, routerNode, proposedState);
     if (!res.has_value()) {
         return res;
     }
@@ -150,7 +149,10 @@ std::expected<void, StateError> VirtualDeviceRuntime::activateRouteBundle(
     NodeId routerNode,
     RouteBundleId bundleId) {
 
-    auto currentBundles = state_.routers[routerNode].activeBundles;
+    std::vector<RouteBundleId> currentBundles;
+    if (auto it = state_.routers.find(routerNode); it != state_.routers.end()) {
+        currentBundles = it->second.activeBundles;
+    }
     if (std::find(currentBundles.begin(), currentBundles.end(), bundleId) == currentBundles.end()) {
         currentBundles.push_back(bundleId);
     }
@@ -162,7 +164,10 @@ std::expected<void, StateError> VirtualDeviceRuntime::deactivateRouteBundle(
     NodeId routerNode,
     RouteBundleId bundleId) {
 
-    auto currentBundles = state_.routers[routerNode].activeBundles;
+    std::vector<RouteBundleId> currentBundles;
+    if (auto it = state_.routers.find(routerNode); it != state_.routers.end()) {
+        currentBundles = it->second.activeBundles;
+    }
     currentBundles.erase(
         std::remove(currentBundles.begin(), currentBundles.end(), bundleId),
         currentBundles.end()
@@ -181,19 +186,9 @@ std::expected<void, StateError> VirtualDeviceRuntime::updateMeter(
     MeterId id,
     double value) {
 
-    // Verify meter exists in topology
-    bool exists = false;
-    for (const auto& m : resolved_.topology.meters) {
-        if (m.id == id) {
-            exists = true;
-            break;
-        }
-    }
-    if (!exists) {
-        return std::unexpected(StateError{
-            StateErrorKind::NonexistentMeter,
-            "MeterId does not exist in topology"
-        });
+    auto res = validateMeterValue(resolved_.topology, id, value);
+    if (!res.has_value()) {
+        return res;
     }
 
     state_.meters[id] = value;

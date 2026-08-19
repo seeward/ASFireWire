@@ -28,6 +28,129 @@ typedef enum {
     ASFW_PARAM_KIND_ENUM = 2,
 } ASFWParamKind;
 
+typedef enum {
+    ASFW_SEMANTIC_UNKNOWN = 0,
+    ASFW_SEMANTIC_LEVEL = 1,
+    ASFW_SEMANTIC_MUTE = 2,
+    ASFW_SEMANTIC_PHANTOM_POWER = 3,
+    ASFW_SEMANTIC_PHASE_INVERT = 4,
+    ASFW_SEMANTIC_BALANCE = 5,
+    ASFW_SEMANTIC_NOMINAL_LEVEL = 6,
+    ASFW_SEMANTIC_CLOCK_SOURCE = 7,
+    ASFW_SEMANTIC_DIM = 8,
+} ASFWParameterSemantic;
+
+typedef enum {
+    ASFW_TARGET_NODE = 0,
+    ASFW_TARGET_PORT = 1,
+    ASFW_TARGET_CROSSPOINT = 2,
+} ASFWTargetKind;
+
+typedef enum {
+    ASFW_NODE_ENDPOINT_PHYSICAL = 0,
+    ASFW_NODE_ENDPOINT_HOST = 1,
+    ASFW_NODE_ROUTER = 2,
+    ASFW_NODE_MIXER = 3,
+    ASFW_NODE_PROCESSOR = 4,
+} ASFWNodeKind;
+
+// Presentation Enums
+typedef enum {
+    ASFW_PRES_GROUP_INPUT_CHANNEL = 0,
+    ASFW_PRES_GROUP_OUTPUT_CHANNEL = 1,
+    ASFW_PRES_GROUP_MIXER = 2,
+    ASFW_PRES_GROUP_MONITOR = 3,
+    ASFW_PRES_GROUP_ROUTING = 4,
+    ASFW_PRES_GROUP_PROCESSOR = 5,
+    ASFW_PRES_GROUP_OTHER = 6,
+} ASFWPresGroupKind;
+
+typedef enum {
+    ASFW_ROUTER_STYLE_AUTO = 0,
+    ASFW_ROUTER_STYLE_SELECTOR = 1,
+    ASFW_ROUTER_STYLE_PATCHBAY = 2,
+    ASFW_ROUTER_STYLE_MATRIX = 3,
+} ASFWRouterStyle;
+
+typedef enum {
+    ASFW_MIXER_STYLE_AUTO = 0,
+    ASFW_MIXER_STYLE_CHANNEL_STRIPS = 1,
+    ASFW_MIXER_STYLE_MATRIX = 2,
+} ASFWMixerStyle;
+
+typedef enum {
+    ASFW_PLACEMENT_AUTO = 0,
+    ASFW_PLACEMENT_CHANNEL_HEADER = 1,
+    ASFW_PLACEMENT_CHANNEL_STRIP = 2,
+    ASFW_PLACEMENT_CHANNEL_FOOTER = 3,
+    ASFW_PLACEMENT_CROSSPOINT = 4,
+    ASFW_PLACEMENT_MASTER = 5,
+    ASFW_PLACEMENT_ADVANCED = 6,
+} ASFWControlPlacement;
+
+typedef struct {
+    const char* name;
+    uint32_t portCount;
+    const uint32_t* portIds;
+} ASFWPortGroupDTO;
+
+typedef struct {
+    const char* name;
+    uint32_t bundleCount;
+    const uint32_t* bundleIds;
+} ASFWBundleGroupDTO;
+
+typedef struct {
+    uint32_t id;
+    const char* name;
+    ASFWPresGroupKind kind;
+    uint32_t nodeCount;
+    const uint32_t* nodeIds;
+    uint32_t portCount;
+    const uint32_t* portIds;
+    uint32_t parameterCount;
+    const uint32_t* parameterIds;
+    uint32_t meterCount;
+    const uint32_t* meterIds;
+} ASFWPresentationGroupDTO;
+
+typedef struct {
+    uint32_t routerNodeId;
+    ASFWRouterStyle style;
+    uint32_t inputGroupCount;
+    const ASFWPortGroupDTO* inputGroups;
+    uint32_t outputGroupCount;
+    const ASFWPortGroupDTO* outputGroups;
+    uint32_t bundleGroupCount;
+    const ASFWBundleGroupDTO* bundleGroups;
+} ASFWRouterHintDTO;
+
+typedef struct {
+    uint32_t mixerNodeId;
+    ASFWMixerStyle style;
+    uint32_t inputGroupCount;
+    const ASFWPortGroupDTO* inputGroups;
+    uint32_t outputGroupCount;
+    const ASFWPortGroupDTO* outputGroups;
+} ASFWMixerHintDTO;
+
+typedef struct {
+    uint32_t parameterId;
+    ASFWControlPlacement placement;
+    const char* section;
+} ASFWParameterHintDTO;
+
+typedef struct {
+    uint32_t groupCount;
+    const ASFWPresentationGroupDTO* groups;
+    uint32_t routerHintCount;
+    const ASFWRouterHintDTO* routerHints;
+    uint32_t mixerHintCount;
+    const ASFWMixerHintDTO* mixerHints;
+    uint32_t parameterHintCount;
+    const ASFWParameterHintDTO* parameterHints;
+} ASFWDevicePresentationDTO;
+
 typedef struct {
     int64_t value;
     const char* name;
@@ -37,6 +160,9 @@ typedef struct {
     uint32_t id;
     const char* name;
     ASFWParamKind kind;
+    ASFWParameterSemantic semantic;
+    ASFWTargetKind targetKind;
+    uint32_t targetId;
     double scalarValue;
     double scalarMin;
     double scalarMax;
@@ -47,6 +173,41 @@ typedef struct {
     uint32_t enumItemCount;
     const ASFWEnumItemDTO* enumItems;
 } ASFWParameterDTO;
+
+typedef struct {
+    uint32_t id;
+    const char* name;
+    uint32_t ownerNodeId;
+    uint8_t direction; // 0 = Input, 1 = Output
+    uint32_t channels;
+} ASFWPortDTO;
+
+typedef struct {
+    uint32_t id;
+    uint32_t inputPortId;
+    uint32_t outputPortId;
+} ASFWMixerCrosspointDTO;
+
+typedef struct {
+    uint32_t nodeId;
+    const char* name;
+    uint32_t inputPortCount;
+    const uint32_t* inputPortIds;
+    uint32_t outputPortCount;
+    const uint32_t* outputPortIds;
+    uint32_t crosspointCount;
+    const ASFWMixerCrosspointDTO* crosspoints;
+} ASFWMixerDTO;
+
+typedef struct {
+    uint32_t nodeId;
+    const char* name;
+    ASFWNodeKind kind;
+    uint32_t inputPortCount;
+    const uint32_t* inputPortIds;
+    uint32_t outputPortCount;
+    const uint32_t* outputPortIds;
+} ASFWNodeDTO;
 
 typedef struct {
     uint32_t inputPortId;
@@ -62,6 +223,10 @@ typedef struct {
 typedef struct {
     uint32_t nodeId;
     const char* name;
+    uint32_t inputPortCount;
+    const uint32_t* inputPortIds;
+    uint32_t outputPortCount;
+    const uint32_t* outputPortIds;
     uint32_t legalBundleCount;
     const ASFWRouteBundleDTO* legalBundles;
     uint32_t activeBundleCount;
@@ -71,6 +236,7 @@ typedef struct {
 typedef struct {
     uint32_t id;
     const char* name;
+    uint32_t targetPortId;
     double value;
     double min;
     double max;
@@ -96,20 +262,30 @@ typedef struct {
     uint32_t totalCaptureChannels;
     uint32_t totalPlaybackChannels;
 
-    // Structural summary
+    // Structural summary & Nodes
     uint32_t nodeCount;
+    const ASFWNodeDTO* nodes;
+
     uint32_t portCount;
+    const ASFWPortDTO* ports;
     uint32_t linkCount;
 
-    // Controls & Routing
-    uint32_t parameterCount;
-    const ASFWParameterDTO* parameters;
+    // Structural Nodes
+    uint32_t mixerCount;
+    const ASFWMixerDTO* mixers;
 
     uint32_t routerCount;
     const ASFWRouterDTO* routers;
 
+    // Controls & Telemetry
+    uint32_t parameterCount;
+    const ASFWParameterDTO* parameters;
+
     uint32_t meterCount;
     const ASFWMeterDTO* meters;
+
+    // Presentation Layer & Surface Semantics
+    ASFWDevicePresentationDTO presentation;
 } ASFWDeviceSnapshotDTO;
 
 #if !TARGET_OS_DRIVERKIT

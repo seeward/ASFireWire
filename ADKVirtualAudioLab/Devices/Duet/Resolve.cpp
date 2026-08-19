@@ -397,6 +397,52 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         },
     };
 
+    // Presentation Metadata
+    resolved.presentation = Presentation::DevicePresentation{
+        .groups = {
+            Presentation::PresentationGroup{
+                .id = Presentation::PresentationGroupId{1},
+                .name = "Input 1",
+                .kind = Presentation::PresentationGroupKind::InputChannel,
+                .ports = {PortId{1}, PortId{3}, PortId{15}},
+                .parameters = {ParameterId{7}, ParameterId{3}, ParameterId{5}, ParameterId{1}},
+                .meters = {MeterId{1}},
+            },
+            Presentation::PresentationGroup{
+                .id = Presentation::PresentationGroupId{2},
+                .name = "Input 2",
+                .kind = Presentation::PresentationGroupKind::InputChannel,
+                .ports = {PortId{2}, PortId{4}, PortId{16}},
+                .parameters = {ParameterId{8}, ParameterId{4}, ParameterId{6}, ParameterId{2}},
+                .meters = {MeterId{2}},
+            },
+            Presentation::PresentationGroup{
+                .id = Presentation::PresentationGroupId{3},
+                .name = "Master Output",
+                .kind = Presentation::PresentationGroupKind::Monitor,
+                .ports = {PortId{59}, PortId{60}},
+                .parameters = {ParameterId{10}, ParameterId{9}},
+                .meters = {MeterId{3}, MeterId{4}},
+            },
+        },
+        .routers = {
+            Presentation::RouterPresentationHint{
+                .router = NodeId{2},
+                .style = Presentation::RouterPresentationStyle::Selector,
+            },
+            Presentation::RouterPresentationHint{
+                .router = NodeId{6},
+                .style = Presentation::RouterPresentationStyle::Selector,
+            },
+        },
+        .mixers = {
+            Presentation::MixerPresentationHint{
+                .mixer = NodeId{5},
+                .style = Presentation::MixerPresentationStyle::ChannelStrips,
+            },
+        },
+    };
+
     return resolved;
 }
 
@@ -429,13 +475,11 @@ DeviceState makeInitialState(const ResolvedAudioConfiguration& resolved) {
     // Default Router States:
     // Input router (Node 2): XLR 1 (Bundle 1) + XLR 2 (Bundle 3) active
     state.routers[NodeId{2}] = RouterState{
-        .node = NodeId{2},
         .activeBundles = {RouteBundleId{1}, RouteBundleId{3}},
     };
 
     // Output router (Node 6): Direct Playback 1/2 (Bundle 1) active
     state.routers[NodeId{6}] = RouterState{
-        .node = NodeId{6},
         .activeBundles = {RouteBundleId{1}},
     };
 

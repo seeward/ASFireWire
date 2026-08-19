@@ -30,13 +30,18 @@ struct TopologyError {
 };
 
 enum class StateErrorKind {
+    TopologyRevisionMismatch,
+    MissingParameter,
     NonexistentParameter,
     InvalidParameterValue,
+    MissingRouter,
     NonexistentRouter,
     NonexistentRouteBundle,
+    DuplicateActiveRouteBundle,
     RoutingConstraintViolated,
+    MissingMeter,
     NonexistentMeter,
-    TopologyRevisionMismatch,
+    InvalidMeterValue,
 };
 
 struct StateError {
@@ -56,8 +61,15 @@ std::expected<void, StateError> validateParameterValue(
 
 std::expected<void, StateError> validateRouterState(
     const Topology& topology,
+    NodeId routerNodeId,
     const RouterState& routerState);
 
+std::expected<void, StateError> validateMeterValue(
+    const Topology& topology,
+    MeterId id,
+    double value);
+
+// Complete device state snapshot validation
 std::expected<void, StateError> validateState(
     const Topology& topology,
     const DeviceState& state);

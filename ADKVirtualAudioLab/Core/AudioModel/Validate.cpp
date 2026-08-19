@@ -1,5 +1,6 @@
 #include "Validate.hpp"
 
+#include <cmath>
 #include <format>
 #include <unordered_map>
 #include <unordered_set>
@@ -610,12 +611,24 @@ std::expected<void, StateError> validateParameterValue(
                 });
             }
             const double v = std::get<double>(value);
-            if (v < domain.min || v > domain.max) {
+            if (!std::isfinite(v) || v < domain.min || v > domain.max) {
                 return std::unexpected(StateError{
                     StateErrorKind::InvalidParameterValue,
-                    std::format("Parameter {} '{}' value {} out of range [{}, {}]",
+                    std::format("Parameter {} '{}' value {} out of range [{}, {}] or non-finite",
                                 id.value, found->name, v, domain.min, domain.max)
                 });
+            }
+            if (domain.step.has_value() && *domain.step > 0.0) {
+                const double offset = v - domain.min;
+                const double step = *domain.step;
+                const double numSteps = std::round(offset / step);
+                if (std::abs(offset - (numSteps * step)) > 1e-4) {
+                    return std::unexpected(StateError{
+                        StateErrorKind::InvalidParameterValue,
+                        std::format("Parameter {} '{}' value {} does not align with step {}",
+                                    id.value, found->name, v, step)
+                    });
+                }
             }
         } else if constexpr (std::is_same_v<D, EnumDomain>) {
             if (!std::holds_alternative<int64_t>(value)) {
@@ -646,11 +659,12 @@ std::expected<void, StateError> validateParameterValue(
 
 std::expected<void, StateError> validateRouterState(
     const Topology& topology,
+    NodeId routerNodeId,
     const RouterState& routerState) {
 
     const RouterNode* router = nullptr;
     for (const auto& node : topology.nodes) {
-        if (node.id == routerState.node) {
+        if (node.id == routerNodeId) {
             router = std::get_if<RouterNode>(&node.body);
             break;
         }
@@ -659,7 +673,7 @@ std::expected<void, StateError> validateRouterState(
     if (router == nullptr) {
         return std::unexpected(StateError{
             StateErrorKind::NonexistentRouter,
-            std::format("NodeId {} is not a RouterNode in topology", routerState.node.value)
+            std::format("NodeId {} is not a RouterNode in topology", routerNodeId.value)
         });
     }
 
@@ -668,15 +682,23 @@ std::expected<void, StateError> validateRouterState(
         legalMap[b.id] = &b;
     }
 
-    // Check all active bundles exist
+    std::unordered_set<RouteBundleId> seen;
     std::vector<const RouteBundle*> activeBundleList;
     for (const auto& bId : routerState.activeBundles) {
+        if (!seen.insert(bId).second) {
+            return std::unexpected(StateError{
+                StateErrorKind::DuplicateActiveRouteBundle,
+                std::format("Router Node {} has duplicate active RouteBundleId {}",
+                            routerNodeId.value, bId.value)
+            });
+        }
+
         auto it = legalMap.find(bId);
         if (it == legalMap.end()) {
             return std::unexpected(StateError{
                 StateErrorKind::NonexistentRouteBundle,
                 std::format("Router Node {} has active RouteBundleId {} which is not in legalBundles",
-                            routerState.node.value, bId.value)
+                            routerNodeId.value, bId.value)
             });
         }
         activeBundleList.push_back(it->second);
@@ -688,7 +710,7 @@ std::expected<void, StateError> validateRouterState(
             return std::unexpected(StateError{
                 StateErrorKind::RoutingConstraintViolated,
                 std::format("Router Node {} active bundles ({}) exceeds maxActiveBundles ({})",
-                            routerState.node.value, routerState.activeBundles.size(),
+                            routerNodeId.value, routerState.activeBundles.size(),
                             *router->constraints.maxActiveBundles)
             });
         }
@@ -713,7 +735,7 @@ std::expected<void, StateError> validateRouterState(
             return std::unexpected(StateError{
                 StateErrorKind::RoutingConstraintViolated,
                 std::format("Router Node {} total active routes ({}) exceeds maxActiveRoutes ({})",
-                            routerState.node.value, totalRoutes,
+                            routerNodeId.value, totalRoutes,
                             *router->constraints.maxActiveRoutes)
             });
         }
@@ -726,7 +748,7 @@ std::expected<void, StateError> validateRouterState(
                 return std::unexpected(StateError{
                     StateErrorKind::RoutingConstraintViolated,
                     std::format("Router Node {} output PortId {} has {} active sources (max is {})",
-                                routerState.node.value, outPort.value, count,
+                                routerNodeId.value, outPort.value, count,
                                 *router->constraints.maxSourcesPerOutput)
                 });
             }
@@ -740,7 +762,7 @@ std::expected<void, StateError> validateRouterState(
                 return std::unexpected(StateError{
                     StateErrorKind::RoutingConstraintViolated,
                     std::format("Router Node {} input PortId {} has {} active destinations (max is {})",
-                                routerState.node.value, inPort.value, count,
+                                routerNodeId.value, inPort.value, count,
                                 *router->constraints.maxDestinationsPerInput)
                 });
             }
@@ -750,10 +772,43 @@ std::expected<void, StateError> validateRouterState(
     return {};
 }
 
+std::expected<void, StateError> validateMeterValue(
+    const Topology& topology,
+    MeterId id,
+    double value) {
+
+    const Meter* targetMeter = nullptr;
+    for (const auto& m : topology.meters) {
+        if (m.id == id) {
+            targetMeter = &m;
+            break;
+        }
+    }
+
+    if (!targetMeter) {
+        return std::unexpected(StateError{
+            StateErrorKind::NonexistentMeter,
+            std::format("MeterId {} does not exist in topology", id.value)
+        });
+    }
+
+    if (!std::isfinite(value) || value < targetMeter->domain.min || value > targetMeter->domain.max) {
+        return std::unexpected(StateError{
+            StateErrorKind::InvalidMeterValue,
+            std::format("MeterId {} '{}' value {} out of domain [{}, {}] or non-finite",
+                        id.value, targetMeter->name, value, targetMeter->domain.min, targetMeter->domain.max)
+        });
+    }
+
+    return {};
+}
+
+// Complete device state snapshot validation
 std::expected<void, StateError> validateState(
     const Topology& topology,
     const DeviceState& state) {
 
+    // 1. Check revision match
     if (state.topologyRevision != topology.revision) {
         return std::unexpected(StateError{
             StateErrorKind::TopologyRevisionMismatch,
@@ -762,37 +817,76 @@ std::expected<void, StateError> validateState(
         });
     }
 
-    // 1. Validate all parameters in state
-    for (const auto& [paramId, val] : state.parameters) {
-        if (auto res = validateParameterValue(topology, paramId, val); !res) {
-            return res;
-        }
-    }
-
-    // 2. Validate all routers in state
-    for (const auto& [nodeId, rState] : state.routers) {
-        if (rState.node != nodeId) {
+    // 2. Check completeness for Parameters
+    std::unordered_set<ParameterId> topoParams;
+    for (const auto& param : topology.parameters) {
+        topoParams.insert(param.id);
+        auto it = state.parameters.find(param.id);
+        if (it == state.parameters.end()) {
             return std::unexpected(StateError{
-                StateErrorKind::NonexistentRouter,
-                std::format("RouterState key NodeId {} does not match struct node {}",
-                            nodeId.value, rState.node.value)
+                StateErrorKind::MissingParameter,
+                std::format("DeviceState is missing required ParameterId {} '{}'", param.id.value, param.name)
             });
         }
-        if (auto res = validateRouterState(topology, rState); !res) {
+        if (auto res = validateParameterValue(topology, param.id, it->second); !res) {
             return res;
         }
     }
+    for (const auto& [paramId, _] : state.parameters) {
+        if (!topoParams.contains(paramId)) {
+            return std::unexpected(StateError{
+                StateErrorKind::NonexistentParameter,
+                std::format("DeviceState contains extra ParameterId {} not in topology", paramId.value)
+            });
+        }
+    }
 
-    // 3. Validate all meters in state
-    std::unordered_set<MeterId> meterSet;
-    for (const auto& m : topology.meters) {
-        meterSet.insert(m.id);
+    // 3. Check completeness for Routers
+    std::unordered_set<NodeId> topoRouters;
+    for (const auto& node : topology.nodes) {
+        if (std::holds_alternative<RouterNode>(node.body)) {
+            topoRouters.insert(node.id);
+            auto it = state.routers.find(node.id);
+            if (it == state.routers.end()) {
+                return std::unexpected(StateError{
+                    StateErrorKind::MissingRouter,
+                    std::format("DeviceState is missing required Router NodeId {} '{}'", node.id.value, node.name)
+                });
+            }
+            if (auto res = validateRouterState(topology, node.id, it->second); !res) {
+                return res;
+            }
+        }
+    }
+    for (const auto& [nodeId, _] : state.routers) {
+        if (!topoRouters.contains(nodeId)) {
+            return std::unexpected(StateError{
+                StateErrorKind::NonexistentRouter,
+                std::format("DeviceState contains extra Router NodeId {} not in topology", nodeId.value)
+            });
+        }
+    }
+
+    // 4. Check completeness for Meters
+    std::unordered_set<MeterId> topoMeters;
+    for (const auto& meter : topology.meters) {
+        topoMeters.insert(meter.id);
+        auto it = state.meters.find(meter.id);
+        if (it == state.meters.end()) {
+            return std::unexpected(StateError{
+                StateErrorKind::MissingMeter,
+                std::format("DeviceState is missing required MeterId {} '{}'", meter.id.value, meter.name)
+            });
+        }
+        if (auto res = validateMeterValue(topology, meter.id, it->second); !res) {
+            return res;
+        }
     }
     for (const auto& [meterId, _] : state.meters) {
-        if (!meterSet.contains(meterId)) {
+        if (!topoMeters.contains(meterId)) {
             return std::unexpected(StateError{
                 StateErrorKind::NonexistentMeter,
-                std::format("MeterId {} in state does not exist in topology", meterId.value)
+                std::format("DeviceState contains extra MeterId {} not in topology", meterId.value)
             });
         }
     }

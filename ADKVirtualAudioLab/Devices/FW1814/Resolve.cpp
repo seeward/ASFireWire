@@ -319,6 +319,76 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         },
     };
 
+    // Presentation Metadata
+    resolved.presentation = Presentation::DevicePresentation{
+        .groups = {
+            Presentation::PresentationGroup{
+                .id = Presentation::PresentationGroupId{1},
+                .name = "DAW Playback 1/2",
+                .kind = Presentation::PresentationGroupKind::InputChannel,
+                .ports = {PortId{60}},
+                .parameters = {ParameterId{1}},
+            },
+            Presentation::PresentationGroup{
+                .id = Presentation::PresentationGroupId{2},
+                .name = "Analog Out 1/2",
+                .kind = Presentation::PresentationGroupKind::Monitor,
+                .ports = {PortId{91}},
+                .parameters = {ParameterId{2}},
+            },
+            Presentation::PresentationGroup{
+                .id = Presentation::PresentationGroupId{3},
+                .name = "Analog Out 3/4",
+                .kind = Presentation::PresentationGroupKind::OutputChannel,
+                .ports = {PortId{92}},
+                .parameters = {ParameterId{3}},
+            },
+            Presentation::PresentationGroup{
+                .id = Presentation::PresentationGroupId{4},
+                .name = "Headphone 1",
+                .kind = Presentation::PresentationGroupKind::Monitor,
+                .ports = {PortId{98}},
+                .parameters = {ParameterId{4}},
+                .meters = {MeterId{3}},
+            },
+            Presentation::PresentationGroup{
+                .id = Presentation::PresentationGroupId{5},
+                .name = "Headphone 2",
+                .kind = Presentation::PresentationGroupKind::Monitor,
+                .ports = {PortId{99}},
+                .parameters = {ParameterId{5}},
+            },
+        },
+        .routers = {
+            Presentation::RouterPresentationHint{
+                .router = NodeId{6},
+                .style = Presentation::RouterPresentationStyle::Selector,
+                .bundleGroups = {
+                    Presentation::RouteBundleGroup{.name = "Headphone 1 Source", .bundles = {RouteBundleId{1}, RouteBundleId{2}, RouteBundleId{3}}},
+                    Presentation::RouteBundleGroup{.name = "Headphone 2 Source", .bundles = {RouteBundleId{4}, RouteBundleId{5}, RouteBundleId{6}}},
+                },
+            },
+            Presentation::RouterPresentationHint{
+                .router = NodeId{7},
+                .style = Presentation::RouterPresentationStyle::Selector,
+                .bundleGroups = {
+                    Presentation::RouteBundleGroup{.name = "Line Out 1/2 Source", .bundles = {RouteBundleId{1}, RouteBundleId{2}}},
+                    Presentation::RouteBundleGroup{.name = "Line Out 3/4 Source", .bundles = {RouteBundleId{3}, RouteBundleId{4}}},
+                },
+            },
+        },
+        .mixers = {
+            Presentation::MixerPresentationHint{
+                .mixer = NodeId{4},
+                .style = Presentation::MixerPresentationStyle::Matrix,
+            },
+            Presentation::MixerPresentationHint{
+                .mixer = NodeId{5},
+                .style = Presentation::MixerPresentationStyle::Matrix,
+            },
+        },
+    };
+
     return resolved;
 }
 
@@ -334,13 +404,11 @@ DeviceState makeInitialState(const ResolvedAudioConfiguration& resolved) {
 
     // Headphone Mux (Node 6): HP 1 <- Mix 0 (Bundle 1), HP 2 <- Mix 1 (Bundle 5)
     state.routers[NodeId{6}] = RouterState{
-        .node = NodeId{6},
         .activeBundles = {RouteBundleId{1}, RouteBundleId{5}},
     };
 
     // LineOut Mux (Node 7): LineOut 1/2 <- Mix 0 (Bundle 1), LineOut 3/4 <- Mix 1 (Bundle 3)
     state.routers[NodeId{7}] = RouterState{
-        .node = NodeId{7},
         .activeBundles = {RouteBundleId{1}, RouteBundleId{3}},
     };
 

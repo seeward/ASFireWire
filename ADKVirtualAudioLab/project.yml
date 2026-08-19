@@ -54,12 +54,13 @@ targets:
     deploymentTarget: "15.0"
     sources:
       - path: Host
-      - path: Lab
-      - path: Core
+      - path: Lab/VirtualDeviceBridge.cpp
+      - path: Lab/VirtualDeviceBridge.hpp
+      - path: Core/AudioModel
+      - path: Core/Device
+      - path: Core/Presentation
       - path: Devices
       - path: Runtime
-      - path: ADK
-      - path: Protocols
     dependencies:
       - target: net.mrmidi.ASFW.ADKVirtualAudioLab
         embed: true

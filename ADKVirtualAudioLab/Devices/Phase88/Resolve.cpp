@@ -304,6 +304,56 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         },
     };
 
+    // Presentation Metadata
+    resolved.presentation = Presentation::DevicePresentation{
+        .groups = {
+            Presentation::PresentationGroup{
+                .id = Presentation::PresentationGroupId{1},
+                .name = "DAW Stream Return",
+                .kind = Presentation::PresentationGroupKind::InputChannel,
+                .ports = {PortId{71}, PortId{72}},
+                .parameters = {ParameterId{1}, ParameterId{2}, ParameterId{3}, ParameterId{4}},
+            },
+            Presentation::PresentationGroup{
+                .id = Presentation::PresentationGroupId{2},
+                .name = "Monitor Mixer Master",
+                .kind = Presentation::PresentationGroupKind::Monitor,
+                .ports = {PortId{75}, PortId{76}},
+                .parameters = {ParameterId{5}, ParameterId{6}, ParameterId{7}, ParameterId{8}},
+                .meters = {MeterId{1}, MeterId{2}},
+            },
+            Presentation::PresentationGroup{
+                .id = Presentation::PresentationGroupId{3},
+                .name = "Clock & Sync",
+                .kind = Presentation::PresentationGroupKind::Other,
+                .parameters = {ParameterId{9}},
+            },
+        },
+        .routers = {
+            Presentation::RouterPresentationHint{
+                .router = NodeId{3},
+                .style = Presentation::RouterPresentationStyle::Selector,
+            },
+            Presentation::RouterPresentationHint{
+                .router = NodeId{5},
+                .style = Presentation::RouterPresentationStyle::Selector,
+                .bundleGroups = {
+                    Presentation::RouteBundleGroup{.name = "Out 1/2", .bundles = {RouteBundleId{1}, RouteBundleId{6}}},
+                    Presentation::RouteBundleGroup{.name = "Out 3/4", .bundles = {RouteBundleId{2}, RouteBundleId{7}}},
+                    Presentation::RouteBundleGroup{.name = "Out 5/6", .bundles = {RouteBundleId{3}, RouteBundleId{8}}},
+                    Presentation::RouteBundleGroup{.name = "Out 7/8", .bundles = {RouteBundleId{4}, RouteBundleId{9}}},
+                    Presentation::RouteBundleGroup{.name = "S/PDIF Out", .bundles = {RouteBundleId{5}, RouteBundleId{10}}},
+                },
+            },
+        },
+        .mixers = {
+            Presentation::MixerPresentationHint{
+                .mixer = NodeId{4},
+                .style = Presentation::MixerPresentationStyle::Matrix,
+            },
+        },
+    };
+
     return resolved;
 }
 
@@ -323,13 +373,11 @@ DeviceState makeInitialState(const ResolvedAudioConfiguration& resolved) {
 
     // Pre-mixer Stream Source Selector (Node 3): Playback 1/2 (Bundle 1)
     state.routers[NodeId{3}] = RouterState{
-        .node = NodeId{3},
         .activeBundles = {RouteBundleId{1}},
     };
 
     // Output Selector (Node 5): 5 direct stream playback bundles (Bundles 1..5)
     state.routers[NodeId{5}] = RouterState{
-        .node = NodeId{5},
         .activeBundles = {RouteBundleId{1}, RouteBundleId{2}, RouteBundleId{3}, RouteBundleId{4}, RouteBundleId{5}},
     };
 

@@ -50,6 +50,9 @@ void RunProjectionTests(TestContext& ctx) {
                 case ProjectedControlKind::Volume:
                     CHECK(ctx, std::holds_alternative<ProjectedVolumeControl>(c.data));
                     break;
+                case ProjectedControlKind::Scalar:
+                    CHECK(ctx, std::holds_alternative<ProjectedScalarControl>(c.data));
+                    break;
                 case ProjectedControlKind::Mute:
                     CHECK(ctx, std::holds_alternative<ProjectedMuteControl>(c.data));
                     break;
