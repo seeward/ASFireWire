@@ -21,11 +21,14 @@ struct GenericLabDashboardView: View {
                     // 4. Presentation-Driven Signal Routing / Patchbay
                     NodeDrivenRouterSection(snap: snap, state: state)
 
-                    // 5. Presentation-Driven DSP Processors
+                    // 5. Presentation-Driven DSP Processors (only if device defines DSP processor groups)
                     let procGroups = snap.presentation.groups(ofKind: ASFW_PRES_GROUP_PROCESSOR)
-                    let procNodes = snap.nodes.filter { $0.kind == ASFW_NODE_PROCESSOR }
-                    if !procGroups.isEmpty || !procNodes.isEmpty {
-                        NodeDrivenProcessorsSection(procNodes: procNodes, snap: snap, state: state)
+                    if !procGroups.isEmpty {
+                        let procNodeIds = Set(procGroups.flatMap { $0.nodeIds })
+                        let dspNodes = snap.nodes.filter { procNodeIds.contains($0.id) }
+                        if !dspNodes.isEmpty {
+                            NodeDrivenProcessorsSection(procNodes: dspNodes, snap: snap, state: state)
+                        }
                     }
                 } else {
                     ProgressView("Connecting to virtual audio runtime…")

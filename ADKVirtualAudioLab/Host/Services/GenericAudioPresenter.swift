@@ -130,6 +130,7 @@ enum GenericAudioPresenter {
         var masters: [OutputMasterStripModel] = []
         var seenNames = Set<String>()
         let channelPorts = Set(snapshot.channels.flatMap { $0.portIds })
+        let busPorts = Set(snapshot.buses.flatMap { $0.portIds })
 
         // 1. Check logical buses with explicit Level / Mute controls or bus meters
         for bus in snapshot.buses {
@@ -159,8 +160,8 @@ enum GenericAudioPresenter {
             }
         }
 
-        // 2. Check physical output ports with explicit Level or Mute parameters
-        for port in snapshot.ports where !channelPorts.contains(port.id) {
+        // 2. Check physical output ports with explicit Level or Mute parameters (not belonging to channels or buses)
+        for port in snapshot.ports where !channelPorts.contains(port.id) && !busPorts.contains(port.id) {
             let portParams = snapshot.parameters(forTargetPort: port.id)
             let level = portParams.first { $0.semantic == ASFW_SEMANTIC_LEVEL }
             let mute = portParams.first { $0.semantic == ASFW_SEMANTIC_MUTE }
@@ -181,19 +182,26 @@ enum GenericAudioPresenter {
             }
         }
 
-        // 3. Fallback to presentation groups of kind Monitor/OutputChannel if masters empty
-        if masters.isEmpty {
-            for grp in snapshot.presentation.groups where grp.kind == ASFW_PRES_GROUP_MONITOR || grp.kind == ASFW_PRES_GROUP_OUTPUT_CHANNEL {
+        // 3. Presentation groups of kind Monitor/OutputChannel for node-level master stages
+        for grp in snapshot.presentation.groups where grp.kind == ASFW_PRES_GROUP_MONITOR || grp.kind == ASFW_PRES_GROUP_OUTPUT_CHANNEL {
+            if !seenNames.contains(grp.name) {
                 let grpParams = grp.parameterIds.compactMap { snapshot.parameter(forId: $0) }
                 let grpMeters = grp.meterIds.compactMap { snapshot.meter(forId: $0) }
 
-                masters.append(OutputMasterStripModel(
-                    name: grp.name,
-                    level: grpParams.first { $0.semantic == ASFW_SEMANTIC_LEVEL },
-                    mute: grpParams.first { $0.semantic == ASFW_SEMANTIC_MUTE },
-                    dim: grpParams.first { $0.semantic == ASFW_SEMANTIC_DIM },
-                    meters: grpMeters
-                ))
+                let level = grpParams.first { $0.semantic == ASFW_SEMANTIC_LEVEL }
+                let mute = grpParams.first { $0.semantic == ASFW_SEMANTIC_MUTE }
+                let dim = grpParams.first { $0.semantic == ASFW_SEMANTIC_DIM }
+
+                if level != nil || mute != nil || !grpMeters.isEmpty {
+                    masters.append(OutputMasterStripModel(
+                        name: grp.name,
+                        level: level,
+                        mute: mute,
+                        dim: dim,
+                        meters: grpMeters
+                    ))
+                    seenNames.insert(grp.name)
+                }
             }
         }
 

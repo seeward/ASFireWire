@@ -88,14 +88,10 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
                 .inputs = {PortId{41}, PortId{42}, PortId{43}, PortId{44}},
                 .outputs = {PortId{45}, PortId{46}},
                 .crosspoints = {
-                    MixerCrosspoint{CrosspointId{1}, PortId{41}, PortId{45}}, // Analog 1 -> Out L
-                    MixerCrosspoint{CrosspointId{2}, PortId{41}, PortId{46}}, // Analog 1 -> Out R
-                    MixerCrosspoint{CrosspointId{3}, PortId{42}, PortId{45}}, // Analog 2 -> Out L
-                    MixerCrosspoint{CrosspointId{4}, PortId{42}, PortId{46}}, // Analog 2 -> Out R
-                    MixerCrosspoint{CrosspointId{5}, PortId{43}, PortId{45}}, // Playback 1 -> Out L
-                    MixerCrosspoint{CrosspointId{6}, PortId{43}, PortId{46}}, // Playback 1 -> Out R
-                    MixerCrosspoint{CrosspointId{7}, PortId{44}, PortId{45}}, // Playback 2 -> Out L
-                    MixerCrosspoint{CrosspointId{8}, PortId{44}, PortId{46}}, // Playback 2 -> Out R
+                    MixerCrosspoint{CrosspointId{1}, PortId{41}, PortId{45}}, // Analog 1 -> Mixer Master
+                    MixerCrosspoint{CrosspointId{2}, PortId{42}, PortId{45}}, // Analog 2 -> Mixer Master
+                    MixerCrosspoint{CrosspointId{3}, PortId{43}, PortId{45}}, // Playback 1 -> Mixer Master
+                    MixerCrosspoint{CrosspointId{4}, PortId{44}, PortId{45}}, // Playback 2 -> Mixer Master
                 },
             },
         },
@@ -228,17 +224,22 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         Channel{
             .id = ChannelId{1},
             .name = "Input 1",
-            .ports = {PortId{1}, PortId{2}, PortId{15}, PortId{21}, PortId{23}, PortId{41}},
+            .ports = {PortId{1}, PortId{3}, PortId{15}, PortId{21}, PortId{23}, PortId{41}},
         },
         Channel{
             .id = ChannelId{2},
             .name = "Input 2",
-            .ports = {PortId{3}, PortId{4}, PortId{16}, PortId{22}, PortId{24}, PortId{42}},
+            .ports = {PortId{2}, PortId{4}, PortId{16}, PortId{22}, PortId{24}, PortId{42}},
         },
         Channel{
             .id = ChannelId{3},
-            .name = "DAW Playback 1/2",
-            .ports = {PortId{33}, PortId{34}, PortId{43}, PortId{44}},
+            .name = "DAW Playback 1",
+            .ports = {PortId{33}, PortId{43}},
+        },
+        Channel{
+            .id = ChannelId{4},
+            .name = "DAW Playback 2",
+            .ports = {PortId{34}, PortId{44}},
         },
     };
 
@@ -252,7 +253,7 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         Bus{
             .id = BusId{2},
             .semantic = BusSemantic::Monitor,
-            .name = "Monitor Out L/R",
+            .name = "Main Out (Encoder)",
             .ports = {PortId{59}, PortId{60}},
         },
     };
@@ -329,73 +330,155 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         },
         Parameter{
             ParameterId{9},
-            nOutStage,
+            PortId{59},
             ParameterSemantic::Level,
             ScalarDomain{.min = -64.0, .max = 0.0, .step = 1.0, .unit = ScalarUnit::Decibels},
-            "Master Output Volume",
+            "Main Out Volume",
         },
         Parameter{
             ParameterId{10},
-            nOutStage,
+            PortId{59},
             ParameterSemantic::Mute,
             BooleanDomain{},
-            "Master Output Mute",
+            "Main Out Mute",
         },
+        // Mixer Send Levels (Crosspoints 1..4)
         Parameter{
             ParameterId{11},
             CrosspointId{1},
             ParameterSemantic::Level,
-            ScalarDomain{.min = 0.0, .max = 16383.0, .step = 1.0, .unit = ScalarUnit::Generic},
-            "Mixer Analog 1 -> Out L Gain",
+            ScalarDomain{.min = -48.0, .max = 6.0, .step = 0.5, .unit = ScalarUnit::Decibels},
+            "Input 1 Mixer Send",
         },
         Parameter{
             ParameterId{12},
             CrosspointId{2},
             ParameterSemantic::Level,
-            ScalarDomain{.min = 0.0, .max = 16383.0, .step = 1.0, .unit = ScalarUnit::Generic},
-            "Mixer Analog 1 -> Out R Gain",
+            ScalarDomain{.min = -48.0, .max = 6.0, .step = 0.5, .unit = ScalarUnit::Decibels},
+            "Input 2 Mixer Send",
         },
         Parameter{
             ParameterId{13},
             CrosspointId{3},
             ParameterSemantic::Level,
-            ScalarDomain{.min = 0.0, .max = 16383.0, .step = 1.0, .unit = ScalarUnit::Generic},
-            "Mixer Analog 2 -> Out L Gain",
+            ScalarDomain{.min = -48.0, .max = 6.0, .step = 0.5, .unit = ScalarUnit::Decibels},
+            "DAW 1 Mixer Send",
         },
         Parameter{
             ParameterId{14},
             CrosspointId{4},
             ParameterSemantic::Level,
-            ScalarDomain{.min = 0.0, .max = 16383.0, .step = 1.0, .unit = ScalarUnit::Generic},
-            "Mixer Analog 2 -> Out R Gain",
+            ScalarDomain{.min = -48.0, .max = 6.0, .step = 0.5, .unit = ScalarUnit::Decibels},
+            "DAW 2 Mixer Send",
         },
+        // Mixer Pan pots
         Parameter{
             ParameterId{15},
-            CrosspointId{5},
-            ParameterSemantic::Level,
-            ScalarDomain{.min = 0.0, .max = 16383.0, .step = 1.0, .unit = ScalarUnit::Generic},
-            "Mixer Playback 1 -> Out L Gain",
+            PortId{41},
+            ParameterSemantic::Pan,
+            ScalarDomain{.min = -100.0, .max = 100.0, .step = 1.0, .unit = ScalarUnit::Percent},
+            "Input 1 Pan",
         },
         Parameter{
             ParameterId{16},
-            CrosspointId{6},
-            ParameterSemantic::Level,
-            ScalarDomain{.min = 0.0, .max = 16383.0, .step = 1.0, .unit = ScalarUnit::Generic},
-            "Mixer Playback 1 -> Out R Gain",
+            PortId{42},
+            ParameterSemantic::Pan,
+            ScalarDomain{.min = -100.0, .max = 100.0, .step = 1.0, .unit = ScalarUnit::Percent},
+            "Input 2 Pan",
         },
         Parameter{
             ParameterId{17},
-            CrosspointId{7},
-            ParameterSemantic::Level,
-            ScalarDomain{.min = 0.0, .max = 16383.0, .step = 1.0, .unit = ScalarUnit::Generic},
-            "Mixer Playback 2 -> Out L Gain",
+            PortId{43},
+            ParameterSemantic::Pan,
+            ScalarDomain{.min = -100.0, .max = 100.0, .step = 1.0, .unit = ScalarUnit::Percent},
+            "DAW 1 Pan",
         },
         Parameter{
             ParameterId{18},
-            CrosspointId{8},
+            PortId{44},
+            ParameterSemantic::Pan,
+            ScalarDomain{.min = -100.0, .max = 100.0, .step = 1.0, .unit = ScalarUnit::Percent},
+            "DAW 2 Pan",
+        },
+        // Mixer Mutes
+        Parameter{
+            ParameterId{19},
+            PortId{41},
+            ParameterSemantic::Mute,
+            BooleanDomain{},
+            "Input 1 Mute",
+        },
+        Parameter{
+            ParameterId{20},
+            PortId{42},
+            ParameterSemantic::Mute,
+            BooleanDomain{},
+            "Input 2 Mute",
+        },
+        Parameter{
+            ParameterId{21},
+            PortId{43},
+            ParameterSemantic::Mute,
+            BooleanDomain{},
+            "DAW 1 Mute",
+        },
+        Parameter{
+            ParameterId{22},
+            PortId{44},
+            ParameterSemantic::Mute,
+            BooleanDomain{},
+            "DAW 2 Mute",
+        },
+        // Mixer Solos
+        Parameter{
+            ParameterId{23},
+            PortId{41},
+            ParameterSemantic::Solo,
+            BooleanDomain{},
+            "Input 1 Solo",
+        },
+        Parameter{
+            ParameterId{24},
+            PortId{42},
+            ParameterSemantic::Solo,
+            BooleanDomain{},
+            "Input 2 Solo",
+        },
+        Parameter{
+            ParameterId{25},
+            PortId{43},
+            ParameterSemantic::Solo,
+            BooleanDomain{},
+            "DAW 1 Solo",
+        },
+        Parameter{
+            ParameterId{26},
+            PortId{44},
+            ParameterSemantic::Solo,
+            BooleanDomain{},
+            "DAW 2 Solo",
+        },
+        // Master Section Parameters
+        Parameter{
+            ParameterId{27},
+            PortId{45},
             ParameterSemantic::Level,
-            ScalarDomain{.min = 0.0, .max = 16383.0, .step = 1.0, .unit = ScalarUnit::Generic},
-            "Mixer Playback 2 -> Out R Gain",
+            ScalarDomain{.min = -48.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
+            "Mixer Master Level",
+        },
+        Parameter{
+            ParameterId{28},
+            PortId{45},
+            ParameterSemantic::Mute,
+            BooleanDomain{},
+            "Mixer Master Mute",
+        },
+        Parameter{
+            ParameterId{29},
+            PortId{59},
+            ParameterSemantic::Dim,
+            BooleanDomain{},
+            "Main Out Dim",
         },
     };
 
@@ -406,24 +489,38 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
             PortId{23},
             MeterSemantic::Level,
             ScalarDomain{.min = -96.0, .max = 0.0, .unit = ScalarUnit::Decibels},
-            "Preamp 1 Out Meter",
+            "Input 1 Meter",
         },
         Meter{
             MeterId{2},
             PortId{24},
             MeterSemantic::Level,
             ScalarDomain{.min = -96.0, .max = 0.0, .unit = ScalarUnit::Decibels},
-            "Preamp 2 Out Meter",
+            "Input 2 Meter",
         },
         Meter{
             MeterId{3},
+            PortId{43},
+            MeterSemantic::Level,
+            ScalarDomain{.min = -96.0, .max = 0.0, .unit = ScalarUnit::Decibels},
+            "DAW 1 Meter",
+        },
+        Meter{
+            MeterId{4},
+            PortId{44},
+            MeterSemantic::Level,
+            ScalarDomain{.min = -96.0, .max = 0.0, .unit = ScalarUnit::Decibels},
+            "DAW 2 Meter",
+        },
+        Meter{
+            MeterId{5},
             PortId{45},
             MeterSemantic::Peak,
             ScalarDomain{.min = -96.0, .max = 0.0, .unit = ScalarUnit::Decibels},
             "Mixer Out L Meter",
         },
         Meter{
-            MeterId{4},
+            MeterId{6},
             PortId{46},
             MeterSemantic::Peak,
             ScalarDomain{.min = -96.0, .max = 0.0, .unit = ScalarUnit::Decibels},
@@ -432,49 +529,54 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
     };
 
     // Presentation Metadata
-    resolved.presentation = Presentation::DevicePresentation{
-        .groups = {
-            Presentation::PresentationGroup{
-                .id = Presentation::PresentationGroupId{1},
-                .name = "Input 1",
-                .kind = Presentation::PresentationGroupKind::InputChannel,
-                .ports = {PortId{1}, PortId{3}, PortId{15}},
-                .parameters = {ParameterId{7}, ParameterId{3}, ParameterId{5}, ParameterId{1}},
-                .meters = {MeterId{1}},
-            },
-            Presentation::PresentationGroup{
-                .id = Presentation::PresentationGroupId{2},
-                .name = "Input 2",
-                .kind = Presentation::PresentationGroupKind::InputChannel,
-                .ports = {PortId{2}, PortId{4}, PortId{16}},
-                .parameters = {ParameterId{8}, ParameterId{4}, ParameterId{6}, ParameterId{2}},
-                .meters = {MeterId{2}},
-            },
-            Presentation::PresentationGroup{
-                .id = Presentation::PresentationGroupId{3},
-                .name = "Master Output",
-                .kind = Presentation::PresentationGroupKind::Monitor,
-                .ports = {PortId{59}, PortId{60}},
-                .parameters = {ParameterId{10}, ParameterId{9}},
-                .meters = {MeterId{3}, MeterId{4}},
-            },
+    resolved.presentation.routers = {
+        Presentation::RouterPresentationHint{
+            .router = NodeId{2},
+            .style = Presentation::RouterPresentationStyle::Selector,
         },
-        .routers = {
-            Presentation::RouterPresentationHint{
-                .router = NodeId{2},
-                .style = Presentation::RouterPresentationStyle::Selector,
-            },
-            Presentation::RouterPresentationHint{
-                .router = NodeId{6},
-                .style = Presentation::RouterPresentationStyle::Selector,
-            },
+        Presentation::RouterPresentationHint{
+            .router = NodeId{6},
+            .style = Presentation::RouterPresentationStyle::Selector,
         },
-        .mixers = {
-            Presentation::MixerPresentationHint{
-                .mixer = NodeId{5},
-                .style = Presentation::MixerPresentationStyle::ChannelStrips,
-            },
+    };
+
+    resolved.presentation.mixers = {
+        Presentation::MixerPresentationHint{
+            .mixer = NodeId{5},
+            .style = Presentation::MixerPresentationStyle::ChannelStrips,
         },
+    };
+
+    resolved.presentation.parameters = {
+        {.parameter = ParameterId{1}, .presentation = Presentation::ControlPresentation::Fader},
+        {.parameter = ParameterId{2}, .presentation = Presentation::ControlPresentation::Fader},
+        {.parameter = ParameterId{3}, .presentation = Presentation::ControlPresentation::Toggle},
+        {.parameter = ParameterId{4}, .presentation = Presentation::ControlPresentation::Toggle},
+        {.parameter = ParameterId{5}, .presentation = Presentation::ControlPresentation::Toggle},
+        {.parameter = ParameterId{6}, .presentation = Presentation::ControlPresentation::Toggle},
+        {.parameter = ParameterId{7}, .presentation = Presentation::ControlPresentation::Selector},
+        {.parameter = ParameterId{8}, .presentation = Presentation::ControlPresentation::Selector},
+        {.parameter = ParameterId{9}, .presentation = Presentation::ControlPresentation::Fader},
+        {.parameter = ParameterId{10}, .presentation = Presentation::ControlPresentation::Toggle},
+        {.parameter = ParameterId{11}, .presentation = Presentation::ControlPresentation::Fader},
+        {.parameter = ParameterId{12}, .presentation = Presentation::ControlPresentation::Fader},
+        {.parameter = ParameterId{13}, .presentation = Presentation::ControlPresentation::Fader},
+        {.parameter = ParameterId{14}, .presentation = Presentation::ControlPresentation::Fader},
+        {.parameter = ParameterId{15}, .presentation = Presentation::ControlPresentation::Rotary},
+        {.parameter = ParameterId{16}, .presentation = Presentation::ControlPresentation::Rotary},
+        {.parameter = ParameterId{17}, .presentation = Presentation::ControlPresentation::Rotary},
+        {.parameter = ParameterId{18}, .presentation = Presentation::ControlPresentation::Rotary},
+        {.parameter = ParameterId{19}, .presentation = Presentation::ControlPresentation::Toggle},
+        {.parameter = ParameterId{20}, .presentation = Presentation::ControlPresentation::Toggle},
+        {.parameter = ParameterId{21}, .presentation = Presentation::ControlPresentation::Toggle},
+        {.parameter = ParameterId{22}, .presentation = Presentation::ControlPresentation::Toggle},
+        {.parameter = ParameterId{23}, .presentation = Presentation::ControlPresentation::Toggle},
+        {.parameter = ParameterId{24}, .presentation = Presentation::ControlPresentation::Toggle},
+        {.parameter = ParameterId{25}, .presentation = Presentation::ControlPresentation::Toggle},
+        {.parameter = ParameterId{26}, .presentation = Presentation::ControlPresentation::Toggle},
+        {.parameter = ParameterId{27}, .presentation = Presentation::ControlPresentation::Fader},
+        {.parameter = ParameterId{28}, .presentation = Presentation::ControlPresentation::Toggle},
+        {.parameter = ParameterId{29}, .presentation = Presentation::ControlPresentation::Toggle},
     };
 
     return resolved;
@@ -496,15 +598,32 @@ DeviceState makeInitialState(const ResolvedAudioConfiguration& resolved) {
     state.parameters[ParameterId{9}] = 0.0;   // Master Vol: 0dB
     state.parameters[ParameterId{10}] = false;// Master Mute: unmuted
 
-    // Mixer crosspoints: unity gain (16383) on 1->L, 2->R, play1->L, play2->R, 0 on cross channels
-    state.parameters[ParameterId{11}] = 16383.0;
+    // Mixer sends: default 0.0 dB
+    state.parameters[ParameterId{11}] = 0.0;
     state.parameters[ParameterId{12}] = 0.0;
     state.parameters[ParameterId{13}] = 0.0;
-    state.parameters[ParameterId{14}] = 16383.0;
-    state.parameters[ParameterId{15}] = 16383.0;
+    state.parameters[ParameterId{14}] = 0.0;
+
+    // Mixer pans: Input 1/2 center (0%), DAW 1 hard left (-100%), DAW 2 hard right (+100%)
+    state.parameters[ParameterId{15}] = 0.0;
     state.parameters[ParameterId{16}] = 0.0;
-    state.parameters[ParameterId{17}] = 0.0;
-    state.parameters[ParameterId{18}] = 16383.0;
+    state.parameters[ParameterId{17}] = -100.0;
+    state.parameters[ParameterId{18}] = 100.0;
+
+    // Mixer mutes / solos: false
+    state.parameters[ParameterId{19}] = false;
+    state.parameters[ParameterId{20}] = false;
+    state.parameters[ParameterId{21}] = false;
+    state.parameters[ParameterId{22}] = false;
+    state.parameters[ParameterId{23}] = false;
+    state.parameters[ParameterId{24}] = false;
+    state.parameters[ParameterId{25}] = false;
+    state.parameters[ParameterId{26}] = false;
+
+    // Mixer Master & Dim
+    state.parameters[ParameterId{27}] = 0.0;
+    state.parameters[ParameterId{28}] = false;
+    state.parameters[ParameterId{29}] = false;
 
     // Default Router States:
     // Input router (Node 2): XLR 1 (Bundle 1) + XLR 2 (Bundle 3) active
@@ -522,6 +641,8 @@ DeviceState makeInitialState(const ResolvedAudioConfiguration& resolved) {
     state.meters[MeterId{2}] = -96.0;
     state.meters[MeterId{3}] = -96.0;
     state.meters[MeterId{4}] = -96.0;
+    state.meters[MeterId{5}] = -96.0;
+    state.meters[MeterId{6}] = -96.0;
 
     return state;
 }
