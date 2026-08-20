@@ -8,6 +8,7 @@ struct VerticalAudioFader: View {
     let onValueChange: (Double) -> Void
 
     @State private var isDragging = false
+    @State private var dragStartValue: Double?
 
     private var normalizedValue: Double {
         let span = range.upperBound - range.lowerBound
@@ -61,25 +62,47 @@ struct VerticalAudioFader: View {
                 }
                 .offset(y: thumbY + 2)
                 .gesture(
+                    // The cap is offset by the current value, so a drag reports
+                    // positions in the cap's own space, not the track's. Anchor
+                    // on the value at drag start and follow the translation.
                     DragGesture(minimumDistance: 0)
                         .onChanged { gesture in
                             isDragging = true
-                            let locationY = gesture.location.y - 14
-                            let clampedY = max(0, min(trackHeight, locationY))
-                            let newNorm = 1.0 - (clampedY / trackHeight)
-                            let rawValue = range.lowerBound + newNorm * (range.upperBound - range.lowerBound)
-                            let stepped = (rawValue / step).rounded() * step
-                            let finalVal = max(range.lowerBound, min(range.upperBound, stepped))
-                            onValueChange(finalVal)
+                            let start = dragStartValue ?? value
+                            dragStartValue = start
+                            let span = range.upperBound - range.lowerBound
+                            let delta = -Double(gesture.translation.height) / Double(trackHeight) * span
+                            onValueChange(quantized(start + delta))
                         }
                         .onEnded { _ in
                             isDragging = false
+                            dragStartValue = nil
                         }
                 )
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(width: ConsoleMetrics.faderWidth)
+        .accessibilityElement(children: .ignore)
+        .accessibilityValue(
+            value <= range.lowerBound ? "Minimum" : String(format: "%.1f %@", value, unit)
+        )
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: onValueChange(quantized(value + increment))
+            case .decrement: onValueChange(quantized(value - increment))
+            @unknown default: break
+            }
+        }
+    }
+
+    private var increment: Double {
+        step > 0 ? step : (range.upperBound - range.lowerBound) / 100.0
+    }
+
+    private func quantized(_ raw: Double) -> Double {
+        let stepped = step > 0 ? (raw / step).rounded() * step : raw
+        return max(range.lowerBound, min(range.upperBound, stepped))
     }
 }
 
