@@ -58,6 +58,18 @@ public:
     }
     [[nodiscard]] uint64_t ObservedGuid() const noexcept { return observedGuid_; }
 
+    [[nodiscard]] bool CopyActiveConfiguration(uint32_t& outSampleRateHz,
+                                               uint32_t& outInputChannels,
+                                               uint32_t& outOutputChannels) const noexcept {
+        if (!lock_) return false;
+        IOLockLock(lock_);
+        outSampleRateHz = currentSampleRateHz_;
+        outInputChannels = configuredInputChannels_;
+        outOutputChannels = configuredOutputChannels_;
+        IOLockUnlock(lock_);
+        return outSampleRateHz != 0 && outInputChannels != 0 && outOutputChannels != 0;
+    }
+
     // Update only the current sample rate. The DICE clock can change (Audio MIDI
     // Setup / Logic) without a full config rebuild; the next StartIO seeds the
     // direct-binding/ZTS clock from the live rate, so this must reflect it or

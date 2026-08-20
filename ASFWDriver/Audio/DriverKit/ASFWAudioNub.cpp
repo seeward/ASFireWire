@@ -198,6 +198,10 @@ void ASFWAudioNub::free()
             ivars->deviceClockChangedAction->release();
             ivars->deviceClockChangedAction = nullptr;
         }
+        if (ivars->deviceConfigurationRequestedAction) {
+            ivars->deviceConfigurationRequestedAction->release();
+            ivars->deviceConfigurationRequestedAction = nullptr;
+        }
         IOSafeDeleteNULL(ivars, ASFWAudioNub_IVars, 1);
     }
     super::free();
@@ -248,6 +252,10 @@ kern_return_t IMPL(ASFWAudioNub, Stop)
         if (ivars->deviceClockChangedAction) {
             ivars->deviceClockChangedAction->release();
             ivars->deviceClockChangedAction = nullptr;
+        }
+        if (ivars->deviceConfigurationRequestedAction) {
+            ivars->deviceConfigurationRequestedAction->release();
+            ivars->deviceConfigurationRequestedAction = nullptr;
         }
         ivars->parentDriver = nullptr;
     }
@@ -400,6 +408,36 @@ void ASFWAudioNub::NotifyDeviceClockChanged(uint32_t nominalRateHz)
              "ASFWAudioNub: NotifyDeviceClockChanged %u Hz endpoint=%llu",
              nominalRateHz, ivars->endpointId);
     DeviceClockChanged(ivars->deviceClockChangedAction, nominalRateHz);
+}
+
+kern_return_t IMPL(ASFWAudioNub, RegisterDeviceConfigurationRequestedAction)
+{
+    if (!ivars) return kIOReturnNotReady;
+    if (action) action->retain();
+    OSAction* oldAction = ivars->deviceConfigurationRequestedAction;
+    ivars->deviceConfigurationRequestedAction = action;
+    if (oldAction) oldAction->release();
+    return kIOReturnSuccess;
+}
+
+void IMPL(ASFWAudioNub, DeviceConfigurationRequested)
+{
+    (void)action;
+    (void)sampleRateHz;
+    (void)opticalInput;
+    (void)opticalOutput;
+}
+
+bool ASFWAudioNub::NotifyDeviceConfigurationRequested(
+    uint32_t sampleRateHz, uint32_t opticalInput, uint32_t opticalOutput)
+{
+    if (!ivars || !ivars->deviceConfigurationRequestedAction) return false;
+    ASFW_LOG(Audio,
+             "[AudioConfig] control request endpoint=%llu rate=%u opticalIn=%u opticalOut=%u",
+             ivars->endpointId, sampleRateHz, opticalInput, opticalOutput);
+    DeviceConfigurationRequested(ivars->deviceConfigurationRequestedAction,
+                                 sampleRateHz, opticalInput, opticalOutput);
+    return true;
 }
 
 uint32_t ASFWAudioNub::GetCurrentSampleRateHz() const

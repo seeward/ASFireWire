@@ -7,6 +7,7 @@
 #include "AudioRuntimeRegistry.hpp"
 #include "../Duplex/SyncAsyncBridge.hpp"
 #include "../Protocols/IDeviceProtocol.hpp"
+#include <net.mrmidi.ASFW.ASFWDriver/ASFWAudioNub.h>
 #include "../../Logging/Logging.hpp"
 
 #include <utility>
@@ -324,6 +325,63 @@ IOReturn AudioCoordinator::CommitDeviceConfiguration(
     }
     return endpoint->ApplyConfiguration(confirmed.runtimeCaps)
         ? kIOReturnSuccess : kIOReturnError;
+}
+
+IOReturn AudioCoordinator::RequestDeviceConfiguration(
+    EndpointId endpointId,
+    const Configuration::DeviceConfiguration& desired) noexcept {
+    if (!endpointId || teardownRequested_.load(std::memory_order_acquire)) {
+        return kIOReturnNotReady;
+    }
+    const auto profile = runtime_.FindProfile(endpointId);
+    auto* nub = publisher_.GetNub(endpointId);
+    if (!profile || !nub) return kIOReturnNoDevice;
+    if (!profile->ConfigurationFor(desired) || !desired.opticalInput ||
+        !desired.opticalOutput) {
+        return kIOReturnUnsupported;
+    }
+    const uint32_t input = *desired.opticalInput == Configuration::OpticalMode::Adat ? 1U : 2U;
+    const uint32_t output = *desired.opticalOutput == Configuration::OpticalMode::Adat ? 1U : 2U;
+    return nub->NotifyDeviceConfigurationRequested(desired.sampleRate, input, output)
+        ? kIOReturnSuccess : kIOReturnNotReady;
+}
+
+IOReturn AudioCoordinator::CopyDeviceConfigurationSnapshot(
+    EndpointId endpointId,
+    Configuration::DeviceConfigurationSnapshot& outSnapshot) noexcept {
+    outSnapshot = {};
+    const auto profile = runtime_.FindProfile(endpointId);
+    const auto endpoint = runtime_.FindEndpointRuntime(endpointId);
+    if (!profile || !endpoint) return kIOReturnNoDevice;
+
+    uint32_t sampleRateHz = 0;
+    uint32_t inputChannels = 0;
+    uint32_t outputChannels = 0;
+    if (!endpoint->CopyActiveConfiguration(sampleRateHz, inputChannels, outputChannels)) {
+        return kIOReturnNotReady;
+    }
+    outSnapshot.endpointId = endpointId.value;
+    outSnapshot.inputChannels = inputChannels;
+    outSnapshot.outputChannels = outputChannels;
+    const uint8_t count = std::min(
+        profile->configurationCapabilityCount,
+        static_cast<uint8_t>(outSnapshot.capabilities.size()));
+    bool foundCommitted = false;
+    for (uint8_t i = 0; i < count; ++i) {
+        const auto& source = profile->configurationCapabilities[i];
+        auto& destination = outSnapshot.capabilities[i];
+        destination.configuration = source.configuration;
+        destination.inputChannels = source.runtimeCaps.hostInputPcmChannels;
+        destination.outputChannels = source.runtimeCaps.hostOutputPcmChannels;
+        if (source.configuration.sampleRate == sampleRateHz &&
+            destination.inputChannels == inputChannels &&
+            destination.outputChannels == outputChannels) {
+            outSnapshot.committed = source.configuration;
+            foundCommitted = true;
+        }
+    }
+    outSnapshot.capabilityCount = count;
+    return foundCommitted ? kIOReturnSuccess : kIOReturnError;
 }
 
 void AudioCoordinator::HandleCycleInconsistent() noexcept {

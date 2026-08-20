@@ -322,6 +322,7 @@ struct ASFWAudioDriver_IVars {
     OSSharedPtr<OSAction> txPreparationAction;
     OSSharedPtr<IODispatchQueue> txPreparationQueue;
     OSSharedPtr<OSAction> ztsAnchorAction;
+    OSSharedPtr<OSAction> deviceConfigurationRequestedAction;
     OSSharedPtr<IODispatchQueue> ztsQueue;
 
 

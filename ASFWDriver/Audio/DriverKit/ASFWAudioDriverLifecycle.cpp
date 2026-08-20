@@ -42,6 +42,7 @@ kern_return_t IMPL(ASFWAudioDriver, Start)
         if (ivars->device.audioNub) {
             (void)ivars->device.audioNub->RegisterZtsAnchorAction(nullptr);
             (void)ivars->device.audioNub->RegisterTxPreparationAction(nullptr);
+            (void)ivars->device.audioNub->RegisterDeviceConfigurationRequestedAction(nullptr);
         }
         ivars->ztsAnchorAction.reset();
         ivars->ztsQueue.reset();
@@ -125,7 +126,36 @@ kern_return_t IMPL(ASFWAudioDriver, Start)
         return failStart(error, "RegisterZtsAnchorAction");
     }
 
+    OSAction* rawConfigurationRequestedAction = nullptr;
+    error = CreateActionDeviceConfigurationRequested(
+        0, &rawConfigurationRequestedAction);
+    if (error != kIOReturnSuccess || !rawConfigurationRequestedAction) {
+        return failStart(error == kIOReturnSuccess ? kIOReturnNoMemory : error,
+                         "CreateActionDeviceConfigurationRequested");
+    }
+    ivars->deviceConfigurationRequestedAction =
+        ASFW::Common::AdoptRetained(rawConfigurationRequestedAction);
+    error = ivars->device.audioNub->RegisterDeviceConfigurationRequestedAction(
+        ivars->deviceConfigurationRequestedAction.get());
+    if (error != kIOReturnSuccess) {
+        ivars->deviceConfigurationRequestedAction.reset();
+        return failStart(error, "RegisterDeviceConfigurationRequestedAction");
+    }
+
     return kIOReturnSuccess;
+}
+
+void IMPL(ASFWAudioDriver, DeviceConfigurationRequested)
+{
+    (void)action;
+    if (!ivars || !ivars->audioDevice) return;
+    const kern_return_t kr = ivars->audioDevice->RequestControlConfiguration(
+        sampleRateHz, opticalInput, opticalOutput);
+    if (kr != kIOReturnSuccess) {
+        ASFW_LOG_ERROR(Audio,
+                       "[AudioConfig] control request rejected rate=%u opticalIn=%u opticalOut=%u kr=0x%x",
+                       sampleRateHz, opticalInput, opticalOutput, kr);
+    }
 }
 
 kern_return_t IMPL(ASFWAudioDriver, Stop)
@@ -141,11 +171,13 @@ kern_return_t IMPL(ASFWAudioDriver, Stop)
             }
             (void)ivars->device.audioNub->RegisterTxPreparationAction(nullptr);
             (void)ivars->device.audioNub->RegisterZtsAnchorAction(nullptr);
+            (void)ivars->device.audioNub->RegisterDeviceConfigurationRequestedAction(nullptr);
         }
         ivars->txPreparationAction.reset();
         ivars->txPreparationQueue.reset();
         ivars->ztsAnchorAction.reset();
         ivars->ztsQueue.reset();
+        ivars->deviceConfigurationRequestedAction.reset();
         ivars->device.audioNub = nullptr;
     }
 

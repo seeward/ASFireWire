@@ -47,6 +47,11 @@ public:
         TYPE(ASFWAudioNub::ZtsAnchorReady)
         QUEUENAME(Zts);
 
+    virtual void DeviceConfigurationRequested(
+        OSAction* action, uint32_t sampleRateHz, uint32_t opticalInput,
+        uint32_t opticalOutput)
+        TYPE(ASFWAudioNub::DeviceConfigurationRequested);
+
     // Protocol-backed boolean control bridge (used by custom control subclass).
     kern_return_t ApplyProtocolBooleanControl(uint32_t classIdFourCC,
                                               uint32_t element,

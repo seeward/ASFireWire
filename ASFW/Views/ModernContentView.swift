@@ -19,6 +19,7 @@ struct ModernContentView: View {
     @StateObject private var mcpVM: ASFWMCPControlViewModel
     @StateObject private var bebobShellVM: BeBoBShellViewModel
     @State private var selectedSection: SidebarSection? = .overview
+    @State private var hasMAudio1814 = false
     @State private var loggingPreset: LoggingPreset = .standard
     @AppStorage(DriverInstallSettings.requireNewerBuildKey)
     private var requireNewerBuild = DriverInstallSettings.defaultRequireNewerBuild
@@ -60,6 +61,7 @@ struct ModernContentView: View {
         case audio = "Core Audio"
         case saffire = "Saffire"
         case duet = "Duet"
+        case mAudio1814 = "FireWire 1814"
         case bebobShell = "BeBoB Shell"
         case diagnostics = "1394 Diagnostics"
         case diceReport = "DICE Report"
@@ -87,6 +89,7 @@ struct ModernContentView: View {
             case .audio: return "hifispeaker.fill"
             case .saffire: return "slider.vertical.3"
             case .duet: return "slider.horizontal.below.square.filled.and.square"
+            case .mAudio1814: return "slider.horizontal.3"
             case .bebobShell: return "terminal"
             case .diagnostics: return "heart.text.square"
             case .diceReport: return "doc.text.magnifyingglass"
@@ -100,13 +103,16 @@ struct ModernContentView: View {
     var body: some View {
         NavigationSplitView {
             // Sidebar
-            List(SidebarSection.allCases, selection: $selectedSection) { section in
+            List(SidebarSection.allCases.filter {
+                $0 != .mAudio1814 || hasMAudio1814
+            }, selection: $selectedSection) { section in
                 Label(section.rawValue, systemImage: section.systemImage)
                     .tag(section)
                     .foregroundColor(.primary)
             }
             .navigationTitle("ASFW Driver")
             .listStyle(.sidebar)
+            .task { await pollMAudio1814Availability() }
         } detail: {
             // Detail view
             Group {
@@ -148,6 +154,8 @@ struct ModernContentView: View {
                     SaffireMixerView(connector: debugVM.connector)
                 case .duet:
                     DuetControlView(connector: debugVM.connector)
+                case .mAudio1814:
+                    MAudio1814ConfigurationView(connector: debugVM.connector)
                 case .bebobShell:
                     BeBoBShellView(viewModel: bebobShellVM)
                 case .diagnostics:
@@ -222,6 +230,16 @@ struct ModernContentView: View {
         .onChange(of: topologyVM.topology?.generation) { _, _ in
             // Update available nodes when topology generation changes
             romExplorerVM.refreshAvailableNodes()
+        }
+    }
+
+    private func pollMAudio1814Availability() async {
+        while !Task.isCancelled {
+            let endpoints = debugVM.connector.getAudioTelemetry()?.endpoints ?? []
+            hasMAudio1814 = endpoints.contains {
+                debugVM.connector.getAudioConfiguration(endpointID: $0.endpointId) != nil
+            }
+            try? await Task.sleep(for: .seconds(1))
         }
     }
     

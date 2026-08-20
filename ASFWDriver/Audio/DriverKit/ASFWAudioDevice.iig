@@ -35,6 +35,17 @@ public:
     // new rate (via the transport-side coordinator) before accepting it.
     virtual kern_return_t HandleChangeSampleRate(double in_sample_rate) override LOCALONLY;
 
+    // Receives a validated app/user-client control intent through the ADK
+    // driver action. Geometry changes are committed only inside the following
+    // PerformDeviceConfigurationChange window.
+    kern_return_t RequestControlConfiguration(uint32_t sampleRateHz,
+                                              uint32_t opticalInput,
+                                              uint32_t opticalOutput) LOCALONLY;
+    virtual kern_return_t PerformDeviceConfigurationChange(uint64_t change_action,
+                                                           OSObject* in_change_info) override LOCALONLY;
+    virtual kern_return_t AbortDeviceConfigurationChange(uint64_t change_action,
+                                                         OSObject* in_change_info) override LOCALONLY;
+
     void SetDriverIvars(ASFWAudioDriver_IVars* ivars) LOCALONLY;
 };
 

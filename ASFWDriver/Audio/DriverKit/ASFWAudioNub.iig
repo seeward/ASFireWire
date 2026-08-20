@@ -109,12 +109,24 @@ public:
     virtual kern_return_t RegisterDeviceClockChangedAction(
         OSAction* action TYPE(DeviceClockChanged));
 
+    // Core control-plane request -> ADK service. Optical values are 1 = ADAT
+    // and 2 = S/PDIF. The action only carries bounded scalar intent; ADK owns
+    // the token and requests its configuration-change window itself.
+    virtual void DeviceConfigurationRequested(OSAction* action TARGET,
+                                              uint32_t sampleRateHz,
+                                              uint32_t opticalInput,
+                                              uint32_t opticalOutput);
+    virtual kern_return_t RegisterDeviceConfigurationRequestedAction(
+        OSAction* action TYPE(DeviceConfigurationRequested));
+
     // LOCALONLY methods for ASFWDriver-side access (same process)
     ASFWDriver* GetParentDriver() const LOCALONLY;
 
     // Fire the registered DeviceClockChanged action (called by the DICE
     // backend when a health probe sees a healthy device at a foreign rate).
     void NotifyDeviceClockChanged(uint32_t nominalRateHz) LOCALONLY;
+    [[nodiscard]] bool NotifyDeviceConfigurationRequested(
+        uint32_t sampleRateHz, uint32_t opticalInput, uint32_t opticalOutput) LOCALONLY;
 
     // Host-side belief of the device rate, updated only after a successful
     // semantic configuration projection. Used by the transport side to detect
@@ -190,6 +202,7 @@ struct ASFWAudioNub_IVars {
     OSAction* txPreparationAction{nullptr};
     OSAction* ztsAnchorAction{nullptr};
     OSAction* deviceClockChangedAction{nullptr};
+    OSAction* deviceConfigurationRequestedAction{nullptr};
 };
 
 #endif /* ASFWAudioNub_h */

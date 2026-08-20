@@ -8,6 +8,7 @@
 #include "../Duplex/AudioDuplexCoordinator.hpp"
 #include "../Duplex/IsochDuplexHostTransport.hpp"
 #include "../Protocols/Configuration/IAudioConfigurationControl.hpp"
+#include "../Shared/Configuration/DeviceConfigurationSnapshot.hpp"
 
 #include <DriverKit/IOLib.h>
 
@@ -73,6 +74,12 @@ public:
     [[nodiscard]] IOReturn CommitDeviceConfiguration(
         EndpointId endpointId,
         const AudioConfigurationApplyResult& confirmed) noexcept;
+    [[nodiscard]] IOReturn RequestDeviceConfiguration(
+        EndpointId endpointId,
+        const Configuration::DeviceConfiguration& desired) noexcept;
+    [[nodiscard]] IOReturn CopyDeviceConfigurationSnapshot(
+        EndpointId endpointId,
+        Configuration::DeviceConfigurationSnapshot& outSnapshot) noexcept;
     void BeginTeardown() noexcept;
 
     [[nodiscard]] ASFWAudioNub* GetNub(EndpointId endpointId) const noexcept {

@@ -79,6 +79,10 @@ public:
         // only a plug direction and a plug id, and the device's permitted-frame
         // table is checked again at submit. Result is polled with selector 39.
         kMethodSubmitSignalFormatProbe = 64,
+        // 1814 semantic configuration: value-only snapshot plus a bounded
+        // control request (endpoint, rate, input optical, output optical).
+        kMethodGetAudioConfiguration = 1015,
+        kMethodRequestAudioConfiguration = 1016,
         // TODO(ASFW-IRM): Remove temporary IRM test method after dedicated validation tooling exists.
         kMethodTestIRMAllocation       = 26,
         kMethodTestIRMRelease          = 27,

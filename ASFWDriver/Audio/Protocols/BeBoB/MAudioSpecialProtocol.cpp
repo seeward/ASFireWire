@@ -200,10 +200,12 @@ void MAudioSpecialProtocol::ApplyConfiguration(
                     }
                     auto result = CurrentConfiguration();
                     ASFW_LOG(Audio,
-                             "[MAudioConfig] apply confirmed-belief rate=%u in=%u out=%u hostIn=%u hostOut=%u",
+                             "[MAudioConfig] apply confirmed-belief rate=%u input=%{public}s output=%{public}s hostIn=%u hostOut=%u",
                              result.configuration.sampleRate,
-                             result.configuration.opticalInput == Configuration::OpticalMode::Adat,
-                             result.configuration.opticalOutput == Configuration::OpticalMode::Adat,
+                             result.configuration.opticalInput == Configuration::OpticalMode::Adat
+                                 ? "ADAT" : "S/PDIF",
+                             result.configuration.opticalOutput == Configuration::OpticalMode::Adat
+                                 ? "ADAT" : "S/PDIF",
                              result.runtimeCaps.hostInputPcmChannels,
                              result.runtimeCaps.hostOutputPcmChannels);
                     callback(kIOReturnSuccess, result);

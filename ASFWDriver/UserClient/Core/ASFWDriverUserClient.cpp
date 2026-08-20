@@ -13,6 +13,10 @@
 #include "../../Version/DriverVersion.hpp"
 #include "ASFWDriver.h"
 #include "UserClientRuntimeState.hpp"
+#include "../../Audio/Core/AudioCoordinator.hpp"
+#include "../../Audio/Shared/Configuration/DeviceConfigurationSnapshot.hpp"
+#include "../../Service/DriverContext.hpp"
+#include "../WireFormats/AudioConfigurationWireFormats.hpp"
 
 #include <DriverKit/IOLib.h>
 #include <DriverKit/OSData.h>
@@ -51,6 +55,8 @@ enum {
     kMethodSendRawFCPCommand = 38,
     kMethodGetRawFCPCommandResult = 39,
     kMethodSubmitSignalFormatProbe = 64,
+    kMethodGetAudioConfiguration = 1015,
+    kMethodRequestAudioConfiguration = 1016,
     kMethodSetIsochVerbosity = 40,
     // 41 retired (was the dev TX-verifier toggle)
     kMethodSetAudioAutoStart = 42,
@@ -319,6 +325,11 @@ kern_return_t HandleGetLogConfig(ASFWDriver& driver,
     return kr;
 }
 
+kern_return_t HandleGetAudioConfiguration(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments);
+kern_return_t HandleRequestAudioConfiguration(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments);
+
 MethodDispatchResult DispatchDriverControlMethods(ASFWDriver& driver,
                                                   IOUserClientMethodArguments* arguments,
                                                   uint64_t selector) {
@@ -345,6 +356,10 @@ MethodDispatchResult DispatchDriverControlMethods(ASFWDriver& driver,
     }
     case kMethodGetAudioAutoStart:
         return HandleGetAudioAutoStart(driver, arguments);
+    case kMethodGetAudioConfiguration:
+        return HandleGetAudioConfiguration(driver, arguments);
+    case kMethodRequestAudioConfiguration:
+        return HandleRequestAudioConfiguration(driver, arguments);
     case kMethodGetLogConfig:
         return HandleGetLogConfig(driver, arguments);
     default:
@@ -404,6 +419,81 @@ constexpr uint64_t kMethodDiagGetLogRecords       = 1011;
 constexpr uint64_t kMethodDiagGetLogStats         = 1012;
 constexpr uint64_t kMethodDiagGetAudioTelemetry   = 1013;
 constexpr uint64_t kMethodDiagGetLogCatalog       = 1014;
+
+[[nodiscard]] uint8_t OpticalModeToWire(
+    const std::optional<ASFW::Configuration::OpticalMode>& mode) noexcept {
+    if (!mode) return 0;
+    return *mode == ASFW::Configuration::OpticalMode::Adat ? 1U : 2U;
+}
+
+kern_return_t HandleGetAudioConfiguration(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments) {
+    if (!arguments || !arguments->scalarInput || arguments->scalarInputCount != 1) {
+        return kIOReturnBadArgument;
+    }
+    auto* context = static_cast<ServiceContext*>(driver.GetServiceContext());
+    if (!context || !context->audioCoordinator) return kIOReturnNotReady;
+    ASFW::Configuration::DeviceConfigurationSnapshot snapshot{};
+    const auto endpointId = ASFW::Audio::Devices::AudioEndpointId{
+        arguments->scalarInput[0]};
+    const kern_return_t kr = context->audioCoordinator->CopyDeviceConfigurationSnapshot(
+        endpointId, snapshot);
+    if (kr != kIOReturnSuccess) return kr;
+
+    ASFW::UserClient::Wire::AudioConfigurationSnapshotWire wire{};
+    wire.endpointId = snapshot.endpointId;
+    wire.capabilityCount = snapshot.capabilityCount;
+    const auto encode = [](const auto& source,
+                           ASFW::UserClient::Wire::AudioConfigurationCapabilityWire& target) {
+        target.sampleRateHz = source.configuration.sampleRate;
+        target.inputChannels = source.inputChannels;
+        target.outputChannels = source.outputChannels;
+        target.opticalInput = OpticalModeToWire(source.configuration.opticalInput);
+        target.opticalOutput = OpticalModeToWire(source.configuration.opticalOutput);
+    };
+    encode(ASFW::Configuration::DeviceConfigurationCapabilitySnapshot{
+               .configuration = snapshot.committed,
+               .inputChannels = snapshot.inputChannels,
+               .outputChannels = snapshot.outputChannels,
+           }, wire.committed);
+    for (uint8_t i = 0; i < snapshot.capabilityCount; ++i) {
+        encode(snapshot.capabilities[i], wire.capabilities[i]);
+    }
+    auto* data = OSData::withBytes(&wire, sizeof(wire));
+    if (!data) return kIOReturnNoMemory;
+    arguments->structureOutput = data;
+    arguments->structureOutputDescriptor = nullptr;
+    return kIOReturnSuccess;
+}
+
+kern_return_t HandleRequestAudioConfiguration(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments) {
+    if (!arguments || !arguments->scalarInput || arguments->scalarInputCount != 4) {
+        return kIOReturnBadArgument;
+    }
+    auto* context = static_cast<ServiceContext*>(driver.GetServiceContext());
+    if (!context || !context->audioCoordinator) return kIOReturnNotReady;
+    const uint32_t inputRaw = static_cast<uint32_t>(arguments->scalarInput[2]);
+    const uint32_t outputRaw = static_cast<uint32_t>(arguments->scalarInput[3]);
+    const auto decode = [](uint32_t raw)
+        -> std::optional<ASFW::Configuration::OpticalMode> {
+        switch (raw) {
+        case 1: return ASFW::Configuration::OpticalMode::Adat;
+        case 2: return ASFW::Configuration::OpticalMode::Spdif;
+        default: return std::nullopt;
+        }
+    };
+    const auto input = decode(inputRaw);
+    const auto output = decode(outputRaw);
+    if (!input || !output || arguments->scalarInput[1] == 0) {
+        return kIOReturnBadArgument;
+    }
+    return context->audioCoordinator->RequestDeviceConfiguration(
+        ASFW::Audio::Devices::AudioEndpointId{arguments->scalarInput[0]},
+        {.sampleRate = static_cast<uint32_t>(arguments->scalarInput[1]),
+         .opticalInput = input,
+         .opticalOutput = output});
+}
 
 MethodDispatchResult DispatchDiagnosticsMethods(
     ASFW::UserClient::UserClientRuntimeState& runtimeState,

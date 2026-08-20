@@ -768,6 +768,15 @@ namespace {
     return *mode == ASFW::Configuration::OpticalMode::Adat ? 1U : 2U;
 }
 
+[[nodiscard]] std::optional<ASFW::Configuration::OpticalMode>
+OpticalModeFromWire(uint32_t raw) noexcept {
+    switch (raw) {
+    case 1: return ASFW::Configuration::OpticalMode::Adat;
+    case 2: return ASFW::Configuration::OpticalMode::Spdif;
+    default: return std::nullopt;
+    }
+}
+
 [[nodiscard]] kern_return_t ApplyPreferredChannelLayouts(
     ASFWAudioDevice& device, uint32_t inputChannels, uint32_t outputChannels) noexcept {
     if (inputChannels == 0 || outputChannels == 0 ||
@@ -992,4 +1001,185 @@ kern_return_t ASFWAudioDevice::HandleChangeSampleRate(double in_sample_rate) {
              project.plan.confirmed.configuration.sampleRate, inputChannels,
              outputChannels, result);
     return result;
+}
+
+kern_return_t ASFWAudioDevice::RequestControlConfiguration(
+    uint32_t sampleRateHz, uint32_t opticalInput, uint32_t opticalOutput) {
+    if (!ivars || !ivars->driverIvars || !ivars->configurationLock ||
+        !ivars->configurationEnabled) {
+        return kIOReturnUnsupported;
+    }
+    auto& driverIvars = *ivars->driverIvars;
+    const auto input = OpticalModeFromWire(opticalInput);
+    const auto output = OpticalModeFromWire(opticalOutput);
+    if (!input || !output || sampleRateHz == 0 || !driverIvars.device.audioNub) {
+        return kIOReturnBadArgument;
+    }
+    const ASFW::Configuration::DeviceConfiguration requested{
+        .sampleRate = sampleRateHz,
+        .opticalInput = input,
+        .opticalOutput = output,
+    };
+    if (!driverIvars.resolvedProfile.Value().ConfigurationFor(requested)) {
+        return kIOReturnUnsupported;
+    }
+
+    ASFW::Configuration::TransitionResult transition{};
+    auto dispatch = [&](const ASFW::Configuration::ConfigurationEvent& event)
+        -> kern_return_t {
+        IOLockLock(ivars->configurationLock);
+        const auto result = ASFW::Configuration::Reduce(ivars->configurationMachine, event);
+        if (!result) {
+            IOLockUnlock(ivars->configurationLock);
+            return StateMachineErrorToIOReturn(result.error());
+        }
+        ivars->configurationMachine = result->next;
+        transition = *result;
+        IOLockUnlock(ivars->configurationLock);
+        return kIOReturnSuccess;
+    };
+    kern_return_t kr = dispatch(ASFW::Configuration::ControlIntent{
+        .endpointId = driverIvars.device.endpointId,
+        .routeGeneration = driverIvars.device.deviceInstanceId,
+        .requested = requested,
+    });
+    if (kr != kIOReturnSuccess ||
+        transition.disposition == ASFW::Configuration::TransitionDisposition::NoOp) {
+        return kr;
+    }
+    if (transition.effects.size() != 1 ||
+        !std::holds_alternative<ASFW::Configuration::ResolveCandidateEffect>(transition.effects[0])) {
+        return kIOReturnError;
+    }
+    const auto resolve = std::get<ASFW::Configuration::ResolveCandidateEffect>(transition.effects[0]);
+    if ((kr = dispatch(ASFW::Configuration::CandidateAccepted{
+             .identity = resolve.identity, .candidate = requested})) != kIOReturnSuccess ||
+        transition.effects.size() != 1 ||
+        !std::holds_alternative<ASFW::Configuration::RequestADKWindowEffect>(transition.effects[0])) {
+        return kr == kIOReturnSuccess ? kIOReturnError : kr;
+    }
+    const auto window = std::get<ASFW::Configuration::RequestADKWindowEffect>(transition.effects[0]);
+    ASFW_LOG(Audio,
+             "[AudioConfig] requesting ADK window endpoint=%llu token=%llu rate=%u opticalIn=%u opticalOut=%u",
+             driverIvars.device.endpointId, window.identity.token, sampleRateHz,
+             opticalInput, opticalOutput);
+    kr = RequestDeviceConfigurationChange(window.identity.token, nullptr);
+    if (kr != kIOReturnSuccess) {
+        (void)dispatch(ASFW::Configuration::ADKWindowRejected{.identity = window.identity});
+    }
+    return kr;
+}
+
+kern_return_t ASFWAudioDevice::PerformDeviceConfigurationChange(
+    uint64_t change_action, OSObject* in_change_info) {
+    if (!ivars || !ivars->driverIvars || !ivars->configurationLock ||
+        !ivars->configurationEnabled) {
+        return super::PerformDeviceConfigurationChange(change_action, in_change_info);
+    }
+    auto& driverIvars = *ivars->driverIvars;
+    ASFW::Configuration::ConfigurationIdentity identity{};
+    IOLockLock(ivars->configurationLock);
+    if (const auto* pending = std::get_if<ASFW::Configuration::AwaitingADKPerform>(
+            &ivars->configurationMachine.state);
+        pending && pending->transition.identity.token == change_action) {
+        identity = pending->transition.identity;
+    }
+    IOLockUnlock(ivars->configurationLock);
+    if (identity.token == 0) {
+        return super::PerformDeviceConfigurationChange(change_action, in_change_info);
+    }
+
+    ASFW::Configuration::TransitionResult transition{};
+    auto dispatch = [&](const ASFW::Configuration::ConfigurationEvent& event)
+        -> kern_return_t {
+        IOLockLock(ivars->configurationLock);
+        const auto result = ASFW::Configuration::Reduce(ivars->configurationMachine, event);
+        if (!result) {
+            IOLockUnlock(ivars->configurationLock);
+            return StateMachineErrorToIOReturn(result.error());
+        }
+        ivars->configurationMachine = result->next;
+        transition = *result;
+        IOLockUnlock(ivars->configurationLock);
+        return kIOReturnSuccess;
+    };
+    kern_return_t kr = dispatch(ASFW::Configuration::ADKPerformGranted{.identity = identity});
+    if (kr != kIOReturnSuccess || transition.effects.size() != 1 ||
+        !std::holds_alternative<ASFW::Configuration::ApplyHardwareEffect>(transition.effects[0])) {
+        const kern_return_t superKr = super::PerformDeviceConfigurationChange(change_action, in_change_info);
+        return kr != kIOReturnSuccess ? kr : superKr;
+    }
+    const auto apply = std::get<ASFW::Configuration::ApplyHardwareEffect>(transition.effects[0]);
+    uint32_t inputChannels = 0;
+    uint32_t outputChannels = 0;
+    const kern_return_t hardwareKr = driverIvars.device.audioNub->ApplyDeviceConfiguration(
+        apply.transition.candidate.sampleRate,
+        OpticalModeWire(apply.transition.candidate.opticalInput),
+        OpticalModeWire(apply.transition.candidate.opticalOutput),
+        &inputChannels, &outputChannels);
+    if (hardwareKr != kIOReturnSuccess) {
+        (void)dispatch(ASFW::Configuration::HardwareCompleted{
+            .identity = apply.transition.identity,
+            .outcome = ASFW::Configuration::HardwareUnknown{},
+        });
+        (void)super::PerformDeviceConfigurationChange(change_action, in_change_info);
+        ASFW_LOG_ERROR(Audio,
+                       "[AudioConfig] ADK Perform hardware failure token=%llu kr=0x%x",
+                       identity.token, hardwareKr);
+        return hardwareKr;
+    }
+    kr = dispatch(ASFW::Configuration::HardwareCompleted{
+        .identity = apply.transition.identity,
+        .outcome = ASFW::Configuration::HardwareConfirmedRequested{
+            .confirmed = {.configuration = apply.transition.candidate},
+        },
+    });
+    if (kr != kIOReturnSuccess || transition.effects.size() != 1 ||
+        !std::holds_alternative<ASFW::Configuration::ProjectADKEffect>(transition.effects[0])) {
+        const kern_return_t superKr = super::PerformDeviceConfigurationChange(change_action, in_change_info);
+        return kr != kIOReturnSuccess ? kr : superKr;
+    }
+    const auto project = std::get<ASFW::Configuration::ProjectADKEffect>(transition.effects[0]);
+    const kern_return_t mutation = ApplyADKConfigurationProjection(
+        *this, driverIvars, project.plan.confirmed.configuration,
+        inputChannels, outputChannels);
+    const kern_return_t runtimeKr = mutation == kIOReturnSuccess
+        ? driverIvars.device.audioNub->CommitDeviceConfiguration(
+              project.plan.confirmed.configuration.sampleRate,
+              OpticalModeWire(project.plan.confirmed.configuration.opticalInput),
+              OpticalModeWire(project.plan.confirmed.configuration.opticalOutput))
+        : mutation;
+    const kern_return_t superKr = super::PerformDeviceConfigurationChange(change_action, in_change_info);
+    const kern_return_t finishKr = dispatch(ASFW::Configuration::ProjectionFinished{
+        .identity = project.plan.identity,
+        .customProjectionSucceeded = mutation == kIOReturnSuccess && runtimeKr == kIOReturnSuccess,
+        .superclassSucceeded = superKr == kIOReturnSuccess,
+    });
+    const kern_return_t result = mutation != kIOReturnSuccess ? mutation
+        : runtimeKr != kIOReturnSuccess ? runtimeKr
+        : superKr != kIOReturnSuccess ? superKr : finishKr;
+    ASFW_LOG(Audio,
+             "[AudioConfig] ADK Perform result endpoint=%llu token=%llu rate=%u in=%u out=%u kr=0x%x",
+             driverIvars.device.endpointId, identity.token,
+             project.plan.confirmed.configuration.sampleRate, inputChannels,
+             outputChannels, result);
+    return result;
+}
+
+kern_return_t ASFWAudioDevice::AbortDeviceConfigurationChange(
+    uint64_t change_action, OSObject* in_change_info) {
+    if (ivars && ivars->configurationLock && ivars->configurationEnabled) {
+        IOLockLock(ivars->configurationLock);
+        const auto pending = ASFW::Configuration::CoherentSnapshot(ivars->configurationMachine.state);
+        const auto result = ASFW::Configuration::Reduce(
+            ivars->configurationMachine,
+            ASFW::Configuration::ConfigurationEvent{ASFW::Configuration::ADKAborted{
+                .identity = {.endpointId = pending ? pending->endpointId : 0,
+                             .token = change_action,
+                             .routeGeneration = pending ? pending->routeGeneration : 0},
+            }});
+        if (result) ivars->configurationMachine = result->next;
+        IOLockUnlock(ivars->configurationLock);
+    }
+    return super::AbortDeviceConfigurationChange(change_action, in_change_info);
 }
