@@ -7,24 +7,24 @@ struct MixerSourceChannelCard: View {
     @ObservedObject var state: VirtualLabState
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: ConsoleMetrics.s2) {
             Text(group.id.uppercased())
                 .font(.system(size: 9, weight: .bold))
                 .foregroundStyle(.tint)
                 .lineLimit(1)
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 3)
+                .padding(.vertical, ConsoleMetrics.s1)
                 .background(Color.secondary.opacity(0.12))
-                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .clipShape(RoundedRectangle(cornerRadius: ConsoleMetrics.rControl))
 
             // Sends to each mixer output bus
-            HStack(spacing: 6) {
+            HStack(spacing: ConsoleMetrics.s2) {
                 ForEach(group.crosspoints) { cp in
                     let param = snap.parameter(forTargetCrosspoint: cp.id)
                     let outName = snap.portName(for: cp.outputPortId)
                     let label = outName.contains("L") ? "SEND L" : (outName.contains("R") ? "SEND R" : "BUS")
 
-                    VStack(spacing: 4) {
+                    VStack(spacing: ConsoleMetrics.s1) {
                         Text(label)
                             .font(.system(size: 8, weight: .bold))
                             .foregroundStyle(.secondary)
@@ -37,7 +37,7 @@ struct MixerSourceChannelCard: View {
                                 unit: p.unit,
                                 onValueChange: { state.setParameterScalar(id: p.id, value: $0) }
                             )
-                            .frame(height: 180)
+                            .frame(height: ConsoleMetrics.rowFader)
 
                             Text(formatDb(p.scalarValue))
                                 .font(.system(size: 8, weight: .bold, design: .monospaced))
@@ -45,20 +45,20 @@ struct MixerSourceChannelCard: View {
                         } else {
                             Rectangle()
                                 .fill(Color.secondary.opacity(0.05))
-                                .frame(width: 48, height: 180)
+                                .frame(width: ConsoleMetrics.faderWidth, height: ConsoleMetrics.rowFader)
                         }
                     }
                 }
             }
         }
-        .padding(8)
+        .padding(ConsoleMetrics.s2)
         .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color(white: 0.12).opacity(0.8))
+            RoundedRectangle(cornerRadius: ConsoleMetrics.rStrip, style: .continuous)
+                .fill(ConsoleMetrics.stripFill)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+            RoundedRectangle(cornerRadius: ConsoleMetrics.rStrip, style: .continuous)
+                .strokeBorder(ConsoleMetrics.stripStroke, lineWidth: 1)
         )
     }
 

@@ -155,6 +155,6 @@ struct RotaryKnob: View {
                 .foregroundColor(.white.opacity(0.85))
                 .lineLimit(1)
         }
-        .frame(width: 52)
+        .frame(width: ConsoleMetrics.knobWidth)
     }
 }

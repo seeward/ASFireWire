@@ -7,8 +7,8 @@ struct StudioCard<Content: View>: View {
     @ViewBuilder let content: () -> Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: ConsoleMetrics.s3) {
+            HStack(spacing: ConsoleMetrics.s2) {
                 Image(systemName: systemImage)
                     .foregroundStyle(.tint)
                     .font(.headline)
@@ -18,7 +18,7 @@ struct StudioCard<Content: View>: View {
                 if let badge = badge {
                     Text(badge)
                         .font(.caption2.weight(.bold))
-                        .padding(.horizontal, 8)
+                        .padding(.horizontal, ConsoleMetrics.s2)
                         .padding(.vertical, 3)
                         .background(Color.secondary.opacity(0.18))
                         .clipShape(Capsule())
@@ -28,14 +28,14 @@ struct StudioCard<Content: View>: View {
 
             content()
         }
-        .padding(16)
+        .padding(ConsoleMetrics.s4)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: ConsoleMetrics.rCard, style: .continuous)
                 .fill(Color(nsColor: .controlBackgroundColor).opacity(0.7))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+            RoundedRectangle(cornerRadius: ConsoleMetrics.rCard, style: .continuous)
+                .strokeBorder(ConsoleMetrics.stripStroke, lineWidth: 1)
         )
     }
 }

@@ -79,7 +79,7 @@ struct VerticalAudioFader: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: 48)
+        .frame(width: ConsoleMetrics.faderWidth)
     }
 }
 

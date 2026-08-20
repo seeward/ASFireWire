@@ -4,14 +4,6 @@ struct NodeDrivenConsoleRack: View {
     let snap: LabDeviceSnapshot
     @ObservedObject var state: VirtualLabState
 
-    private var derivedChannels: [ChannelStripModel] {
-        GenericAudioPresenter.deriveChannelStrips(from: snap)
-    }
-
-    private var derivedMasters: [OutputMasterStripModel] {
-        GenericAudioPresenter.deriveOutputMasters(from: snap)
-    }
-
     // Check if any mixer requested Matrix presentation explicitly
     private var matrixMixers: [MixerModel] {
         snap.mixers.filter { mixer in
@@ -21,29 +13,25 @@ struct NodeDrivenConsoleRack: View {
     }
 
     var body: some View {
+        let channels = GenericAudioPresenter.deriveChannelStrips(from: snap)
+        let masters = GenericAudioPresenter.deriveOutputMasters(from: snap)
+        let plan = ConsoleRowPlan.plan(channels: channels, masters: masters)
+
         StudioCard(title: "Hardware Audio Console", systemImage: "slider.vertical.3", badge: "Console Strips") {
             ScrollView(.horizontal, showsIndicators: true) {
-                HStack(alignment: .top, spacing: 16) {
+                HStack(alignment: .top, spacing: ConsoleMetrics.s4) {
                     // 1. Channel Strips Bank (Hardware Inputs + DAW Returns)
-                    if !derivedChannels.isEmpty {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("CONSOLE CHANNELS")
-                                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                .foregroundStyle(.cyan)
-
-                            HStack(spacing: 8) {
-                                ForEach(derivedChannels) { strip in
-                                    VerticalChannelStrip(strip: strip, state: state)
-                                }
+                    if !channels.isEmpty {
+                        bank(caption: "CONSOLE CHANNELS", tint: .cyan) {
+                            ForEach(channels) { strip in
+                                VerticalChannelStrip(strip: strip, plan: plan, state: state)
                             }
                         }
                     }
 
                     // 2. Matrix Mixers (For large matrices like Saffire)
                     if !matrixMixers.isEmpty {
-                        if !derivedChannels.isEmpty {
-                            Divider().frame(height: 320)
-                        }
+                        if !channels.isEmpty { bankDivider }
 
                         ForEach(matrixMixers) { mixer in
                             MixerNodePresenter(mixer: mixer, snap: snap, state: state)
@@ -51,24 +39,44 @@ struct NodeDrivenConsoleRack: View {
                     }
 
                     // 3. Master Outputs Bank (Main Mix, Aux Mix, HP A, HP B, SPDIF)
-                    if !derivedMasters.isEmpty {
-                        Divider().frame(height: 320)
+                    if !masters.isEmpty {
+                        bankDivider
 
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("OUTPUT MASTERS")
-                                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                .foregroundStyle(.orange)
-
-                            HStack(spacing: 8) {
-                                ForEach(derivedMasters) { master in
-                                    VerticalMasterStrip(master: master, state: state)
-                                }
+                        bank(caption: "OUTPUT MASTERS", tint: .orange) {
+                            ForEach(masters) { master in
+                                VerticalMasterStrip(master: master, plan: plan, state: state)
                             }
                         }
                     }
                 }
-                .padding(.vertical, 6)
+                .padding(.vertical, ConsoleMetrics.s1)
             }
         }
+    }
+
+    @ViewBuilder
+    private func bank<Content: View>(
+        caption: String,
+        tint: Color,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: ConsoleMetrics.s2) {
+            Text(caption)
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(tint)
+
+            HStack(alignment: .top, spacing: ConsoleMetrics.s2) {
+                content()
+            }
+        }
+    }
+
+    /// Spans the full bank height rather than a fixed guess, so it always
+    /// matches the strips beside it.
+    private var bankDivider: some View {
+        Rectangle()
+            .fill(ConsoleMetrics.stripStroke)
+            .frame(width: 1)
+            .frame(maxHeight: .infinity)
     }
 }

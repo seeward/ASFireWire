@@ -1,22 +1,46 @@
 import SwiftUI
 
 struct VerticalAudioMeter: View {
-    let value: Double
+    let values: [Double]
     let range: ClosedRange<Double>
     let name: String?
 
-    private var normalized: Double {
+    init(value: Double, range: ClosedRange<Double>, name: String?) {
+        self.init(values: [value], range: range, name: name)
+    }
+
+    /// Up to two bars share one meter slot, so a stereo bus does not make its
+    /// strip wider than a mono one.
+    init(values: [Double], range: ClosedRange<Double>, name: String?) {
+        self.values = values.isEmpty ? [range.lowerBound] : Array(values.prefix(2))
+        self.range = range
+        self.name = name
+    }
+
+    private static let scale = LinearGradient(
+        stops: [
+            .init(color: .red, location: 0.0),
+            .init(color: .orange, location: 0.18),
+            .init(color: .yellow, location: 0.4),
+            .init(color: .green, location: 0.75),
+            .init(color: Color(red: 0.0, green: 0.85, blue: 0.25), location: 1.0)
+        ],
+        startPoint: .top,
+        endPoint: .bottom
+    )
+
+    private var peak: Double { values.max() ?? range.lowerBound }
+
+    private var isClipping: Bool { peak >= -0.5 }
+
+    private func normalized(_ value: Double) -> Double {
         let span = range.upperBound - range.lowerBound
         guard span > 0 else { return 0.0 }
         return max(0.0, min(1.0, (value - range.lowerBound) / span))
     }
 
-    private var isClipping: Bool {
-        return value >= -0.5
-    }
-
     var body: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: ConsoleMetrics.s1) {
             Circle()
                 .fill(isClipping ? Color.red : Color.red.opacity(0.18))
                 .frame(width: 6, height: 6)
@@ -24,43 +48,38 @@ struct VerticalAudioMeter: View {
 
             GeometryReader { geo in
                 let h = geo.size.height
-                ZStack(alignment: .bottom) {
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(Color(white: 0.06))
-                        .overlay(
+                HStack(spacing: values.count > 1 ? 1 : 0) {
+                    ForEach(Array(values.enumerated()), id: \.offset) { _, value in
+                        ZStack(alignment: .bottom) {
                             RoundedRectangle(cornerRadius: 2)
-                                .strokeBorder(Color.white.opacity(0.15), lineWidth: 0.5)
-                        )
+                                .fill(Color(white: 0.06))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 2)
+                                        .strokeBorder(Color.white.opacity(0.15), lineWidth: 0.5)
+                                )
 
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(
-                            LinearGradient(
-                                stops: [
-                                    .init(color: .red, location: 0.0),
-                                    .init(color: .orange, location: 0.18),
-                                    .init(color: .yellow, location: 0.4),
-                                    .init(color: .green, location: 0.75),
-                                    .init(color: Color(red: 0.0, green: 0.85, blue: 0.25), location: 1.0)
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                        .frame(height: max(3, h * CGFloat(normalized)))
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(Self.scale)
+                                .frame(height: max(3, h * CGFloat(normalized(value))))
+                        }
+                    }
                 }
             }
-            .frame(width: 9)
+            .frame(width: ConsoleMetrics.meterBarsWidth)
 
-            Text(formatDb(value))
+            Text(formatDb(peak))
                 .font(.system(size: 8, weight: .bold, design: .monospaced))
-                .foregroundStyle(value >= -3.0 ? .red : (value >= -18.0 ? .yellow : .secondary))
+                .foregroundStyle(peak >= -3.0 ? .red : (peak >= -18.0 ? .yellow : .secondary))
                 .lineLimit(1)
         }
-        .frame(width: 22)
+        .frame(width: ConsoleMetrics.meterWidth)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(name ?? "Level meter")
+        .accessibilityValue(peak <= -90.0 ? "Silent" : String(format: "%.0f decibels", peak))
     }
 
-    private func formatDb(_ v: Double) -> String {
-        if v <= -90.0 { return "-∞" }
-        return String(format: "%.0f", v)
+    private func formatDb(_ value: Double) -> String {
+        if value <= -90.0 { return "-∞" }
+        return String(format: "%.0f", value)
     }
 }
