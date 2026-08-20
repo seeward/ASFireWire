@@ -35,6 +35,8 @@ public:
         : endpointId_(profile.endpointId),
           deviceInstanceId_(profile.deviceInstanceId),
           observedGuid_(profile.observedGuid),
+          maximumOutputChannels_(MaximumPlaybackChannels(profile)),
+          maximumInputChannels_(MaximumCaptureChannels(profile)),
           configuredOutputChannels_(PhysicalPlaybackChannels(profile.runtimeCaps)),
           configuredInputChannels_(PhysicalCaptureChannels(profile.runtimeCaps)),
           currentSampleRateHz_(profile.currentSampleRateHz),
@@ -88,6 +90,44 @@ public:
         if (lock_) {
             IOLockUnlock(lock_);
         }
+    }
+
+    // The descriptor allocation is fixed at the endpoint's immutable maximum
+    // capability envelope. A coordinator commit changes only active geometry,
+    // so neither CoreAudio nor the transport observes a replaced descriptor.
+    [[nodiscard]] bool ApplyConfiguration(
+        const AudioStreamRuntimeCaps& runtimeCaps) noexcept {
+        const uint32_t outputChannels = PhysicalPlaybackChannels(runtimeCaps);
+        const uint32_t inputChannels = PhysicalCaptureChannels(runtimeCaps);
+        if (runtimeCaps.sampleRateHz == 0 || outputChannels == 0 || inputChannels == 0 ||
+            outputChannels > maximumOutputChannels_ ||
+            inputChannels > maximumInputChannels_ || !lock_) {
+            ASFW_LOG_ERROR(DirectAudio,
+                           "[AudioConfig] runtime projection rejected guid=0x%016llx rate=%u out=%u/%u in=%u/%u",
+                           observedGuid_, runtimeCaps.sampleRateHz, outputChannels,
+                           maximumOutputChannels_, inputChannels, maximumInputChannels_);
+            return false;
+        }
+        IOLockLock(lock_);
+        const bool changed = currentSampleRateHz_ != runtimeCaps.sampleRateHz ||
+                             configuredOutputChannels_ != outputChannels ||
+                             configuredInputChannels_ != inputChannels;
+        currentSampleRateHz_ = runtimeCaps.sampleRateHz;
+        configuredOutputChannels_ = outputChannels;
+        configuredInputChannels_ = inputChannels;
+        if (HasCompleteDirectAudioMemoryLocked() && changed) {
+            directOutputChannels_ = outputChannels;
+            directInputChannels_ = inputChannels;
+            directSampleRateHz_ = runtimeCaps.sampleRateHz;
+            ++directGeneration_;
+            ASFW_LOG(DirectAudio,
+                     "[AudioConfig] runtime projection committed guid=0x%016llx gen=%llu rate=%u out=%u/%u in=%u/%u",
+                     observedGuid_, directGeneration_, directSampleRateHz_,
+                     directOutputChannels_, directOutputCapacityChannels_,
+                     directInputChannels_, directInputCapacityChannels_);
+        }
+        IOLockUnlock(lock_);
+        return true;
     }
 
     [[nodiscard]] kern_return_t EnsureDirectAudioMemory() noexcept {
@@ -350,6 +390,30 @@ private:
                                       : caps.hostInputPcmChannels);
     }
 
+    [[nodiscard]] static uint32_t MaximumPlaybackChannels(
+        const Devices::ResolvedAudioEndpointProfile& profile) noexcept {
+        uint32_t maximum = PhysicalPlaybackChannels(profile.runtimeCaps);
+        const uint8_t count = std::min(profile.configurationCapabilityCount,
+                                       static_cast<uint8_t>(profile.configurationCapabilities.size()));
+        for (uint8_t i = 0; i < count; ++i) {
+            maximum = std::max(maximum, PhysicalPlaybackChannels(
+                profile.configurationCapabilities[i].runtimeCaps));
+        }
+        return maximum;
+    }
+
+    [[nodiscard]] static uint32_t MaximumCaptureChannels(
+        const Devices::ResolvedAudioEndpointProfile& profile) noexcept {
+        uint32_t maximum = PhysicalCaptureChannels(profile.runtimeCaps);
+        const uint8_t count = std::min(profile.configurationCapabilityCount,
+                                       static_cast<uint8_t>(profile.configurationCapabilities.size()));
+        for (uint8_t i = 0; i < count; ++i) {
+            maximum = std::max(maximum, PhysicalCaptureChannels(
+                profile.configurationCapabilities[i].runtimeCaps));
+        }
+        return maximum;
+    }
+
     [[nodiscard]] static uint32_t ClampAudioChannels(uint32_t channels) noexcept {
         if (channels == 0) {
             return 0;
@@ -447,10 +511,12 @@ private:
         directOutputBytes_ = 0;
         directOutputCapacityFrames_ = 0;
         directOutputChannels_ = 0;
+        directOutputCapacityChannels_ = 0;
         directInputBase_ = nullptr;
         directInputBytes_ = 0;
         directInputCapacityFrames_ = 0;
         directInputChannels_ = 0;
+        directInputCapacityChannels_ = 0;
         directControl_ = nullptr;
         directSampleRateHz_ = 0;
         ++directGeneration_;
@@ -489,11 +555,14 @@ private:
         // count is the transport buffer's safe fallback geometry.
         const uint32_t outputChannels = configuredOutputChannels_;
         const uint32_t inputChannels = configuredInputChannels_;
+        const uint32_t outputCapacityChannels = maximumOutputChannels_;
+        const uint32_t inputCapacityChannels = maximumInputChannels_;
         const uint32_t sampleRateHz = currentSampleRateHz_;
         const uint32_t outputFrames = Config::kAudioRingBufferFrames;
         const uint32_t inputFrames = Config::kAudioRingBufferFrames;
 
-        if (outputChannels == 0 || inputChannels == 0 || sampleRateHz == 0) {
+        if (outputChannels == 0 || inputChannels == 0 || outputCapacityChannels == 0 ||
+            inputCapacityChannels == 0 || sampleRateHz == 0) {
             ASFW_LOG(DirectAudio,
                      "ADK DBG MEM runtime ensure failed bad_config observedGuid=0x%016llx agg=%u in=%u out=%u rate=%u",
                      observedGuid_,
@@ -504,28 +573,23 @@ private:
             return kIOReturnBadArgument;
         }
 
-        if (HasCompleteDirectAudioMemoryLocked() &&
-            directOutputCapacityFrames_ == outputFrames &&
-            directInputCapacityFrames_ == inputFrames &&
-            directOutputChannels_ == outputChannels &&
-            directInputChannels_ == inputChannels &&
-            directSampleRateHz_ == sampleRateHz) {
+        if (HasCompleteDirectAudioMemoryLocked()) {
             ASFW_LOG(DirectAudio,
                      "ADK DBG MEM runtime ensure reuse observedGuid=0x%016llx gen=%llu outFrames=%u outCh=%u inFrames=%u inCh=%u rate=%u",
                      observedGuid_,
                      directGeneration_,
                      outputFrames,
-                     outputChannels,
+                     directOutputChannels_,
                      inputFrames,
-                     inputChannels,
+                     directInputChannels_,
                      sampleRateHz);
             return kIOReturnSuccess;
         }
 
         ReleaseDirectAudioMemoryLocked();
 
-        const uint64_t outputBytes = static_cast<uint64_t>(outputFrames) * outputChannels * sizeof(float);
-        const uint64_t inputBytes = static_cast<uint64_t>(inputFrames) * inputChannels * sizeof(int32_t);
+        const uint64_t outputBytes = static_cast<uint64_t>(outputFrames) * outputCapacityChannels * sizeof(float);
+        const uint64_t inputBytes = static_cast<uint64_t>(inputFrames) * inputCapacityChannels * sizeof(int32_t);
         const uint64_t controlBytes = sizeof(Runtime::AudioTransportControlBlock);
 
         ASFW_LOG(DirectAudio,
@@ -564,8 +628,10 @@ private:
 
         directOutputCapacityFrames_ = outputFrames;
         directOutputChannels_ = outputChannels;
+        directOutputCapacityChannels_ = outputCapacityChannels;
         directInputCapacityFrames_ = inputFrames;
         directInputChannels_ = inputChannels;
+        directInputCapacityChannels_ = inputCapacityChannels;
         directSampleRateHz_ = sampleRateHz;
 
         std::memset(reinterpret_cast<void*>(static_cast<uintptr_t>(directOutputMap_->GetAddress())),
@@ -586,8 +652,10 @@ private:
     const Devices::AudioEndpointId endpointId_{};
     const Discovery::DeviceInstanceId deviceInstanceId_{};
     const uint64_t observedGuid_{0}; // Config-ROM evidence; diagnostics only
-    const uint32_t configuredOutputChannels_{0};
-    const uint32_t configuredInputChannels_{0};
+    const uint32_t maximumOutputChannels_{0};
+    const uint32_t maximumInputChannels_{0};
+    uint32_t configuredOutputChannels_{0};
+    uint32_t configuredInputChannels_{0};
     uint32_t currentSampleRateHz_{0};
     mutable IOLock* lock_{nullptr};
     std::atomic<bool> streaming_{false};
@@ -603,10 +671,12 @@ private:
     uint64_t directOutputBytes_{0};
     uint32_t directOutputCapacityFrames_{0};
     uint32_t directOutputChannels_{0};
+    uint32_t directOutputCapacityChannels_{0};
     float* directInputBase_{nullptr};
     uint64_t directInputBytes_{0};
     uint32_t directInputCapacityFrames_{0};
     uint32_t directInputChannels_{0};
+    uint32_t directInputCapacityChannels_{0};
     Runtime::AudioTransportControlBlock* directControl_{nullptr};
     uint32_t directSampleRateHz_{0};
 };

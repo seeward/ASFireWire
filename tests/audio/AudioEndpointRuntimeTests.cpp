@@ -180,3 +180,66 @@ TEST(AudioEndpointRuntime, PlaybackOnlyPresentationKeepsPhysicalReturnRingForDup
     inputMemory->release();
     controlMemory->release();
 }
+
+TEST(AudioEndpointRuntime, ConfigurationChangesReuseMaximumCapacityDescriptors) {
+    auto profile = MakeProfile();
+    profile.configurationCapabilityCount = 1;
+    auto& adat = profile.configurationCapabilities[0];
+    adat.configuration = {
+        .sampleRate = 44100,
+        .opticalInput = ASFW::Configuration::OpticalMode::Adat,
+        .opticalOutput = ASFW::Configuration::OpticalMode::Adat,
+    };
+    adat.runtimeCaps = profile.runtimeCaps;
+    adat.runtimeCaps.sampleRateHz = 44100;
+    adat.runtimeCaps.hostInputPcmChannels = 16;
+    adat.runtimeCaps.hostOutputPcmChannels = 12;
+    adat.runtimeCaps.deviceToHostAm824Slots = 17;
+    adat.runtimeCaps.hostToDeviceAm824Slots = 13;
+    adat.runtimeCaps.deviceToHostStreams[0] = {.pcmChannels = 16, .am824Slots = 17};
+    adat.runtimeCaps.hostToDeviceStreams[0] = {.pcmChannels = 12, .am824Slots = 13};
+    ASFW::Audio::AudioEndpointRuntime runtime(profile);
+
+    IOMemoryDescriptor* firstOutput = nullptr;
+    IOMemoryDescriptor* firstInput = nullptr;
+    IOMemoryDescriptor* firstControl = nullptr;
+    uint32_t outputFrames = 0;
+    uint32_t outputChannels = 0;
+    uint32_t inputFrames = 0;
+    uint32_t inputChannels = 0;
+    uint32_t rate = 0;
+    uint64_t firstGeneration = 0;
+    ASSERT_EQ(runtime.CopyDirectAudioMemory(
+                  &firstOutput, &firstInput, &firstControl, &outputFrames,
+                  &outputChannels, &inputFrames, &inputChannels, &rate,
+                  &firstGeneration),
+              kIOReturnSuccess);
+    EXPECT_EQ(outputChannels, 4U);
+    EXPECT_EQ(inputChannels, 6U);
+
+    ASSERT_TRUE(runtime.ApplyConfiguration(adat.runtimeCaps));
+
+    IOMemoryDescriptor* secondOutput = nullptr;
+    IOMemoryDescriptor* secondInput = nullptr;
+    IOMemoryDescriptor* secondControl = nullptr;
+    uint64_t secondGeneration = 0;
+    ASSERT_EQ(runtime.CopyDirectAudioMemory(
+                  &secondOutput, &secondInput, &secondControl, &outputFrames,
+                  &outputChannels, &inputFrames, &inputChannels, &rate,
+                  &secondGeneration),
+              kIOReturnSuccess);
+    EXPECT_EQ(secondOutput, firstOutput);
+    EXPECT_EQ(secondInput, firstInput);
+    EXPECT_EQ(secondControl, firstControl);
+    EXPECT_EQ(outputChannels, 12U);
+    EXPECT_EQ(inputChannels, 16U);
+    EXPECT_EQ(rate, 44100U);
+    EXPECT_GT(secondGeneration, firstGeneration);
+
+    firstOutput->release();
+    firstInput->release();
+    firstControl->release();
+    secondOutput->release();
+    secondInput->release();
+    secondControl->release();
+}
