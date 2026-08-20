@@ -27,6 +27,7 @@ enum ADKConfigWire {
     static let selectorCopyConfigLog: UInt32 = 2
     static let selectorCopyConfigState: UInt32 = 3
     static let selectorRequestConfiguration: UInt32 = 4
+    static let selectorSetHardwareOutcome: UInt32 = 5
 
     static let logHeaderSize = 64
     static let eventSize = 56
@@ -74,6 +75,14 @@ struct ADKConfigEvent: Identifiable, Sendable {
         case 18: return "DeviceRateMutation"
         case 19: return "OutputStreamMutation"
         case 20: return "InputStreamMutation"
+        case 21: return "CandidateAccepted"
+        case 22: return "CandidateRejected"
+        case 23: return "HardwareApply"
+        case 24: return "HardwareCompleted"
+        case 25: return "HardwareUnchanged"
+        case 26: return "HardwareUnknown"
+        case 27: return "ProjectionCommitted"
+        case 28: return "CoordinatorRejected"
         default: return "Phase \(phase)"
         }
     }
@@ -267,6 +276,29 @@ final class ADKConfigClient {
         }
         ADKConfigTrace.emit(
             "request slot=\(slot) rate=\(rate) optical=\(opticalInput)/\(opticalOutput) accepted")
+    }
+
+    func setHardwareOutcome(slot: Int, outcome: UInt32) throws {
+        try ensureConnection()
+        var scalars: [UInt64] = [UInt64(slot), UInt64(outcome)]
+        let kr = scalars.withUnsafeMutableBufferPointer { inputs in
+            IOConnectCallMethod(
+                connection,
+                ADKConfigWire.selectorSetHardwareOutcome,
+                inputs.baseAddress,
+                UInt32(inputs.count),
+                nil,
+                0,
+                nil,
+                nil,
+                nil,
+                nil)
+        }
+        guard kr == KERN_SUCCESS else {
+            if kr == kIOReturnNotOpen || kr == kIOReturnNoDevice { close() }
+            throw ADKConfigClientError.callFailed(kr)
+        }
+        ADKConfigTrace.emit("script hardware slot=\(slot) outcome=\(outcome)")
     }
 
     func state(slot: Int) throws -> ADKConfigState {

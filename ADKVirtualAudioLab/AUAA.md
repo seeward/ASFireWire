@@ -1241,8 +1241,9 @@ pending transition {
 
 This is conceptual ownership, not the in-memory representation. The
 implementation uses a closed `std::variant` of states such as idle, awaiting
-ADK perform, awaiting hardware, awaiting ADK projection, recovering, and
-unavailable. Events, effects, and hardware outcomes are variants as well.
+candidate resolution, awaiting ADK perform, awaiting hardware, awaiting ADK
+projection, recovering, and unavailable. Events, effects, and hardware
+outcomes are variants as well.
 Scalar phase/certainty enums are derived only for logs and wire snapshots; they
 must not drive the state machine alongside optional fields that could form
 impossible combinations.

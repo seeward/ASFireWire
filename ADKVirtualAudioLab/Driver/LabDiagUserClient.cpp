@@ -131,6 +131,21 @@ kern_return_t LabDiagUserClient::ExternalMethod(
         }
         return kr;
     }
+    case ASFW::Lab::kLabDiagSelectorSetHardwareOutcome: {
+        if (arguments->scalarInput == nullptr || arguments->scalarInputCount < 2) {
+            return kIOReturnBadArgument;
+        }
+        const uint32_t slot = static_cast<uint32_t>(arguments->scalarInput[0]);
+        const uint32_t outcome = static_cast<uint32_t>(arguments->scalarInput[1]);
+        VirtualAudioDevice* device =
+            ivars->driver->GetVirtualAudioDeviceForSlot(slot);
+        if (device == nullptr) {
+            return kIOReturnBadArgument;
+        }
+        LAB_LOG("set scripted hardware outcome: slot=%{public}u outcome=%{public}u",
+                slot, outcome);
+        return device->SetScriptedHardwareOutcome(outcome);
+    }
     case ASFW::Lab::kLabDiagSelectorCopyConfigLog: {
         if (arguments->scalarInput == nullptr || arguments->scalarInputCount < 1) {
             return kIOReturnBadArgument;

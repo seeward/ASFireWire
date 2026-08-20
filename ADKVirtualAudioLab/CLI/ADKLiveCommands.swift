@@ -69,6 +69,15 @@ enum ADKLiveCommands {
             return setConfiguration(slot: slot, rate: rate,
                                     opticalInput: opticalInput,
                                     opticalOutput: opticalOutput)
+        case "outcome":
+            guard arguments.count == 4,
+                  let slot = Int(arguments[2]),
+                  let outcome = hardwareOutcome(arguments[3]),
+                  definitions.indices.contains(slot) else {
+                printUsage()
+                return 64
+            }
+            return setHardwareOutcome(slot: slot, outcome: outcome)
         default:
             printUsage()
             return 64
@@ -129,6 +138,27 @@ enum ADKLiveCommands {
         case "adat": return 1
         case "spdif", "s/pdif": return 2
         default: return nil
+        }
+    }
+
+    private static func hardwareOutcome(_ value: String) -> UInt32? {
+        switch value.lowercased() {
+        case "confirmed", "confirm": return 0
+        case "unchanged", "reject": return 1
+        case "unknown": return 2
+        default: return nil
+        }
+    }
+
+    private static func setHardwareOutcome(slot: Int, outcome: UInt32) -> Int32 {
+        let client = ADKConfigClient()
+        do {
+            try client.setHardwareOutcome(slot: slot, outcome: outcome)
+            print("PASS slot \(slot): next lab hardware outcome is \(outcome)")
+            return 0
+        } catch {
+            print("FAIL slot \(slot) scripted hardware outcome: \(error.localizedDescription)")
+            return 1
         }
     }
 
@@ -463,6 +493,7 @@ enum ADKLiveCommands {
         print("  ADKLabCLI adk rate <slot 0...3> <44100|48000>")
         print("  ADKLabCLI adk hal-rate <slot 0...3> <44100|48000>")
         print("  ADKLabCLI adk config <slot> <44100|48000> <none|adat|spdif> <none|adat|spdif>")
+        print("  ADKLabCLI adk outcome <slot 0...3> <confirmed|unchanged|unknown>")
         print("  ADKLabCLI adk smoke")
     }
 }

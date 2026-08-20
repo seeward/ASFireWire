@@ -38,6 +38,13 @@ constexpr uint32_t kLabDiagSelectorRequestSampleRate = 1;
 constexpr uint32_t kLabDiagSelectorCopyConfigLog = 2;
 constexpr uint32_t kLabDiagSelectorCopyConfigState = 3;
 constexpr uint32_t kLabDiagSelectorRequestConfiguration = 4;
+constexpr uint32_t kLabDiagSelectorSetHardwareOutcome = 5;
+
+enum class ADKConfigHardwareOutcome : uint32_t {
+    ConfirmRequested = 0,
+    Unchanged = 1,
+    Unknown = 2,
+};
 
 enum class ADKConfigPhase : uint32_t {
     HostRequest = 1,
@@ -60,6 +67,14 @@ enum class ADKConfigPhase : uint32_t {
     DeviceRateMutation = 18,
     OutputStreamMutation = 19,
     InputStreamMutation = 20,
+    CandidateAccepted = 21,
+    CandidateRejected = 22,
+    HardwareApply = 23,
+    HardwareCompleted = 24,
+    HardwareUnchanged = 25,
+    HardwareUnknown = 26,
+    ProjectionCommitted = 27,
+    CoordinatorRejected = 28,
 };
 
 struct ADKConfigLogHeader final {

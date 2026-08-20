@@ -26,6 +26,8 @@ void RunSaffireTopologyTests(TestContext& ctx);
 void RunVirtualDeviceRuntimeTests(TestContext& ctx);
 void RunLabEventLogTests(TestContext& ctx);
 void RunProjectionTests(TestContext& ctx);
+void RunDeviceConfigurationStateMachineTests(TestContext& ctx);
+void RunLabConfigurationCoordinatorTests(TestContext& ctx);
 
 } // namespace ASFW::LabTests
 
@@ -56,6 +58,8 @@ int main() {
     RunVirtualDeviceRuntimeTests(ctx);
     RunLabEventLogTests(ctx);
     RunProjectionTests(ctx);
+    RunDeviceConfigurationStateMachineTests(ctx);
+    RunLabConfigurationCoordinatorTests(ctx);
 
     std::printf("%d checks, %d failures\n", ctx.checks, ctx.failures);
     return ctx.failures == 0 ? 0 : 1;

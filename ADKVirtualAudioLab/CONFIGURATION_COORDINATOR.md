@@ -165,6 +165,12 @@ struct Idle final {
     CommittedHandle committed{};
     std::optional<ConfigurationFailure> lastFailure{};
 };
+struct AwaitingCandidate final {
+    ConfigurationIdentity identity{};
+    ConfigurationOrigin origin{ConfigurationOrigin::kControlClient};
+    DeviceConfiguration requested{};
+    CommittedHandle prior{};
+};
 struct AwaitingADKPerform final {
     TransitionContext transition{};
     PendingWork work{};
@@ -190,6 +196,7 @@ struct Unavailable final {
 using DeviceConfigurationState = std::variant<
     Uninitialized,
     Idle,
+    AwaitingCandidate,
     AwaitingADKPerform,
     AwaitingHardware,
     AwaitingADKProjection,
@@ -214,7 +221,8 @@ using ConfigurationEvent = std::variant<
     ControlIntent,
     CoreAudioRateIntent,
     HardwareObserved,
-    CandidateResolved,
+    CandidateAccepted,
+    CandidateRejected,
     ADKPerformGranted,
     HardwareCompleted,
     ProjectionFinished,
@@ -569,6 +577,7 @@ Each transition emits bounded control-plane events:
 enum class ConfigurationPhase : uint8_t {
     kUninitialized,
     kIdle,
+    kAwaitingCandidate,
     kAwaitingADKPerform,
     kAwaitingHardware,
     kAwaitingADKProjection,
@@ -678,11 +687,24 @@ mutate rate or geometry outside the coordinator.
 Add dependency-free configuration types, the reducer/state machine, fake
 ports, and exhaustive tests. Do not alter the current live dext path yet.
 
-### Stage B — Lab ADK adapter
+### Stage B — Lab ADK adapter — implemented
 
-Replace the lab's ad hoc `currentConfiguration`, `pendingConfiguration`, and
-`pendingAction` ownership with the coordinator. Preserve the event ring and
-CLI, then add fault injection and all three request origins.
+`LabConfigurationCoordinator` now owns the lab's transaction identity,
+pending state, committed revision, and one-shot scripted hardware outcome.
+`VirtualAudioDevice` is the ADK adapter: control-client requests wait for
+`PerformDeviceConfigurationChange`, while Core Audio's rate callback follows
+the external-origin path. The old `currentConfiguration`,
+`pendingConfiguration`, and `pendingAction` fields remain only refreshed
+diagnostic/projection snapshots.
+
+The existing event ring and CLI remain the observation surface. `adk outcome
+<slot> <confirmed|unchanged|unknown>` scripts the next fake hardware outcome;
+`unchanged` tests a known rejection and `unknown` deliberately enters the
+recovery/unavailable branch. This is lab fault injection only—there is still
+no FireWire control or streaming work here. The live ingress paths are the
+diagnostic control client and Core Audio's rate callback; a hardware-observed
+ingress waits for a later lab event source rather than being faked as an
+outcome of either path.
 
 ### Stage C — Production core coordinator
 

@@ -12,6 +12,7 @@
 #define ADK_CONFIG_LOG(fmt, ...) os_log(OS_LOG_DEFAULT, "[ADKConfig] " fmt, ##__VA_ARGS__)
 #include "../Core/VirtualAudioDeviceController.hpp"
 #include "../Lab/ADKConfigChange.hpp"
+#include "../Lab/LabConfigurationCoordinator.hpp"
 #include "../Lab/PacketDumpBlob.hpp"
 #include "../Lab/StickyCounterSink.hpp"
 #include "../Lab/VerifyingSlotProvider.hpp"
@@ -131,6 +132,18 @@ bool DecodeOpticalMode(uint32_t raw,
     return false;
 }
 
+bool DecodeLabConfiguration(
+    const LabDeviceConfiguration& configuration,
+    ASFW::Device::DeviceConfiguration& outConfiguration) noexcept
+{
+    outConfiguration = ASFW::Device::DeviceConfiguration{};
+    outConfiguration.sampleRate = configuration.sampleRate;
+    return DecodeOpticalMode(configuration.opticalInput,
+                             outConfiguration.opticalInput) &&
+           DecodeOpticalMode(configuration.opticalOutput,
+                             outConfiguration.opticalOutput);
+}
+
 LabDeviceConfiguration EncodeLabConfiguration(
     const ASFW::Device::DeviceConfiguration& configuration) noexcept
 {
@@ -151,11 +164,7 @@ bool ResolveLabHALDeviceShape(
     }
 
     ASFW::Device::DeviceConfiguration modelConfiguration{};
-    modelConfiguration.sampleRate = configuration.sampleRate;
-    if (!DecodeOpticalMode(configuration.opticalInput,
-                           modelConfiguration.opticalInput) ||
-        !DecodeOpticalMode(configuration.opticalOutput,
-                           modelConfiguration.opticalOutput)) {
+    if (!DecodeLabConfiguration(configuration, modelConfiguration)) {
         return false;
     }
 
@@ -221,6 +230,10 @@ struct VirtualAudioDevice_IVars
     IOLock* configLock{nullptr};
     uint32_t labSlot{0};
     const ASFW::Runtime::VirtualDeviceDefinition* deviceDefinition{nullptr};
+    ASFW::Lab::LabConfigurationCoordinator* configurationCoordinator{nullptr};
+    // The coordinator is authoritative. These fields are snapshots used by
+    // ADK projection and the diagnostic wire format; they never decide a
+    // transaction on their own.
     LabDeviceConfiguration currentConfiguration{};
     LabDeviceConfiguration pendingConfiguration{};
     LabHALDeviceShape currentShape{};
@@ -337,6 +350,14 @@ static const char* ConfigPhaseName(ASFW::Lab::ADKConfigPhase phase) noexcept
         case ADKConfigPhase::DeviceRateMutation: return "DeviceRateMutation";
         case ADKConfigPhase::OutputStreamMutation: return "OutputStreamMutation";
         case ADKConfigPhase::InputStreamMutation: return "InputStreamMutation";
+        case ADKConfigPhase::CandidateAccepted: return "CandidateAccepted";
+        case ADKConfigPhase::CandidateRejected: return "CandidateRejected";
+        case ADKConfigPhase::HardwareApply: return "HardwareApply";
+        case ADKConfigPhase::HardwareCompleted: return "HardwareCompleted";
+        case ADKConfigPhase::HardwareUnchanged: return "HardwareUnchanged";
+        case ADKConfigPhase::HardwareUnknown: return "HardwareUnknown";
+        case ADKConfigPhase::ProjectionCommitted: return "ProjectionCommitted";
+        case ADKConfigPhase::CoordinatorRejected: return "CoordinatorRejected";
         default: return "Unknown";
     }
 }
@@ -402,6 +423,74 @@ static void RecordConfigEvent(
                    ConfigPhaseName(phase), action,
                    static_cast<uint32_t>(result), oldSampleRate, newSampleRate,
                    oldChannels, newChannels, pending);
+}
+
+// The reducer owns lifecycle/pending state.  Keep the old POD fields as an
+// atomically refreshed view for the diagnostic ABI and ADK projection code.
+// Caller holds configLock.
+static void SynchronizeCoordinatorSnapshotLocked(
+    VirtualAudioDevice_IVars* ivars) noexcept
+{
+    if (ivars == nullptr || ivars->configurationCoordinator == nullptr) {
+        return;
+    }
+    const auto snapshot = ivars->configurationCoordinator->Snapshot();
+    ivars->currentConfiguration = EncodeLabConfiguration(snapshot.committed.configuration);
+    LabHALDeviceShape currentShape{};
+    if (ResolveLabHALDeviceShape(ivars->deviceDefinition,
+                                 ivars->currentConfiguration, currentShape)) {
+        ivars->currentShape = currentShape;
+    }
+
+    ivars->configurationPending = snapshot.pendingIdentity.has_value();
+    ivars->pendingAction = snapshot.pendingIdentity
+        ? snapshot.pendingIdentity->token : 0;
+    ivars->pendingConfiguration = snapshot.pendingConfiguration
+        ? EncodeLabConfiguration(*snapshot.pendingConfiguration)
+        : LabDeviceConfiguration{};
+    ivars->pendingShape = LabHALDeviceShape{};
+    if (snapshot.pendingConfiguration) {
+        (void)ResolveLabHALDeviceShape(ivars->deviceDefinition,
+                                       ivars->pendingConfiguration,
+                                       ivars->pendingShape);
+    }
+}
+
+static kern_return_t CoordinatorErrorToIOReturn(
+    ASFW::Configuration::StateMachineError error) noexcept
+{
+    using ASFW::Configuration::StateMachineError;
+    switch (error) {
+    case StateMachineError::Busy:
+        return kIOReturnBusy;
+    case StateMachineError::InvalidEvent:
+    case StateMachineError::EndpointMismatch:
+    case StateMachineError::GenerationMismatch:
+    case StateMachineError::StaleToken:
+        return kIOReturnBadArgument;
+    }
+    return kIOReturnError;
+}
+
+static bool DispatchCoordinatorLocked(
+    VirtualAudioDevice_IVars* ivars,
+    const ASFW::Configuration::ConfigurationEvent& event,
+    ASFW::Configuration::TransitionResult& outTransition,
+    kern_return_t& outError) noexcept
+{
+    if (ivars == nullptr || ivars->configurationCoordinator == nullptr) {
+        outError = kIOReturnNotReady;
+        return false;
+    }
+    const auto transition = ivars->configurationCoordinator->Dispatch(event);
+    if (!transition) {
+        outError = CoordinatorErrorToIOReturn(transition.error());
+        return false;
+    }
+    outTransition = *transition;
+    SynchronizeCoordinatorSnapshotLocked(ivars);
+    outError = kIOReturnSuccess;
+    return true;
 }
 
 bool VirtualAudioDevice::init(IOUserAudioDriver* in_driver,
@@ -530,6 +619,17 @@ bool VirtualAudioDevice::init(IOUserAudioDriver* in_driver,
     ivars->allocatedShape = halShape;
     ivars->currentSampleRate.store(ivars->currentConfiguration.sampleRate,
                                    std::memory_order_relaxed);
+    ASFW::Device::DeviceConfiguration initialConfiguration{};
+    if (!DecodeLabConfiguration(ivars->currentConfiguration, initialConfiguration)) {
+        LAB_LOG("init - failed to decode initial configuration");
+        return false;
+    }
+    ivars->configurationCoordinator = new ASFW::Lab::LabConfigurationCoordinator(
+        1, 1, initialConfiguration);
+    if (ivars->configurationCoordinator == nullptr) {
+        LAB_LOG("init - failed to allocate configuration coordinator");
+        return false;
+    }
     LAB_LOG("init - HAL model shape: %{public}u input / %{public}u output",
             halShape.inputChannels, halShape.outputChannels);
 
@@ -989,6 +1089,10 @@ void VirtualAudioDevice::free()
         }
         if (ivars->controller) {
             delete ivars->controller;
+        }
+        if (ivars->configurationCoordinator) {
+            delete ivars->configurationCoordinator;
+            ivars->configurationCoordinator = nullptr;
         }
         if (ivars->configLock) {
             IOLockFree(ivars->configLock);
@@ -1608,7 +1712,8 @@ static kern_return_t ApplyExperimentConfiguration(
 
 kern_return_t VirtualAudioDevice::RequestSampleRateChange(uint32_t in_sample_rate)
 {
-    if (ivars == nullptr || ivars->configLock == nullptr) {
+    if (ivars == nullptr || ivars->configLock == nullptr ||
+        ivars->configurationCoordinator == nullptr) {
         return kIOReturnNotReady;
     }
 
@@ -1625,7 +1730,8 @@ kern_return_t VirtualAudioDevice::RequestConfigurationChange(
     uint32_t in_optical_output)
 {
     if (ivars == nullptr || ivars->configLock == nullptr ||
-        ivars->deviceDefinition == nullptr) {
+        ivars->deviceDefinition == nullptr ||
+        ivars->configurationCoordinator == nullptr) {
         return kIOReturnNotReady;
     }
 
@@ -1634,92 +1740,126 @@ kern_return_t VirtualAudioDevice::RequestConfigurationChange(
         .opticalInput = in_optical_input,
         .opticalOutput = in_optical_output,
     };
+    ASFW::Device::DeviceConfiguration requestedModel{};
     LabHALDeviceShape requestedShape{};
-    const bool valid = IsExperimentSampleRate(in_sample_rate) &&
+    const bool valid = DecodeLabConfiguration(requested, requestedModel) &&
         ResolveLabHALDeviceShape(ivars->deviceDefinition, requested,
                                  requestedShape);
 
-    uint64_t action = 0;
     LabDeviceConfiguration current{};
     LabHALDeviceShape currentShape{};
-    bool rejected = false;
-    kern_return_t rejectionResult = kIOReturnSuccess;
+    if (ivars->ioRunning.load(std::memory_order_relaxed)) {
+        return kIOReturnBusy;
+    }
 
     IOLockLock(ivars->configLock);
     current = ivars->currentConfiguration;
     currentShape = ivars->currentShape;
-    if (!valid || requestedShape.inputChannels > ivars->allocatedShape.inputChannels ||
-        requestedShape.outputChannels > ivars->allocatedShape.outputChannels) {
-        rejected = true;
-        rejectionResult = kIOReturnBadArgument;
-    } else if (ivars->configurationPending ||
-               ivars->ioRunning.load(std::memory_order_relaxed)) {
-        rejected = true;
-        rejectionResult = kIOReturnBusy;
-    } else if (requested.sampleRate == current.sampleRate &&
-               requested.opticalInput == current.opticalInput &&
-               requested.opticalOutput == current.opticalOutput) {
-        rejected = true;
-        rejectionResult = kIOReturnSuccess;
-    } else {
-        action = (static_cast<uint64_t>(ivars->labSlot + 1u) << 56) |
-                 (ivars->nextAction++ & 0x00FFFFFFFFFFFFFFull);
-        ivars->pendingAction = action;
-        ivars->pendingConfiguration = requested;
-        ivars->pendingShape = requestedShape;
-        ivars->configurationPending = true;
-        AppendConfigEventLocked(
-            this, ivars, ASFW::Lab::ADKConfigPhase::HostRequest, action,
-            kIOReturnSuccess, current.sampleRate, requested.sampleRate,
-            currentShape.outputChannels, requestedShape.outputChannels);
-    }
     IOLockUnlock(ivars->configLock);
 
-    if (rejected) {
+    if (!valid || requestedShape.inputChannels > ivars->allocatedShape.inputChannels ||
+        requestedShape.outputChannels > ivars->allocatedShape.outputChannels) {
         ADK_CONFIG_LOG("slot=%{public}u object=0x%{public}x phase=RequestRejected rate=%{public}u optical_in=%{public}u optical_out=%{public}u result=0x%{public}08x",
                        ivars->labSlot, static_cast<uint32_t>(GetObjectID()),
                        in_sample_rate, in_optical_input, in_optical_output,
-                       static_cast<uint32_t>(rejectionResult));
+                       static_cast<uint32_t>(kIOReturnBadArgument));
         RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::RequestRejected,
-                          0, rejectionResult, current.sampleRate,
+                          0, kIOReturnBadArgument, current.sampleRate,
                           requested.sampleRate, currentShape.outputChannels,
                           requestedShape.outputChannels);
-        return rejectionResult;
+        return kIOReturnBadArgument;
     }
 
-    ADK_CONFIG_LOG("slot=%{public}u object=0x%{public}x phase=HostRequest action=%{public}llu rate=%{public}u->%{public}u shape=%{public}u/%{public}u->%{public}u/%{public}u optical=%{public}u/%{public}u->%{public}u/%{public}u",
-                   ivars->labSlot, static_cast<uint32_t>(GetObjectID()), action,
-                   current.sampleRate, requested.sampleRate,
-                   currentShape.inputChannels, currentShape.outputChannels,
-                   requestedShape.inputChannels, requestedShape.outputChannels,
-                   current.opticalInput, current.opticalOutput,
-                   requested.opticalInput, requested.opticalOutput);
+    ASFW::Configuration::TransitionResult transition{};
+    kern_return_t coordinatorResult = kIOReturnSuccess;
+    IOLockLock(ivars->configLock);
+    const bool accepted = DispatchCoordinatorLocked(
+        ivars, ASFW::Configuration::ConfigurationEvent{
+                   ASFW::Configuration::ControlIntent{
+                       .endpointId = 1,
+                       .routeGeneration = 1,
+                       .requested = requestedModel,
+                   }},
+        transition, coordinatorResult);
+    const uint64_t action = ivars->pendingAction;
+    IOLockUnlock(ivars->configLock);
+    if (!accepted) {
+        RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::CoordinatorRejected,
+                          0, coordinatorResult, current.sampleRate,
+                          requested.sampleRate, currentShape.outputChannels,
+                          requestedShape.outputChannels);
+        return coordinatorResult;
+    }
+
+    if (transition.disposition == ASFW::Configuration::TransitionDisposition::NoOp) {
+        return kIOReturnSuccess;
+    }
+    if (transition.effects.size() != 1 ||
+        !std::holds_alternative<ASFW::Configuration::ResolveCandidateEffect>(
+            transition.effects[0])) {
+        return kIOReturnError;
+    }
+
+    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::HostRequest,
+                      action, kIOReturnSuccess, current.sampleRate,
+                      requested.sampleRate, currentShape.outputChannels,
+                      requestedShape.outputChannels);
+    IOLockLock(ivars->configLock);
+    const bool candidateAccepted = DispatchCoordinatorLocked(
+        ivars, ASFW::Configuration::ConfigurationEvent{
+                   ASFW::Configuration::CandidateAccepted{
+                       .identity = std::get<ASFW::Configuration::ResolveCandidateEffect>(
+                           transition.effects[0]).identity,
+                       .candidate = requestedModel,
+                   }},
+        transition, coordinatorResult);
+    IOLockUnlock(ivars->configLock);
+    if (!candidateAccepted) {
+        RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::CandidateRejected,
+                          action, coordinatorResult, current.sampleRate,
+                          requested.sampleRate, currentShape.outputChannels,
+                          requestedShape.outputChannels);
+        return coordinatorResult;
+    }
+    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::CandidateAccepted,
+                      action, kIOReturnSuccess, current.sampleRate,
+                      requested.sampleRate, currentShape.outputChannels,
+                      requestedShape.outputChannels);
+    if (transition.effects.size() != 1 ||
+        !std::holds_alternative<ASFW::Configuration::RequestADKWindowEffect>(
+            transition.effects[0])) {
+        return kIOReturnError;
+    }
+
     RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::RequestCalled,
                       action, kIOReturnSuccess, current.sampleRate,
                       requested.sampleRate, currentShape.outputChannels,
                       requestedShape.outputChannels);
-    const kern_return_t kr = RequestDeviceConfigurationChange(action, nullptr);
+    const kern_return_t requestResult =
+        RequestDeviceConfigurationChange(action, nullptr);
     RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::RequestReturned,
-                      action, kr, current.sampleRate, requested.sampleRate,
-                      currentShape.outputChannels, requestedShape.outputChannels);
-
-    if (kr != kIOReturnSuccess) {
+                      action, requestResult, current.sampleRate,
+                      requested.sampleRate, currentShape.outputChannels,
+                      requestedShape.outputChannels);
+    if (requestResult != kIOReturnSuccess) {
         IOLockLock(ivars->configLock);
-        if (ivars->configurationPending && ivars->pendingAction == action) {
-            ivars->configurationPending = false;
-            ivars->pendingAction = 0;
-            ivars->pendingConfiguration = LabDeviceConfiguration{};
-            ivars->pendingShape = LabHALDeviceShape{};
-        }
+        (void)DispatchCoordinatorLocked(
+            ivars, ASFW::Configuration::ConfigurationEvent{
+                       ASFW::Configuration::ADKWindowRejected{
+                           .identity = std::get<ASFW::Configuration::RequestADKWindowEffect>(
+                               transition.effects[0]).identity,
+                       }},
+            transition, coordinatorResult);
         IOLockUnlock(ivars->configLock);
     }
-    return kr;
+    return requestResult;
 }
 
 kern_return_t VirtualAudioDevice::PerformDeviceConfigurationChange(
     uint64_t change_action, OSObject* in_change_info)
 {
-    if (ivars == nullptr || ivars->configLock == nullptr) {
+    if (ivars == nullptr || ivars->configLock == nullptr ||
+        ivars->configurationCoordinator == nullptr) {
         return super::PerformDeviceConfigurationChange(change_action, in_change_info);
     }
 
@@ -1755,40 +1895,119 @@ kern_return_t VirtualAudioDevice::PerformDeviceConfigurationChange(
                       change_action, kIOReturnSuccess, current.sampleRate,
                       requested.sampleRate, currentShape.outputChannels,
                       requestedShape.outputChannels);
-    const kern_return_t mutation = ApplyExperimentConfiguration(
-        this, ivars, requested, requestedShape, change_action);
-    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::PerformMutation,
-                      change_action, mutation, current.sampleRate,
+
+    ASFW::Configuration::TransitionResult transition{};
+    kern_return_t coordinatorResult = kIOReturnSuccess;
+    IOLockLock(ivars->configLock);
+    const bool granted = DispatchCoordinatorLocked(
+        ivars, ASFW::Configuration::ConfigurationEvent{
+                   ASFW::Configuration::ADKPerformGranted{
+                       .identity = ASFW::Configuration::ConfigurationIdentity{
+                           .endpointId = 1,
+                           .token = change_action,
+                           .routeGeneration = 1,
+                       },
+                   }},
+        transition, coordinatorResult);
+    IOLockUnlock(ivars->configLock);
+    if (!granted || transition.effects.size() != 1 ||
+        !std::holds_alternative<ASFW::Configuration::ApplyHardwareEffect>(
+            transition.effects[0])) {
+        const kern_return_t superResult =
+            super::PerformDeviceConfigurationChange(change_action, in_change_info);
+        return granted ? superResult : coordinatorResult;
+    }
+
+    const auto apply = std::get<ASFW::Configuration::ApplyHardwareEffect>(
+        transition.effects[0]);
+    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::HardwareApply,
+                      change_action, kIOReturnSuccess, current.sampleRate,
                       requested.sampleRate, currentShape.outputChannels,
                       requestedShape.outputChannels);
+    IOLockLock(ivars->configLock);
+    const auto outcome = ivars->configurationCoordinator->CompleteHardware(apply);
+    const auto outcomeKind = ASFW::Configuration::HardwareKind(outcome);
+    const bool completed = DispatchCoordinatorLocked(
+        ivars, ASFW::Configuration::ConfigurationEvent{
+                   ASFW::Configuration::HardwareCompleted{
+                       .identity = apply.transition.identity,
+                       .outcome = outcome,
+                   }},
+        transition, coordinatorResult);
+    IOLockUnlock(ivars->configLock);
+    const auto outcomePhase = outcomeKind == ASFW::Configuration::HardwareOutcomeKind::Unchanged
+        ? ASFW::Lab::ADKConfigPhase::HardwareUnchanged
+        : outcomeKind == ASFW::Configuration::HardwareOutcomeKind::Unknown
+            ? ASFW::Lab::ADKConfigPhase::HardwareUnknown
+            : ASFW::Lab::ADKConfigPhase::HardwareCompleted;
+    RecordConfigEvent(this, ivars, outcomePhase, change_action,
+                      completed ? kIOReturnSuccess : coordinatorResult,
+                      current.sampleRate, requested.sampleRate,
+                      currentShape.outputChannels, requestedShape.outputChannels);
 
+    kern_return_t mutation = kIOReturnSuccess;
+    if (!completed || transition.effects.size() != 1 ||
+        !std::holds_alternative<ASFW::Configuration::ProjectADKEffect>(
+            transition.effects[0])) {
+        const kern_return_t superResult =
+            super::PerformDeviceConfigurationChange(change_action, in_change_info);
+        RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::PerformSuper,
+                          change_action, superResult, current.sampleRate,
+                          requested.sampleRate, currentShape.outputChannels,
+                          requestedShape.outputChannels);
+        const kern_return_t result = completed ? superResult : coordinatorResult;
+        RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::PerformReturn,
+                          change_action, result, current.sampleRate,
+                          ivars->currentSampleRate.load(std::memory_order_relaxed),
+                          currentShape.outputChannels, requestedShape.outputChannels);
+        return result;
+    }
+
+    const auto project = std::get<ASFW::Configuration::ProjectADKEffect>(
+        transition.effects[0]);
+    const LabDeviceConfiguration confirmed =
+        EncodeLabConfiguration(project.plan.confirmed.configuration);
+    LabHALDeviceShape confirmedShape{};
+    const bool resolved = ResolveLabHALDeviceShape(ivars->deviceDefinition,
+                                                    confirmed, confirmedShape);
+    mutation = resolved ? ApplyExperimentConfiguration(this, ivars, confirmed,
+                                                        confirmedShape, change_action)
+                        : kIOReturnBadArgument;
+    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::PerformMutation,
+                      change_action, mutation, current.sampleRate,
+                      confirmed.sampleRate, currentShape.outputChannels,
+                      confirmedShape.outputChannels);
     const kern_return_t superResult =
         super::PerformDeviceConfigurationChange(change_action, in_change_info);
     RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::PerformSuper,
                       change_action, superResult, current.sampleRate,
-                      requested.sampleRate, currentShape.outputChannels,
-                      requestedShape.outputChannels);
-    const kern_return_t result =
-        (mutation != kIOReturnSuccess) ? mutation : superResult;
+                      confirmed.sampleRate, currentShape.outputChannels,
+                      confirmedShape.outputChannels);
 
     IOLockLock(ivars->configLock);
-    if (ivars->configurationPending && ivars->pendingAction == change_action) {
-        if (mutation == kIOReturnSuccess) {
-            ivars->currentConfiguration = requested;
-            ivars->currentShape = requestedShape;
-        }
-        ivars->configurationPending = false;
-        ivars->pendingAction = 0;
-        ivars->pendingConfiguration = LabDeviceConfiguration{};
-        ivars->pendingShape = LabHALDeviceShape{};
-    }
+    const bool projected = DispatchCoordinatorLocked(
+        ivars, ASFW::Configuration::ConfigurationEvent{
+                   ASFW::Configuration::ProjectionFinished{
+                       .identity = project.plan.identity,
+                       .customProjectionSucceeded = mutation == kIOReturnSuccess,
+                       .superclassSucceeded = superResult == kIOReturnSuccess,
+                   }},
+        transition, coordinatorResult);
     IOLockUnlock(ivars->configLock);
-
+    const kern_return_t result = mutation != kIOReturnSuccess ? mutation
+        : superResult != kIOReturnSuccess ? superResult
+        : projected ? kIOReturnSuccess : coordinatorResult;
+    RecordConfigEvent(this, ivars,
+                      result == kIOReturnSuccess
+                          ? ASFW::Lab::ADKConfigPhase::ProjectionCommitted
+                          : ASFW::Lab::ADKConfigPhase::CoordinatorRejected,
+                      change_action, result, current.sampleRate,
+                      ivars->currentSampleRate.load(std::memory_order_relaxed),
+                      currentShape.outputChannels, confirmedShape.outputChannels);
     RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::PerformReturn,
                       change_action, result, current.sampleRate,
                       ivars->currentSampleRate.load(std::memory_order_relaxed),
-                      currentShape.outputChannels,
-                      requestedShape.outputChannels);
+                      currentShape.outputChannels, confirmedShape.outputChannels);
     return result;
 }
 
@@ -1803,7 +2022,10 @@ kern_return_t VirtualAudioDevice::AbortDeviceConfigurationChange(
     LabDeviceConfiguration requested{};
     LabHALDeviceShape currentShape{};
     LabHALDeviceShape requestedShape{};
+    bool ownsAction = false;
     IOLockLock(ivars->configLock);
+    ownsAction = ivars->configurationPending &&
+                 ivars->pendingAction == change_action;
     current = ivars->currentConfiguration;
     requested = ivars->pendingConfiguration;
     currentShape = ivars->currentShape;
@@ -1820,14 +2042,22 @@ kern_return_t VirtualAudioDevice::AbortDeviceConfigurationChange(
                       requested.sampleRate, currentShape.outputChannels,
                       requestedShape.outputChannels);
 
-    IOLockLock(ivars->configLock);
-    if (ivars->configurationPending && ivars->pendingAction == change_action) {
-        ivars->configurationPending = false;
-        ivars->pendingAction = 0;
-        ivars->pendingConfiguration = LabDeviceConfiguration{};
-        ivars->pendingShape = LabHALDeviceShape{};
+    if (ownsAction && ivars->configurationCoordinator != nullptr) {
+        ASFW::Configuration::TransitionResult transition{};
+        kern_return_t coordinatorResult = kIOReturnSuccess;
+        IOLockLock(ivars->configLock);
+        (void)DispatchCoordinatorLocked(
+            ivars, ASFW::Configuration::ConfigurationEvent{
+                       ASFW::Configuration::ADKAborted{
+                           .identity = ASFW::Configuration::ConfigurationIdentity{
+                               .endpointId = 1,
+                               .token = change_action,
+                               .routeGeneration = 1,
+                           },
+                       }},
+            transition, coordinatorResult);
+        IOLockUnlock(ivars->configLock);
     }
-    IOLockUnlock(ivars->configLock);
 
     RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::AbortReturn,
                       change_action, superResult, current.sampleRate,
@@ -1839,7 +2069,8 @@ kern_return_t VirtualAudioDevice::AbortDeviceConfigurationChange(
 kern_return_t VirtualAudioDevice::HandleChangeSampleRate(double in_sample_rate)
 {
     if (ivars == nullptr || ivars->configLock == nullptr ||
-        ivars->deviceDefinition == nullptr) {
+        ivars->deviceDefinition == nullptr ||
+        ivars->configurationCoordinator == nullptr) {
         return kIOReturnNotReady;
     }
 
@@ -1853,7 +2084,8 @@ kern_return_t VirtualAudioDevice::HandleChangeSampleRate(double in_sample_rate)
     IOLockUnlock(ivars->configLock);
     requested = current;
     requested.sampleRate = static_cast<uint32_t>(in_sample_rate);
-    const bool valid = IsExperimentSampleRate(requested.sampleRate) &&
+    ASFW::Device::DeviceConfiguration requestedModel{};
+    const bool valid = DecodeLabConfiguration(requested, requestedModel) &&
         ResolveLabHALDeviceShape(ivars->deviceDefinition, requested,
                                  requestedShape);
 
@@ -1862,21 +2094,157 @@ kern_return_t VirtualAudioDevice::HandleChangeSampleRate(double in_sample_rate)
                       0, valid ? kIOReturnSuccess : kIOReturnBadArgument,
                       current.sampleRate, requested.sampleRate,
                       currentShape.outputChannels, requestedShape.outputChannels);
-    const kern_return_t kr = valid
-        ? ApplyExperimentConfiguration(this, ivars, requested, requestedShape, 0)
-        : kIOReturnBadArgument;
-    if (kr == kIOReturnSuccess) {
-        IOLockLock(ivars->configLock);
-        ivars->currentConfiguration = requested;
-        ivars->currentShape = requestedShape;
-        IOLockUnlock(ivars->configLock);
+    if (!valid) {
+        RecordConfigEvent(this, ivars,
+                          ASFW::Lab::ADKConfigPhase::HandleSampleRateReturn,
+                          0, kIOReturnBadArgument, current.sampleRate,
+                          current.sampleRate, currentShape.outputChannels,
+                          currentShape.outputChannels);
+        return kIOReturnBadArgument;
     }
+
+    ASFW::Configuration::TransitionResult transition{};
+    kern_return_t coordinatorResult = kIOReturnSuccess;
+    IOLockLock(ivars->configLock);
+    const bool started = DispatchCoordinatorLocked(
+        ivars, ASFW::Configuration::ConfigurationEvent{
+                   ASFW::Configuration::CoreAudioRateIntent{
+                       .endpointId = 1,
+                       .routeGeneration = 1,
+                       .sampleRate = requestedModel.sampleRate,
+                   }},
+        transition, coordinatorResult);
+    IOLockUnlock(ivars->configLock);
+    if (!started) {
+        return coordinatorResult;
+    }
+    if (transition.disposition == ASFW::Configuration::TransitionDisposition::NoOp) {
+        return kIOReturnSuccess;
+    }
+    if (transition.effects.size() != 1 ||
+        !std::holds_alternative<ASFW::Configuration::ResolveCandidateEffect>(
+            transition.effects[0])) {
+        return kIOReturnError;
+    }
+
+    const auto resolve = std::get<ASFW::Configuration::ResolveCandidateEffect>(
+        transition.effects[0]);
+    IOLockLock(ivars->configLock);
+    const bool candidateAccepted = DispatchCoordinatorLocked(
+        ivars, ASFW::Configuration::ConfigurationEvent{
+                   ASFW::Configuration::CandidateAccepted{
+                       .identity = resolve.identity,
+                       .candidate = requestedModel,
+                   }},
+        transition, coordinatorResult);
+    IOLockUnlock(ivars->configLock);
+    if (!candidateAccepted || transition.effects.size() != 1 ||
+        !std::holds_alternative<ASFW::Configuration::ApplyHardwareEffect>(
+            transition.effects[0])) {
+        return candidateAccepted ? kIOReturnError : coordinatorResult;
+    }
+    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::CandidateAccepted,
+                      resolve.identity.token, kIOReturnSuccess, current.sampleRate,
+                      requested.sampleRate, currentShape.outputChannels,
+                      requestedShape.outputChannels);
+
+    const auto apply = std::get<ASFW::Configuration::ApplyHardwareEffect>(
+        transition.effects[0]);
+    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::HardwareApply,
+                      apply.transition.identity.token, kIOReturnSuccess,
+                      current.sampleRate, requested.sampleRate,
+                      currentShape.outputChannels, requestedShape.outputChannels);
+    IOLockLock(ivars->configLock);
+    const auto outcome = ivars->configurationCoordinator->CompleteHardware(apply);
+    const auto outcomeKind = ASFW::Configuration::HardwareKind(outcome);
+    const bool completed = DispatchCoordinatorLocked(
+        ivars, ASFW::Configuration::ConfigurationEvent{
+                   ASFW::Configuration::HardwareCompleted{
+                       .identity = apply.transition.identity,
+                       .outcome = outcome,
+                   }},
+        transition, coordinatorResult);
+    IOLockUnlock(ivars->configLock);
+    const auto outcomePhase = outcomeKind == ASFW::Configuration::HardwareOutcomeKind::Unchanged
+        ? ASFW::Lab::ADKConfigPhase::HardwareUnchanged
+        : outcomeKind == ASFW::Configuration::HardwareOutcomeKind::Unknown
+            ? ASFW::Lab::ADKConfigPhase::HardwareUnknown
+            : ASFW::Lab::ADKConfigPhase::HardwareCompleted;
+    RecordConfigEvent(this, ivars, outcomePhase, apply.transition.identity.token,
+                      completed ? kIOReturnSuccess : coordinatorResult,
+                      current.sampleRate, requested.sampleRate,
+                      currentShape.outputChannels, requestedShape.outputChannels);
+    if (!completed || transition.effects.size() != 1 ||
+        !std::holds_alternative<ASFW::Configuration::ProjectADKEffect>(
+            transition.effects[0])) {
+        return completed ? kIOReturnError : coordinatorResult;
+    }
+
+    const auto project = std::get<ASFW::Configuration::ProjectADKEffect>(
+        transition.effects[0]);
+    const LabDeviceConfiguration confirmed =
+        EncodeLabConfiguration(project.plan.confirmed.configuration);
+    LabHALDeviceShape confirmedShape{};
+    const kern_return_t kr = ResolveLabHALDeviceShape(ivars->deviceDefinition,
+                                                        confirmed, confirmedShape)
+        ? ApplyExperimentConfiguration(this, ivars, confirmed, confirmedShape,
+                                       project.plan.identity.token)
+        : kIOReturnBadArgument;
+    IOLockLock(ivars->configLock);
+    const bool projected = DispatchCoordinatorLocked(
+        ivars, ASFW::Configuration::ConfigurationEvent{
+                   ASFW::Configuration::ProjectionFinished{
+                       .identity = project.plan.identity,
+                       .customProjectionSucceeded = kr == kIOReturnSuccess,
+                       // HandleChangeSampleRate is itself the ADK callback;
+                       // unlike Perform there is no separate superclass step.
+                       .superclassSucceeded = true,
+                   }},
+        transition, coordinatorResult);
+    IOLockUnlock(ivars->configLock);
+    const kern_return_t result = kr != kIOReturnSuccess ? kr
+        : projected ? kIOReturnSuccess : coordinatorResult;
+    RecordConfigEvent(this, ivars,
+                      result == kIOReturnSuccess
+                          ? ASFW::Lab::ADKConfigPhase::ProjectionCommitted
+                          : ASFW::Lab::ADKConfigPhase::CoordinatorRejected,
+                      project.plan.identity.token, result, current.sampleRate,
+                      ivars->currentSampleRate.load(std::memory_order_relaxed),
+                      currentShape.outputChannels, confirmedShape.outputChannels);
     RecordConfigEvent(this, ivars,
                       ASFW::Lab::ADKConfigPhase::HandleSampleRateReturn,
-                      0, kr, current.sampleRate,
+                      0, result, current.sampleRate,
                       ivars->currentSampleRate.load(std::memory_order_relaxed),
-                      currentShape.outputChannels, requestedShape.outputChannels);
-    return kr;
+                      currentShape.outputChannels, confirmedShape.outputChannels);
+    return result;
+}
+
+kern_return_t VirtualAudioDevice::SetScriptedHardwareOutcome(uint32_t in_outcome)
+{
+    if (ivars == nullptr || ivars->configLock == nullptr ||
+        ivars->configurationCoordinator == nullptr) {
+        return kIOReturnNotReady;
+    }
+    ASFW::Lab::ScriptedHardwareOutcome outcome{};
+    switch (static_cast<ASFW::Lab::ADKConfigHardwareOutcome>(in_outcome)) {
+    case ASFW::Lab::ADKConfigHardwareOutcome::ConfirmRequested:
+        outcome = ASFW::Lab::ScriptedHardwareOutcome::ConfirmRequested;
+        break;
+    case ASFW::Lab::ADKConfigHardwareOutcome::Unchanged:
+        outcome = ASFW::Lab::ScriptedHardwareOutcome::Unchanged;
+        break;
+    case ASFW::Lab::ADKConfigHardwareOutcome::Unknown:
+        outcome = ASFW::Lab::ScriptedHardwareOutcome::Unknown;
+        break;
+    default:
+        return kIOReturnBadArgument;
+    }
+    IOLockLock(ivars->configLock);
+    ivars->configurationCoordinator->SetNextHardwareOutcome(outcome);
+    IOLockUnlock(ivars->configLock);
+    ADK_CONFIG_LOG("slot=%{public}u object=0x%{public}x scripted_hardware_outcome=%{public}u",
+                   ivars->labSlot, static_cast<uint32_t>(GetObjectID()), in_outcome);
+    return kIOReturnSuccess;
 }
 
 kern_return_t VirtualAudioDevice::CopyADKConfigState(OSData** out_data)
