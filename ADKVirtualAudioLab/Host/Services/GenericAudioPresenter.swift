@@ -12,43 +12,83 @@ enum GenericAudioPresenter {
             for ch in snapshot.channels {
                 let chPorts = Set(ch.portIds)
 
-                // 1. Sends (Crosspoints originating from this channel)
+                // 1. Sends. A crosspoint says the contribution exists; the
+                // *level* may sit on the crosspoint or on the mixer input port
+                // (AUAA 13.1), and a boolean on the crosspoint is a send
+                // enable, not a level. Sends are grouped by the parameter that
+                // carries the gain, so one input gain feeding two mixer buses
+                // is one fader with two enables rather than two dead faders.
                 var mainSend: SendControlModel? = nil
                 var auxSends: [SendControlModel] = []
+                var sendEnables: [SendEnableModel] = []
+                var sendsByLevelParam: [UInt32: Int] = [:]   // parameterId -> index in collected
+                var collected: [SendControlModel] = []
 
                 for mixer in snapshot.mixers {
-                    for cp in mixer.crosspoints {
-                        if chPorts.contains(cp.inputPortId) {
-                            // Destination bus
-                            let destBus = snapshot.buses.first { Set($0.portIds).contains(cp.outputPortId) }
-                            let busName = destBus?.name ?? snapshot.portName(for: cp.outputPortId)
-                            let busSemantic = destBus?.semantic ?? ASFW_BUS_SEMANTIC_UNKNOWN
+                    for cp in mixer.crosspoints where chPorts.contains(cp.inputPortId) {
+                        let destBus = snapshot.buses.first { Set($0.portIds).contains(cp.outputPortId) }
+                        let busName = destBus?.name ?? snapshot.portName(for: cp.outputPortId)
+                        let busSemantic = destBus?.semantic ?? ASFW_BUS_SEMANTIC_UNKNOWN
 
-                            if let param = snapshot.parameter(forTargetCrosspoint: cp.id) {
-                                let hint = snapshot.presentation.parameterHint(for: param.id)
-                                let pres = (hint?.presentation != nil && hint!.presentation != ASFW_CONTROL_AUTO)
-                                    ? hint!.presentation
-                                    : (busSemantic == ASFW_BUS_SEMANTIC_AUX ? ASFW_CONTROL_ROTARY : ASFW_CONTROL_FADER)
+                        let crosspointParam = snapshot.parameter(forTargetCrosspoint: cp.id)
 
-                                let sendModel = SendControlModel(
-                                    crosspointId: cp.id,
-                                    busName: busName,
-                                    busSemantic: busSemantic,
-                                    parameter: param,
-                                    presentation: pres
-                                )
-
-                                if pres == ASFW_CONTROL_FADER || busSemantic == ASFW_BUS_SEMANTIC_MAIN {
-                                    if mainSend == nil {
-                                        mainSend = sendModel
-                                    } else {
-                                        auxSends.append(sendModel)
-                                    }
-                                } else {
-                                    auxSends.append(sendModel)
-                                }
-                            }
+                        if let param = crosspointParam, param.kind == ASFW_PARAM_KIND_BOOLEAN {
+                            sendEnables.append(SendEnableModel(
+                                id: cp.id,
+                                busName: busName,
+                                parameter: param
+                            ))
                         }
+
+                        // The gain: on the crosspoint when the hardware puts it
+                        // there, otherwise on the mixer input port this
+                        // crosspoint reads from.
+                        let levelParam: ParameterModel? = {
+                            if let param = crosspointParam, param.kind != ASFW_PARAM_KIND_BOOLEAN { return param }
+                            return snapshot.parameters(forTargetPort: cp.inputPortId)
+                                .first { $0.semantic == ASFW_SEMANTIC_LEVEL }
+                        }()
+                        guard let level = levelParam else { continue }
+
+                        if let existing = sendsByLevelParam[level.id] {
+                            // Same gain, another destination: widen the label
+                            // rather than emitting a duplicate control.
+                            let previous = collected[existing]
+                            if !previous.busName.contains(busName) {
+                                collected[existing] = SendControlModel(
+                                    crosspointId: previous.crosspointId,
+                                    busName: "\(previous.busName) + \(busName)",
+                                    busSemantic: previous.busSemantic,
+                                    parameter: previous.parameter,
+                                    presentation: previous.presentation
+                                )
+                            }
+                            continue
+                        }
+
+                        let hint = snapshot.presentation.parameterHint(for: level.id)
+                        let pres = (hint?.presentation != nil && hint!.presentation != ASFW_CONTROL_AUTO)
+                            ? hint!.presentation
+                            : (busSemantic == ASFW_BUS_SEMANTIC_AUX ? ASFW_CONTROL_ROTARY : ASFW_CONTROL_FADER)
+
+                        sendsByLevelParam[level.id] = collected.count
+                        collected.append(SendControlModel(
+                            crosspointId: cp.id,
+                            busName: busName,
+                            busSemantic: busSemantic,
+                            parameter: level,
+                            presentation: pres
+                        ))
+                    }
+                }
+
+                for send in collected {
+                    let wantsFader = send.presentation == ASFW_CONTROL_FADER
+                        || send.busSemantic == ASFW_BUS_SEMANTIC_MAIN
+                    if wantsFader && mainSend == nil {
+                        mainSend = send
+                    } else {
+                        auxSends.append(send)
                     }
                 }
 
@@ -64,7 +104,7 @@ enum GenericAudioPresenter {
                 for pId in ch.portIds {
                     for p in snapshot.parameters(forTargetPort: pId) {
                         switch p.semantic {
-                        case ASFW_SEMANTIC_PAN:
+                        case ASFW_SEMANTIC_PAN, ASFW_SEMANTIC_BALANCE:
                             panParam = p
                         case ASFW_SEMANTIC_MUTE:
                             muteParam = p
@@ -77,7 +117,7 @@ enum GenericAudioPresenter {
                         case ASFW_SEMANTIC_NOMINAL_LEVEL:
                             nominalParam = p
                         case ASFW_SEMANTIC_LEVEL:
-                            if mainSend == nil {
+                            if mainSend == nil && sendsByLevelParam[p.id] == nil {
                                 preampLevelParam = p
                             }
                         default:
@@ -112,6 +152,7 @@ enum GenericAudioPresenter {
                     name: ch.name,
                     mainSend: mainSend,
                     auxSends: auxSends,
+                    sendEnables: sendEnables,
                     pan: panParam,
                     mute: muteParam,
                     solo: soloParam,

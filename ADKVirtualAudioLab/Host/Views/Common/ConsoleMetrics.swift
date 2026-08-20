@@ -33,6 +33,7 @@ enum ConsoleMetrics {
     static let rowPreamp: CGFloat = 20
     static let rowKnob: CGFloat = 64
     static let rowToggles: CGFloat = 22
+    static let rowSendEnables: CGFloat = 20
     static let rowFader: CGFloat = 180
     static let rowReadout: CGFloat = 16
 
@@ -53,6 +54,7 @@ struct ConsoleRowPlan {
     var auxCount = 0
     var hasPan = false
     var hasToggles = false
+    var sendEnableCount = 0
 
     var auxHeight: CGFloat {
         guard auxCount > 0 else { return 0 }
@@ -72,6 +74,7 @@ struct ConsoleRowPlan {
             if channel.pan != nil { plan.hasPan = true }
             if channel.mute != nil || channel.solo != nil { plan.hasToggles = true }
             plan.auxCount = max(plan.auxCount, channel.auxSends.count)
+            plan.sendEnableCount = max(plan.sendEnableCount, channel.sendEnables.count)
         }
 
         for master in masters where master.mute != nil || master.dim != nil {

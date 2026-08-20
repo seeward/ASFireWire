@@ -71,12 +71,24 @@ struct SendControlModel: Identifiable {
     let presentation: ASFWControlPresentation
 }
 
+/// A crosspoint that can be switched in or out of a mixer bus. Distinct from a
+/// send *level*: on hardware that places gain on the mixer input port, one gain
+/// can feed several buses and each has its own enable.
+struct SendEnableModel: Identifiable {
+    let id: UInt32          // crosspointId
+    let busName: String
+    let parameter: ParameterModel
+    /// The wire bit means "disabled", so the UI shows the inverse.
+    var isEnabled: Bool { !parameter.boolValue }
+}
+
 struct ChannelStripModel: Identifiable {
     var id: UInt32 { channelId }
     let channelId: UInt32
     let name: String
     let mainSend: SendControlModel?
     let auxSends: [SendControlModel]
+    let sendEnables: [SendEnableModel]
     let pan: ParameterModel?
     let mute: ParameterModel?
     let solo: ParameterModel?

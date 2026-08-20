@@ -72,6 +72,12 @@ func dumpDeviceSnapshot(_ snap: LabDeviceSnapshot) {
                     print("  │   ├── Aux Send [\(aux.presentation == ASFW_CONTROL_ROTARY ? "Rotary" : "Fader")]: '\(aux.busName)' = \(String(format: "%.1f %@", aux.parameter.scalarValue, aux.parameter.unit)) (Param #\(aux.parameter.id))")
                 }
             }
+            if !s.sendEnables.isEmpty {
+                let text = s.sendEnables
+                    .map { "\($0.busName)=\($0.isEnabled ? "\(Ansi.green)on\(Ansi.reset)" : "off")" }
+                    .joined(separator: ", ")
+                print("  │   ├── Send Enables [Toggles]: \(text)")
+            }
             if let pan = s.pan {
                 print("  │   ├── Pan [Rotary]: \(String(format: "%.0f %@", pan.scalarValue, pan.unit)) (Param #\(pan.id))")
             }

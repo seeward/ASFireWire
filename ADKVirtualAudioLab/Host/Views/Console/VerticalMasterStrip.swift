@@ -18,6 +18,9 @@ struct VerticalMasterStrip: View {
             if plan.hasPreamp {
                 Color.clear.frame(height: ConsoleMetrics.rowPreamp)
             }
+            if plan.sendEnableCount > 0 {
+                Color.clear.frame(height: ConsoleMetrics.rowSendEnables)
+            }
             if plan.auxCount > 0 {
                 Color.clear.frame(height: plan.auxHeight)
             }

@@ -16,6 +16,9 @@ struct VerticalChannelStrip: View {
             if plan.hasPreamp {
                 preampRow.frame(height: ConsoleMetrics.rowPreamp)
             }
+            if plan.sendEnableCount > 0 {
+                sendEnableRow.frame(height: ConsoleMetrics.rowSendEnables)
+            }
             if plan.auxCount > 0 {
                 auxRow.frame(height: plan.auxHeight)
             }
@@ -109,6 +112,30 @@ struct VerticalChannelStrip: View {
                 }
             }
             if strip.phantom == nil && strip.phase == nil {
+                Color.clear
+            }
+        }
+    }
+
+    /// Which mixer buses this channel's gain is switched into. Separate from
+    /// the send level, because hardware that puts gain on the mixer input port
+    /// has one gain and several independent enables.
+    @ViewBuilder
+    private var sendEnableRow: some View {
+        HStack(spacing: ConsoleMetrics.s1) {
+            ForEach(strip.sendEnables) { send in
+                ConsoleToggle(
+                    glyph: shortBusName(send.busName),
+                    label: "\(strip.name) send to \(send.busName)",
+                    isOn: send.isEnabled,
+                    tint: .green,
+                    fontSize: 8
+                ) {
+                    // The wire bit means "disabled", so enabling clears it.
+                    state.setParameterBool(id: send.parameter.id, value: send.isEnabled)
+                }
+            }
+            if strip.sendEnables.isEmpty {
                 Color.clear
             }
         }
@@ -222,6 +249,12 @@ struct VerticalChannelStrip: View {
 
     private var isPlayback: Bool {
         strip.name.contains("DAW") || strip.name.contains("Playback") || strip.name.contains("Return")
+    }
+
+    /// "Mixer 2" -> "2", so the enable fits an 86pt column.
+    private func shortBusName(_ name: String) -> String {
+        let trimmed = name.replacingOccurrences(of: "Mixer ", with: "")
+        return trimmed.count <= 3 ? trimmed : String(trimmed.prefix(3))
     }
 
     private func cleanModeName(_ name: String) -> String {

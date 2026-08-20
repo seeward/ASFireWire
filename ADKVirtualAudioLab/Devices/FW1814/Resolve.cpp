@@ -494,6 +494,24 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
             .name = "Headphone " + std::to_string(i + 1) + " Volume",
         });
     }
+    // The digital outputs have levels too -- `fw vol` carries `adatout` and
+    // `spdifout` blocks over the same -128..0 dB range, and `Adat Out Level` is
+    // one of the rows `fw vol show` prints (documentation/1814.md 6.4).
+    //
+    // NOTE the provenance difference: unlike every other level here, these are
+    // NOT in the 40-quadlet parameter window the ALSA crate models, so how a
+    // driver actually sets them is unresolved. Modelled because the device has
+    // them; the binding is the open part, not the control.
+    for (uint32_t i = 0; i < geometry.digitalOutPairs; ++i) {
+        const char* label = (geometry.digitalOutKind == SignalKind::Adat) ? "ADAT Out " : "Opt S/PDIF Out ";
+        t.parameters.push_back(Parameter{
+            .id = ParameterId{parameterId++},
+            .target = PortId{kPhysDigitalOut + i},
+            .semantic = ParameterSemantic::Level,
+            .domain = kGainDomain,
+            .name = label + std::to_string(i * 2 + 1) + "/" + std::to_string(i * 2 + 2) + " Volume",
+        });
+    }
 
     // Wire values from Linux bebob_maudio.c:342-348. Value 1 is "Digital",
     // whichever source the digital input interface selects -- the device does

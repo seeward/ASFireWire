@@ -180,6 +180,37 @@ void RunFW1814TopologyTests(TestContext& ctx) {
         CHECK(ctx, std::get<int64_t>(state.parameters.at(clock->id)) == 3);
     }
 
+    // Every physical output carries a level. `fw vol` has `adatout` and
+    // `spdifout` blocks alongside the analog and headphone ones
+    // (documentation/1814.md 6.4), and without them the console renders no
+    // strip for the digital outputs at all.
+    {
+        uint32_t physicalOutNode = 0;
+        for (const auto& node : t.nodes) {
+            auto* endpoint = std::get_if<EndpointNode>(&node.body);
+            if (endpoint != nullptr && endpoint->kind == EndpointKind::Physical
+                && node.name == "Physical Outputs") {
+                physicalOutNode = node.id.value;
+            }
+        }
+        REQUIRE(ctx, physicalOutNode != 0);
+
+        uint32_t outputs = 0;
+        uint32_t withLevel = 0;
+        for (const auto& port : t.ports) {
+            if (port.owner.value != physicalOutNode) continue;
+            ++outputs;
+            for (const auto& parameter : t.parameters) {
+                if (parameter.semantic != ParameterSemantic::Level) continue;
+                if (!std::holds_alternative<PortId>(parameter.target)) continue;
+                if (std::get<PortId>(parameter.target) == port.id) ++withLevel;
+            }
+        }
+        // 2 analog pairs + 2 headphone pairs + 4 ADAT pairs at 48 kHz.
+        CHECK_EQ_U32(ctx, outputs, 8);
+        CHECK_EQ_U32(ctx, withLevel, outputs);
+    }
+
     // Negative: two fixed drivers on one input port is illegal.
     {
         auto invalid = t;
