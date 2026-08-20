@@ -18,6 +18,7 @@ void RunVerifierScenarioTests(TestContext& ctx);
 void RunTxTimingModelTests(TestContext& ctx);
 void RunWriteEndTraceReplayerTests(TestContext& ctx);
 void RunPacketDumpBlobTests(TestContext& ctx);
+void RunNamingTests(TestContext& ctx);
 void RunDuetTopologyTests(TestContext& ctx);
 void RunPhase88TopologyTests(TestContext& ctx);
 void RunFW1814TopologyTests(TestContext& ctx);
@@ -46,6 +47,7 @@ int main() {
     RunWriteEndTraceReplayerTests(ctx);
     RunVerifierScenarioTests(ctx);
     RunPacketDumpBlobTests(ctx);
+    RunNamingTests(ctx);
     RunDuetTopologyTests(ctx);
     RunPhase88TopologyTests(ctx);
     RunFW1814TopologyTests(ctx);

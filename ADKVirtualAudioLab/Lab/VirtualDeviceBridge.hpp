@@ -208,12 +208,26 @@ typedef struct {
     const ASFWEnumItemDTO* enumItems;
 } ASFWParameterDTO;
 
+typedef enum {
+    ASFW_SIGNAL_UNKNOWN = 0,
+    ASFW_SIGNAL_ANALOG_LINE = 1,
+    ASFW_SIGNAL_ANALOG_MIC_XLR = 2,
+    ASFW_SIGNAL_ANALOG_INSTRUMENT = 3,
+    ASFW_SIGNAL_HEADPHONE = 4,
+    ASFW_SIGNAL_SPDIF_COAXIAL = 5,
+    ASFW_SIGNAL_SPDIF_OPTICAL = 6,
+    ASFW_SIGNAL_ADAT = 7,
+    ASFW_SIGNAL_HOST_STREAM = 8,
+} ASFWSignalKind;
+
 typedef struct {
     uint32_t id;
-    const char* name;
+    const char* name; // canonical for endpoint ports, authored for interior ones
     uint32_t ownerNodeId;
     uint8_t direction; // 0 = Input, 1 = Output
     uint32_t channels;
+    ASFWSignalKind signalKind;
+    uint32_t signalIndex;
 } ASFWPortDTO;
 
 typedef struct {
@@ -252,6 +266,10 @@ typedef struct {
     uint32_t bundleId;
     uint32_t routeCount;
     const ASFWRouteDTO* routes;
+    /// Where this bundle's signal comes from, resolved by walking the topology:
+    /// an endpoint connector, or the bus of a mixer/router output. Empty when
+    /// neither applies, so the UI can fall back rather than guess.
+    const char* sourceLabel;
 } ASFWRouteBundleDTO;
 
 typedef struct {

@@ -47,6 +47,32 @@ void validateStructure(const Topology& topology,
                 std::format("Port {} '{}' references nonexistent owner NodeId {}",
                             port.id.value, port.name, port.owner.value)
             });
+            continue;
+        }
+
+        // An endpoint port is a connector or a wire slot, so it must carry a
+        // canonical identity: its name is rendered from that identity rather
+        // than authored per device.
+        const bool isEndpoint = std::holds_alternative<EndpointNode>(nodeIt->second->body);
+        if (isEndpoint && port.signal.kind == SignalKind::Unknown) {
+            errors.push_back({
+                TopologyErrorKind::MissingSignalIdentity,
+                std::format("Endpoint port {} '{}' has no SignalIdentity", port.id.value, port.name)
+            });
+        }
+        if (isEndpoint && port.signal.index == 0) {
+            errors.push_back({
+                TopologyErrorKind::MissingSignalIdentity,
+                std::format("Endpoint port {} '{}' has SignalIdentity index 0 (indices are 1-based)",
+                            port.id.value, port.name)
+            });
+        }
+        if (!isEndpoint && port.name.empty()) {
+            errors.push_back({
+                TopologyErrorKind::MissingSignalIdentity,
+                std::format("Interior port {} has no name and no identity to render one from",
+                            port.id.value)
+            });
         }
     }
 

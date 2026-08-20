@@ -1,4 +1,5 @@
 #include "../TestHarness.hpp"
+#include "../../Core/AudioModel/Naming.hpp"
 #include "../../Runtime/VirtualDeviceRegistry.hpp"
 #include "../../Runtime/VirtualDeviceRuntime.hpp"
 
@@ -152,7 +153,7 @@ void RunVirtualDeviceRuntimeTests(TestContext& ctx) {
         auto& rt = *rtRes;
 
         // Default is ADAT mode: 6 Analog + 2 SPDIF + 8 ADAT = 16 physical in ports
-        CHECK(ctx, rt.resolved().topology.ports[15].name == "Phys In: ADAT 8");
+        CHECK(ctx, displayName(rt.resolved().topology.ports[15]) == "ADAT In 8");
 
         // Switch to S/PDIF optical mode
         auto optRes = rt.setConfiguration(DeviceConfiguration{
@@ -162,7 +163,7 @@ void RunVirtualDeviceRuntimeTests(TestContext& ctx) {
         });
         CHECK(ctx, optRes.has_value());
         CHECK(ctx, rt.revision() == 2);
-        CHECK(ctx, rt.resolved().topology.ports[9].name == "Phys In: Opt SPDIF 2");
+        CHECK(ctx, displayName(rt.resolved().topology.ports[9]) == "Opt S/PDIF In 2");
     }
 }
 

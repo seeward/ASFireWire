@@ -4,6 +4,7 @@
 
 #include "VirtualDeviceBridge.hpp"
 #include "../Runtime/VirtualDeviceRuntime.hpp"
+#include "../Core/AudioModel/Naming.hpp"
 
 #include <memory>
 #include <mutex>
@@ -51,6 +52,7 @@ struct SnapshotStorage {
     std::vector<std::vector<uint32_t>> routerOutputPortArrays;
     std::vector<std::vector<std::vector<ASFWRouteDTO>>> routerRouteArrays;
     std::vector<std::vector<ASFWRouteBundleDTO>> routerBundleArrays;
+    std::vector<std::vector<std::string>> routerBundleLabels;
     std::vector<std::vector<uint32_t>> activeBundleArrays;
     std::vector<ASFWRouterDTO> routerDTOs;
 
@@ -143,6 +145,21 @@ ASFWControlPresentation toBridgeControlPresentation(ControlPresentation cp) {
         case ControlPresentation::Toggle: return ASFW_CONTROL_TOGGLE;
         case ControlPresentation::Selector: return ASFW_CONTROL_SELECTOR;
     }
+}
+
+ASFWSignalKind toBridgeSignalKind(SignalKind kind) {
+    switch (kind) {
+        case SignalKind::AnalogLine:       return ASFW_SIGNAL_ANALOG_LINE;
+        case SignalKind::AnalogMicXlr:     return ASFW_SIGNAL_ANALOG_MIC_XLR;
+        case SignalKind::AnalogInstrument: return ASFW_SIGNAL_ANALOG_INSTRUMENT;
+        case SignalKind::Headphone:        return ASFW_SIGNAL_HEADPHONE;
+        case SignalKind::SpdifCoaxial:     return ASFW_SIGNAL_SPDIF_COAXIAL;
+        case SignalKind::SpdifOptical:     return ASFW_SIGNAL_SPDIF_OPTICAL;
+        case SignalKind::Adat:             return ASFW_SIGNAL_ADAT;
+        case SignalKind::HostStream:       return ASFW_SIGNAL_HOST_STREAM;
+        case SignalKind::Unknown:          return ASFW_SIGNAL_UNKNOWN;
+    }
+    return ASFW_SIGNAL_UNKNOWN;
 }
 
 ASFWBusSemantic toBridgeBusSemantic(BusSemantic bs) {
@@ -376,13 +393,15 @@ ASFWDeviceSnapshotDTO asfw_lab_get_snapshot(void) {
     gStorage.portDTOs.resize(ptCount);
     for (size_t i = 0; i < ptCount; ++i) {
         const auto& pt = res.topology.ports[i];
-        gStorage.portNames[i] = pt.name;
+        gStorage.portNames[i] = displayName(pt);
         gStorage.portDTOs[i] = ASFWPortDTO{
             .id = pt.id.value,
             .name = gStorage.portNames[i].c_str(),
             .ownerNodeId = pt.owner.value,
             .direction = static_cast<uint8_t>(pt.direction == PortDirection::Output ? 1 : 0),
             .channels = pt.channels,
+            .signalKind = toBridgeSignalKind(pt.signal.kind),
+            .signalIndex = pt.signal.index,
         };
     }
     snapshot.portCount = static_cast<uint32_t>(gStorage.portDTOs.size());
@@ -448,6 +467,7 @@ ASFWDeviceSnapshotDTO asfw_lab_get_snapshot(void) {
     gStorage.routerOutputPortArrays.resize(rCount);
     gStorage.routerRouteArrays.resize(rCount);
     gStorage.routerBundleArrays.resize(rCount);
+    gStorage.routerBundleLabels.resize(rCount);
     gStorage.activeBundleArrays.resize(rCount);
     gStorage.routerDTOs.resize(rCount);
 
@@ -474,6 +494,7 @@ ASFWDeviceSnapshotDTO asfw_lab_get_snapshot(void) {
         const size_t bCount = r.legalBundles.size();
         gStorage.routerRouteArrays[i].resize(bCount);
         gStorage.routerBundleArrays[i].resize(bCount);
+        gStorage.routerBundleLabels[i].resize(bCount);
 
         for (size_t b = 0; b < bCount; ++b) {
             const auto& bundle = r.legalBundles[b];
@@ -485,10 +506,16 @@ ASFWDeviceSnapshotDTO asfw_lab_get_snapshot(void) {
                     .outputPortId = bundle.routes[rt].output.value,
                 };
             }
+            gStorage.routerBundleLabels[i][b] =
+                routeCount == 0
+                    ? std::string{}
+                    : sourceLabel(res.topology, bundle.routes.front().input).value_or(std::string{});
+
             gStorage.routerBundleArrays[i][b] = ASFWRouteBundleDTO{
                 .bundleId = bundle.id.value,
                 .routeCount = static_cast<uint32_t>(routeCount),
                 .routes = gStorage.routerRouteArrays[i][b].data(),
+                .sourceLabel = gStorage.routerBundleLabels[i][b].c_str(),
             };
         }
         rDto.legalBundleCount = static_cast<uint32_t>(gStorage.routerBundleArrays[i].size());

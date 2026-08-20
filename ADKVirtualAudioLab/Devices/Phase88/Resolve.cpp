@@ -186,16 +186,16 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
 
     // Ports
     for (uint32_t i = 1; i <= 8; ++i) {
-        t.ports.push_back(Port{PortId{i}, nPhysIn, PortDirection::Output, 1, "Line In " + std::to_string(i)});
+        t.ports.push_back(endpointPort(PortId{i}, nPhysIn, PortDirection::Output, 1, {SignalKind::AnalogLine, i}));
     }
-    t.ports.push_back(Port{PortId{9}, nPhysIn, PortDirection::Output, 1, "SPDIF In L"});
-    t.ports.push_back(Port{PortId{10}, nPhysIn, PortDirection::Output, 1, "SPDIF In R"});
+    t.ports.push_back(endpointPort(PortId{9}, nPhysIn, PortDirection::Output, 1, {SignalKind::SpdifCoaxial, 1}));
+    t.ports.push_back(endpointPort(PortId{10}, nPhysIn, PortDirection::Output, 1, {SignalKind::SpdifCoaxial, 2}));
 
     for (uint32_t i = 1; i <= 10; ++i) {
-        t.ports.push_back(Port{PortId{20 + i}, nHostIO, PortDirection::Input, 1, "Host Capture " + std::to_string(i)});
+        t.ports.push_back(endpointPort(PortId{20 + i}, nHostIO, PortDirection::Input, 1, {SignalKind::HostStream, i}));
     }
     for (uint32_t i = 1; i <= 10; ++i) {
-        t.ports.push_back(Port{PortId{30 + i}, nHostIO, PortDirection::Output, 1, "Host Playback " + std::to_string(i)});
+        t.ports.push_back(endpointPort(PortId{30 + i}, nHostIO, PortDirection::Output, 1, {SignalKind::HostStream, i}));
     }
 
     for (uint32_t i = 1; i <= 10; ++i) {
@@ -227,10 +227,10 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
     }
 
     for (uint32_t i = 1; i <= 8; ++i) {
-        t.ports.push_back(Port{PortId{110 + i}, nPhysOut, PortDirection::Input, 1, "Line Out " + std::to_string(i)});
+        t.ports.push_back(endpointPort(PortId{110 + i}, nPhysOut, PortDirection::Input, 1, {SignalKind::AnalogLine, i}));
     }
-    t.ports.push_back(Port{PortId{119}, nPhysOut, PortDirection::Input, 1, "SPDIF Out L"});
-    t.ports.push_back(Port{PortId{120}, nPhysOut, PortDirection::Input, 1, "SPDIF Out R"});
+    t.ports.push_back(endpointPort(PortId{119}, nPhysOut, PortDirection::Input, 1, {SignalKind::SpdifCoaxial, 1}));
+    t.ports.push_back(endpointPort(PortId{120}, nPhysOut, PortDirection::Input, 1, {SignalKind::SpdifCoaxial, 2}));
 
     // Fixed Links
     for (uint32_t i = 1; i <= 10; ++i) {

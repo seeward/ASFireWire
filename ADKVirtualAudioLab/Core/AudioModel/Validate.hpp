@@ -15,6 +15,7 @@ enum class TopologyErrorKind {
     NonexistentPort,
     NonexistentCrosspoint,
     InvalidChannelCount,
+    MissingSignalIdentity,
     InvalidPortDirection,
     ForeignPortReference,
     DuplicateRouteOrCrosspoint,

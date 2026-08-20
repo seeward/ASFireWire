@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Id.hpp"
+#include "Signal.hpp"
 
 #include <cstdint>
 #include <string>
@@ -18,10 +19,34 @@ struct Port {
 
     PortDirection direction;
 
-    // Port is already the atomic routing unit.
+    // A Port is a connectable signal boundary; a RouteBundle is the smallest
+    // set of routes that must change atomically (AUAA 10.1).
     uint32_t channels{1};
 
     std::string name;
+
+    /// Set on endpoint ports (those owned by an EndpointNode), where it is the
+    /// authoritative identity and the display name is rendered from it.
+    /// Interior ports leave this Unknown and keep an authored `name`.
+    SignalIdentity signal{};
 };
+
+/// Build an endpoint port. Its name is left empty deliberately: endpoint names
+/// are rendered from `signal` so that every device spells the same connector
+/// the same way. See Naming.hpp.
+inline Port endpointPort(PortId id,
+                         NodeId owner,
+                         PortDirection direction,
+                         uint32_t channels,
+                         SignalIdentity signal) {
+    return Port{
+        .id = id,
+        .owner = owner,
+        .direction = direction,
+        .channels = channels,
+        .name = {},
+        .signal = signal,
+    };
+}
 
 } // namespace ASFW::AudioModel

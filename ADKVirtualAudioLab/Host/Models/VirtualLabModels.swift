@@ -149,6 +149,8 @@ struct PortModel: Identifiable {
     let ownerNodeId: UInt32
     let direction: UInt8
     let channels: UInt32
+    let signalKind: ASFWSignalKind
+    let signalIndex: UInt32
 }
 
 struct RouteModel: Identifiable {
@@ -160,6 +162,9 @@ struct RouteModel: Identifiable {
 struct RouteBundleModel: Identifiable {
     let id: UInt32
     let routes: [RouteModel]
+    /// Resolved by the model, by walking the topology back to a connector or a
+    /// bus. Empty when the walk finds neither.
+    let sourceLabel: String
 }
 
 struct RouterModel: Identifiable {

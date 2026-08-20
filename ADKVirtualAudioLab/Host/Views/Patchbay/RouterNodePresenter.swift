@@ -131,61 +131,22 @@ struct RouterNodePresenter: View {
                 .replacingOccurrences(of: "Output Source Router", with: "Monitor Output Source")
     }
 
+    /// The model resolves a bundle's source by walking the topology back to a
+    /// connector or a bus, so there is nothing here to infer from port names.
     private func shortBundleLabel(_ b: RouteBundleModel) -> String {
+        if !b.sourceLabel.isEmpty { return b.sourceLabel }
         if b.routes.isEmpty { return "Bundle #\(b.id)" }
-        let first = b.routes[0]
-        let inN = snap.portName(for: first.inputPortId)
-
-        // 1. Check Stream / Playback channel numbers
-        if inN.contains("1") || inN.contains("Stream 1") || inN.contains("Playback 1") {
-            if inN.contains("Stream") || inN.contains("Playback") { return "🎵 DAW Playback 1/2" }
-        }
-        if inN.contains("3") || inN.contains("Stream 3") || inN.contains("Playback 3") {
-            if inN.contains("Stream") || inN.contains("Playback") { return "🎵 DAW Playback 3/4" }
-        }
-        if inN.contains("5") || inN.contains("Stream 5") || inN.contains("Playback 5") {
-            if inN.contains("Stream") || inN.contains("Playback") { return "🎵 DAW Playback 5/6" }
-        }
-        if inN.contains("7") || inN.contains("Stream 7") || inN.contains("Playback 7") {
-            if inN.contains("Stream") || inN.contains("Playback") { return "🎵 DAW Playback 7/8" }
-        }
-        if inN.contains("9") || inN.contains("Stream 9") || inN.contains("Playback 9") {
-            if inN.contains("Stream") || inN.contains("Playback") { return "🎵 DAW Playback 9/10" }
-        }
-
-        // 2. Check Thru / Direct Inputs
-        if inN.contains("Thru In 1") || inN.contains("Analog In 1") { return "🎸 Direct: Analog 1/2" }
-        if inN.contains("Thru In 3") || inN.contains("Analog In 3") { return "🎸 Direct: Analog 3/4" }
-        if inN.contains("Thru In 5") || inN.contains("Analog In 5") { return "🎸 Direct: Analog 5/6" }
-        if inN.contains("Thru In 7") || inN.contains("Analog In 7") { return "🎸 Direct: Analog 7/8" }
-        if inN.contains("Thru In 9") || inN.contains("SPDIF In") || inN.contains("Digital In") { return "🎛 Direct: S/PDIF In" }
-
-        // 3. Check Mixer Sum
-        if inN.contains("Mixer Out") || inN.contains("Mix ") { return "🎚 Digital Master Mix L/R" }
-
-        return cleanPortLabel(inN)
+        return cleanPortLabel(snap.portName(for: b.routes[0].inputPortId))
     }
 
     private func humanizedBundleLabel(_ b: RouteBundleModel) -> String {
+        if !b.sourceLabel.isEmpty { return b.sourceLabel }
         if b.routes.isEmpty { return "Bundle #\(b.id)" }
 
-        if b.routes.count == 1 {
-            let r = b.routes[0]
-            let inN = snap.portName(for: r.inputPortId)
-            if inN.contains("XLR 1") { return "🎤 Mic 1 (XLR)" }
-            if inN.contains("Inst 1") { return "🎸 Instrument 1 (1/4\")" }
-            if inN.contains("XLR 2") { return "🎤 Mic 2 (XLR)" }
-            if inN.contains("Inst 2") { return "🎸 Instrument 2 (1/4\")" }
-            return cleanPortLabel(inN)
-        }
-
         let first = b.routes[0]
-        let inN = snap.portName(for: first.inputPortId)
-        if inN.contains("Playback") { return "🎵 DAW Playback 1/2" }
-        if inN.contains("Mixer Out") { return "🎛 Direct Hardware Mixer L/R" }
-
-        let outN = snap.portName(for: first.outputPortId)
-        return "\(cleanPortLabel(inN)) ➔ \(cleanPortLabel(outN))"
+        let inName = cleanPortLabel(snap.portName(for: first.inputPortId))
+        if b.routes.count == 1 { return inName }
+        return "\(inName) ➔ \(cleanPortLabel(snap.portName(for: first.outputPortId)))"
     }
 
     private func cleanPortLabel(_ n: String) -> String {

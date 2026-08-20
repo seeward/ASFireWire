@@ -51,7 +51,9 @@ final class VirtualLabState: ObservableObject {
                     name: ptName,
                     ownerNodeId: pt.ownerNodeId,
                     direction: pt.direction,
-                    channels: pt.channels
+                    channels: pt.channels,
+                    signalKind: pt.signalKind,
+                    signalIndex: pt.signalIndex
                 ))
             }
         }
@@ -111,7 +113,8 @@ final class VirtualLabState: ObservableObject {
                                 routes.append(RouteModel(inputPortId: rtPtr[k].inputPortId, outputPortId: rtPtr[k].outputPortId))
                             }
                         }
-                        bundles.append(RouteBundleModel(id: b.bundleId, routes: routes))
+                        let label = b.sourceLabel != nil ? String(cString: b.sourceLabel) : ""
+                        bundles.append(RouteBundleModel(id: b.bundleId, routes: routes, sourceLabel: label))
                     }
                 }
                 var activeSet = Set<UInt32>()

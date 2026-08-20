@@ -162,27 +162,26 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
     // Ports
     // Physical Inputs
     for (uint32_t i = 1; i <= 6; ++i) {
-        t.ports.push_back(Port{PortId{i}, nPhysIn, PortDirection::Output, 1, "Phys In: Analog " + std::to_string(i)});
+        t.ports.push_back(endpointPort(PortId{i}, nPhysIn, PortDirection::Output, 1, {SignalKind::AnalogLine, i}));
     }
-    t.ports.push_back(Port{PortId{7}, nPhysIn, PortDirection::Output, 1, "Phys In: SPDIF L"});
-    t.ports.push_back(Port{PortId{8}, nPhysIn, PortDirection::Output, 1, "Phys In: SPDIF R"});
+    t.ports.push_back(endpointPort(PortId{7}, nPhysIn, PortDirection::Output, 1, {SignalKind::SpdifCoaxial, 1}));
+    t.ports.push_back(endpointPort(PortId{8}, nPhysIn, PortDirection::Output, 1, {SignalKind::SpdifCoaxial, 2}));
     const uint32_t optInCount = (optIn == OpticalMode::Adat) ? 8 : 2;
     for (uint32_t i = 1; i <= optInCount; ++i) {
-        t.ports.push_back(Port{
+        t.ports.push_back(endpointPort(
             PortId{8 + i},
             nPhysIn,
             PortDirection::Output,
             1,
-            (optIn == OpticalMode::Adat) ? ("Phys In: ADAT " + std::to_string(i)) : ("Phys In: Opt SPDIF " + std::to_string(i))
-        });
+            {(optIn == OpticalMode::Adat) ? SignalKind::Adat : SignalKind::SpdifOptical, i}));
     }
 
     // Host IO
     for (uint32_t i = 1; i <= 16; ++i) {
-        t.ports.push_back(Port{PortId{20 + i}, nHostIO, PortDirection::Input, 1, "Host Stream Capture " + std::to_string(i)});
+        t.ports.push_back(endpointPort(PortId{20 + i}, nHostIO, PortDirection::Input, 1, {SignalKind::HostStream, i}));
     }
     for (uint32_t i = 1; i <= 8; ++i) {
-        t.ports.push_back(Port{PortId{40 + i}, nHostIO, PortDirection::Output, 1, "DAW Stream Playback " + std::to_string(i)});
+        t.ports.push_back(endpointPort(PortId{40 + i}, nHostIO, PortDirection::Output, 1, {SignalKind::HostStream, i}));
     }
 
     // Router Ports with Semantic Hardware Source/Destination Names
@@ -244,23 +243,22 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
 
     // Physical Outputs
     for (uint32_t i = 1; i <= 6; ++i) {
-        t.ports.push_back(Port{PortId{230 + i}, nPhysOut, PortDirection::Input, 1, "Phys Out: Phone " + std::to_string(i)});
+        t.ports.push_back(endpointPort(PortId{230 + i}, nPhysOut, PortDirection::Input, 1, {SignalKind::AnalogLine, i}));
     }
     for (uint32_t i = 1; i <= 4; ++i) {
-        t.ports.push_back(Port{PortId{236 + i}, nPhysOut, PortDirection::Input, 1, "Phys Out: HP " + std::to_string(i)});
+        t.ports.push_back(endpointPort(PortId{236 + i}, nPhysOut, PortDirection::Input, 1, {SignalKind::Headphone, i}));
     }
-    t.ports.push_back(Port{PortId{241}, nPhysOut, PortDirection::Input, 1, "Phys Out: Coax SPDIF L"});
-    t.ports.push_back(Port{PortId{242}, nPhysOut, PortDirection::Input, 1, "Phys Out: Coax SPDIF R"});
+    t.ports.push_back(endpointPort(PortId{241}, nPhysOut, PortDirection::Input, 1, {SignalKind::SpdifCoaxial, 1}));
+    t.ports.push_back(endpointPort(PortId{242}, nPhysOut, PortDirection::Input, 1, {SignalKind::SpdifCoaxial, 2}));
 
     const uint32_t optOutCount = (optOut == OpticalMode::Adat) ? 8 : 2;
     for (uint32_t i = 1; i <= optOutCount; ++i) {
-        t.ports.push_back(Port{
+        t.ports.push_back(endpointPort(
             PortId{242 + i},
             nPhysOut,
             PortDirection::Input,
             1,
-            (optOut == OpticalMode::Adat) ? ("Phys Out: ADAT " + std::to_string(i)) : ("Phys Out: Opt SPDIF " + std::to_string(i))
-        });
+            {(optOut == OpticalMode::Adat) ? SignalKind::Adat : SignalKind::SpdifOptical, i}));
     }
 
     // Fixed Links

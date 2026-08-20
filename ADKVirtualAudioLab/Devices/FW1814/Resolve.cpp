@@ -150,22 +150,28 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
 
     // Ports (all stereo pairs = 2 channels)
     // Physical In: 1..9
-    t.ports.push_back(Port{PortId{1}, nPhysIn, PortDirection::Output, 2, "Line In 1/2"});
-    t.ports.push_back(Port{PortId{2}, nPhysIn, PortDirection::Output, 2, "Line In 3/4"});
-    t.ports.push_back(Port{PortId{3}, nPhysIn, PortDirection::Output, 2, "S/PDIF In"});
-    t.ports.push_back(Port{PortId{4}, nPhysIn, PortDirection::Output, 2, (optIn == OpticalMode::Adat) ? "ADAT In 1/2" : "Opt SPDIF In"});
-    t.ports.push_back(Port{PortId{5}, nPhysIn, PortDirection::Output, 2, (optIn == OpticalMode::Adat) ? "ADAT In 3/4" : "Opt In 3/4 (Off)"});
-    t.ports.push_back(Port{PortId{6}, nPhysIn, PortDirection::Output, 2, (optIn == OpticalMode::Adat) ? "ADAT In 5/6" : "Opt In 5/6 (Off)"});
-    t.ports.push_back(Port{PortId{7}, nPhysIn, PortDirection::Output, 2, (optIn == OpticalMode::Adat) ? "ADAT In 7/8" : "Opt In 7/8 (Off)"});
+    const auto opticalInKind = (optIn == OpticalMode::Adat) ? SignalKind::Adat : SignalKind::SpdifOptical;
+
+    t.ports.push_back(endpointPort(PortId{1}, nPhysIn, PortDirection::Output, 2, {SignalKind::AnalogLine, 1}));
+    t.ports.push_back(endpointPort(PortId{2}, nPhysIn, PortDirection::Output, 2, {SignalKind::AnalogLine, 3}));
+    t.ports.push_back(endpointPort(PortId{3}, nPhysIn, PortDirection::Output, 2, {SignalKind::SpdifCoaxial, 1}));
+    t.ports.push_back(endpointPort(PortId{4}, nPhysIn, PortDirection::Output, 2, {opticalInKind, 1}));
+    // Ports 5-7 only exist in ADAT mode; optical S/PDIF carries one pair. The
+    // mode-dependent structure lands with the stream-geometry rebuild, so for
+    // now they stay and are visibly mislabelled in S/PDIF mode rather than
+    // plausibly mislabelled as "(Off)".
+    t.ports.push_back(endpointPort(PortId{5}, nPhysIn, PortDirection::Output, 2, {SignalKind::Adat, 3}));
+    t.ports.push_back(endpointPort(PortId{6}, nPhysIn, PortDirection::Output, 2, {SignalKind::Adat, 5}));
+    t.ports.push_back(endpointPort(PortId{7}, nPhysIn, PortDirection::Output, 2, {SignalKind::Adat, 7}));
 
     for (uint32_t i = 1; i <= 7; ++i) {
         t.ports.push_back(Port{PortId{10 + i}, nHostCaptureBus, PortDirection::Input, 2, "Capture Bus In " + std::to_string(i)});
         t.ports.push_back(Port{PortId{20 + i}, nHostCaptureBus, PortDirection::Output, 2, "Capture Bus Out " + std::to_string(i)});
-        t.ports.push_back(Port{PortId{30 + i}, nHostIO, PortDirection::Input, 2, "Host Capture " + std::to_string(i)});
+        t.ports.push_back(endpointPort(PortId{30 + i}, nHostIO, PortDirection::Input, 2, {SignalKind::HostStream, i * 2 - 1}));
     }
 
     for (uint32_t i = 1; i <= 7; ++i) {
-        t.ports.push_back(Port{PortId{40 + i}, nHostIO, PortDirection::Output, 2, "DAW Playback " + std::to_string(i * 2 - 1) + "/" + std::to_string(i * 2)});
+        t.ports.push_back(endpointPort(PortId{40 + i}, nHostIO, PortDirection::Output, 2, {SignalKind::HostStream, i * 2 - 1}));
     }
 
     // Main Sum Mixer Inputs: 51..61
@@ -202,11 +208,11 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
     t.ports.push_back(Port{PortId{126}, nLineOutMux, PortDirection::Output, 2, "Line Out 3/4"});
 
     // Physical Outputs
-    t.ports.push_back(Port{PortId{91}, nPhysOut, PortDirection::Input, 2, "Line Out 1/2"});
-    t.ports.push_back(Port{PortId{92}, nPhysOut, PortDirection::Input, 2, "Line Out 3/4"});
-    t.ports.push_back(Port{PortId{93}, nPhysOut, PortDirection::Input, 2, "S/PDIF Out"});
-    t.ports.push_back(Port{PortId{98}, nPhysOut, PortDirection::Input, 2, "Headphone 1"});
-    t.ports.push_back(Port{PortId{99}, nPhysOut, PortDirection::Input, 2, "Headphone 2"});
+    t.ports.push_back(endpointPort(PortId{91}, nPhysOut, PortDirection::Input, 2, {SignalKind::AnalogLine, 1}));
+    t.ports.push_back(endpointPort(PortId{92}, nPhysOut, PortDirection::Input, 2, {SignalKind::AnalogLine, 3}));
+    t.ports.push_back(endpointPort(PortId{93}, nPhysOut, PortDirection::Input, 2, {SignalKind::SpdifCoaxial, 1}));
+    t.ports.push_back(endpointPort(PortId{98}, nPhysOut, PortDirection::Input, 2, {SignalKind::Headphone, 1}));
+    t.ports.push_back(endpointPort(PortId{99}, nPhysOut, PortDirection::Input, 2, {SignalKind::Headphone, 3}));
 
     // Fixed Links
     for (uint32_t i = 1; i <= 7; ++i) {

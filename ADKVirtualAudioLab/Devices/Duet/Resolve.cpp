@@ -137,10 +137,10 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
 
     // Ports
     t.ports = {
-        Port{PortId{1}, nPhysIn, PortDirection::Output, 1, "XLR In 1"},
-        Port{PortId{2}, nPhysIn, PortDirection::Output, 1, "XLR In 2"},
-        Port{PortId{3}, nPhysIn, PortDirection::Output, 1, "Inst In 1"},
-        Port{PortId{4}, nPhysIn, PortDirection::Output, 1, "Inst In 2"},
+        endpointPort(PortId{1}, nPhysIn, PortDirection::Output, 1, {SignalKind::AnalogMicXlr, 1}),
+        endpointPort(PortId{2}, nPhysIn, PortDirection::Output, 1, {SignalKind::AnalogMicXlr, 2}),
+        endpointPort(PortId{3}, nPhysIn, PortDirection::Output, 1, {SignalKind::AnalogInstrument, 1}),
+        endpointPort(PortId{4}, nPhysIn, PortDirection::Output, 1, {SignalKind::AnalogInstrument, 2}),
 
         Port{PortId{11}, nInMux, PortDirection::Input, 1, "Mux In: XLR 1"},
         Port{PortId{12}, nInMux, PortDirection::Input, 1, "Mux In: Inst 1"},
@@ -154,10 +154,10 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         Port{PortId{23}, nPreamp, PortDirection::Output, 1, "Preamp Out 1"},
         Port{PortId{24}, nPreamp, PortDirection::Output, 1, "Preamp Out 2"},
 
-        Port{PortId{31}, nHostIO, PortDirection::Input, 1, "Host Stream Capture 1"},
-        Port{PortId{32}, nHostIO, PortDirection::Input, 1, "Host Stream Capture 2"},
-        Port{PortId{33}, nHostIO, PortDirection::Output, 1, "Host Stream Playback 1"},
-        Port{PortId{34}, nHostIO, PortDirection::Output, 1, "Host Stream Playback 2"},
+        endpointPort(PortId{31}, nHostIO, PortDirection::Input, 1, {SignalKind::HostStream, 1}),
+        endpointPort(PortId{32}, nHostIO, PortDirection::Input, 1, {SignalKind::HostStream, 2}),
+        endpointPort(PortId{33}, nHostIO, PortDirection::Output, 1, {SignalKind::HostStream, 1}),
+        endpointPort(PortId{34}, nHostIO, PortDirection::Output, 1, {SignalKind::HostStream, 2}),
 
         Port{PortId{41}, nMixer, PortDirection::Input, 1, "Mixer In: Analog 1"},
         Port{PortId{42}, nMixer, PortDirection::Input, 1, "Mixer In: Analog 2"},
@@ -178,10 +178,10 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         Port{PortId{59}, nOutStage, PortDirection::Output, 1, "OutStage Out L"},
         Port{PortId{60}, nOutStage, PortDirection::Output, 1, "OutStage Out R"},
 
-        Port{PortId{61}, nPhysOut, PortDirection::Input, 1, "Line Out L"},
-        Port{PortId{62}, nPhysOut, PortDirection::Input, 1, "Line Out R"},
-        Port{PortId{63}, nPhysOut, PortDirection::Input, 1, "Headphone Out L"},
-        Port{PortId{64}, nPhysOut, PortDirection::Input, 1, "Headphone Out R"},
+        endpointPort(PortId{61}, nPhysOut, PortDirection::Input, 1, {SignalKind::AnalogLine, 1}),
+        endpointPort(PortId{62}, nPhysOut, PortDirection::Input, 1, {SignalKind::AnalogLine, 2}),
+        endpointPort(PortId{63}, nPhysOut, PortDirection::Input, 1, {SignalKind::Headphone, 1}),
+        endpointPort(PortId{64}, nPhysOut, PortDirection::Input, 1, {SignalKind::Headphone, 2}),
     };
 
     // Fixed Links
