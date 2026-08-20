@@ -43,6 +43,9 @@ public:
                                                      uint32_t in_optical_input,
                                                      uint32_t in_optical_output) LOCALONLY;
     virtual kern_return_t SetScriptedHardwareOutcome(uint32_t in_outcome) LOCALONLY;
+    virtual kern_return_t NotifyHardwareObserved(uint32_t in_sample_rate,
+                                                 uint32_t in_optical_input,
+                                                 uint32_t in_optical_output) LOCALONLY;
     virtual kern_return_t CopyADKConfigLog(uint32_t in_max_events,
                                            OSData** out_data) LOCALONLY;
     virtual kern_return_t CopyADKConfigState(OSData** out_data) LOCALONLY;

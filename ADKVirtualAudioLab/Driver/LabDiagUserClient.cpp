@@ -146,6 +146,30 @@ kern_return_t LabDiagUserClient::ExternalMethod(
                 slot, outcome);
         return device->SetScriptedHardwareOutcome(outcome);
     }
+    case ASFW::Lab::kLabDiagSelectorNotifyHardwareObserved: {
+        if (arguments->scalarInput == nullptr || arguments->scalarInputCount < 4) {
+            return kIOReturnBadArgument;
+        }
+        const uint32_t slot = static_cast<uint32_t>(arguments->scalarInput[0]);
+        const uint32_t sampleRate = static_cast<uint32_t>(arguments->scalarInput[1]);
+        const uint32_t opticalInput = static_cast<uint32_t>(arguments->scalarInput[2]);
+        const uint32_t opticalOutput = static_cast<uint32_t>(arguments->scalarInput[3]);
+        VirtualAudioDevice* device =
+            ivars->driver->GetVirtualAudioDeviceForSlot(slot);
+        if (device == nullptr) {
+            return kIOReturnBadArgument;
+        }
+        LAB_LOG("notify observed configuration: slot=%{public}u rate=%{public}u optical_in=%{public}u optical_out=%{public}u",
+                slot, sampleRate, opticalInput, opticalOutput);
+        const kern_return_t kr = device->NotifyHardwareObserved(
+            sampleRate, opticalInput, opticalOutput);
+        if (arguments->scalarOutput != nullptr &&
+            arguments->scalarOutputCount >= 1) {
+            arguments->scalarOutput[0] = static_cast<uint64_t>(kr);
+            arguments->scalarOutputCount = 1;
+        }
+        return kr;
+    }
     case ASFW::Lab::kLabDiagSelectorCopyConfigLog: {
         if (arguments->scalarInput == nullptr || arguments->scalarInputCount < 1) {
             return kIOReturnBadArgument;

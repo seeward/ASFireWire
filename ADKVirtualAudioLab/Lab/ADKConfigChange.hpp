@@ -39,6 +39,7 @@ constexpr uint32_t kLabDiagSelectorCopyConfigLog = 2;
 constexpr uint32_t kLabDiagSelectorCopyConfigState = 3;
 constexpr uint32_t kLabDiagSelectorRequestConfiguration = 4;
 constexpr uint32_t kLabDiagSelectorSetHardwareOutcome = 5;
+constexpr uint32_t kLabDiagSelectorNotifyHardwareObserved = 6;
 
 enum class ADKConfigHardwareOutcome : uint32_t {
     ConfirmRequested = 0,
@@ -75,6 +76,7 @@ enum class ADKConfigPhase : uint32_t {
     HardwareUnknown = 26,
     ProjectionCommitted = 27,
     CoordinatorRejected = 28,
+    HardwareObserved = 29,
 };
 
 struct ADKConfigLogHeader final {

@@ -28,6 +28,7 @@ enum ADKConfigWire {
     static let selectorCopyConfigState: UInt32 = 3
     static let selectorRequestConfiguration: UInt32 = 4
     static let selectorSetHardwareOutcome: UInt32 = 5
+    static let selectorNotifyHardwareObserved: UInt32 = 6
 
     static let logHeaderSize = 64
     static let eventSize = 56
@@ -83,6 +84,7 @@ struct ADKConfigEvent: Identifiable, Sendable {
         case 26: return "HardwareUnknown"
         case 27: return "ProjectionCommitted"
         case 28: return "CoordinatorRejected"
+        case 29: return "HardwareObserved"
         default: return "Phase \(phase)"
         }
     }
@@ -299,6 +301,38 @@ final class ADKConfigClient {
             throw ADKConfigClientError.callFailed(kr)
         }
         ADKConfigTrace.emit("script hardware slot=\(slot) outcome=\(outcome)")
+    }
+
+    func notifyHardwareObserved(slot: Int, rate: UInt32,
+                                opticalInput: UInt32,
+                                opticalOutput: UInt32) throws {
+        try ensureConnection()
+        var scalars: [UInt64] = [
+            UInt64(slot), UInt64(rate), UInt64(opticalInput), UInt64(opticalOutput),
+        ]
+        var output: [UInt64] = [0]
+        var outputCount: UInt32 = 1
+        let kr = scalars.withUnsafeMutableBufferPointer { inputs in
+            output.withUnsafeMutableBufferPointer { outputs in
+                IOConnectCallMethod(
+                    connection,
+                    ADKConfigWire.selectorNotifyHardwareObserved,
+                    inputs.baseAddress,
+                    UInt32(inputs.count),
+                    nil,
+                    0,
+                    outputs.baseAddress,
+                    &outputCount,
+                    nil,
+                    nil)
+            }
+        }
+        guard kr == KERN_SUCCESS else {
+            if kr == kIOReturnNotOpen || kr == kIOReturnNoDevice { close() }
+            throw ADKConfigClientError.callFailed(kr)
+        }
+        ADKConfigTrace.emit(
+            "observe hardware slot=\(slot) rate=\(rate) optical=\(opticalInput)/\(opticalOutput)")
     }
 
     func state(slot: Int) throws -> ADKConfigState {

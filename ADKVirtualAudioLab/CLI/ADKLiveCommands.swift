@@ -78,6 +78,32 @@ enum ADKLiveCommands {
                 return 64
             }
             return setHardwareOutcome(slot: slot, outcome: outcome)
+        case "reject":
+            guard arguments.count == 6,
+                  let slot = Int(arguments[2]),
+                  let rate = UInt32(arguments[3]),
+                  let opticalInput = opticalMode(arguments[4]),
+                  let opticalOutput = opticalMode(arguments[5]),
+                  definitions.indices.contains(slot) else {
+                printUsage()
+                return 64
+            }
+            return rejectConfiguration(slot: slot, rate: rate,
+                                       opticalInput: opticalInput,
+                                       opticalOutput: opticalOutput)
+        case "observe":
+            guard arguments.count == 6,
+                  let slot = Int(arguments[2]),
+                  let rate = UInt32(arguments[3]),
+                  let opticalInput = opticalMode(arguments[4]),
+                  let opticalOutput = opticalMode(arguments[5]),
+                  definitions.indices.contains(slot) else {
+                printUsage()
+                return 64
+            }
+            return observeHardware(slot: slot, rate: rate,
+                                   opticalInput: opticalInput,
+                                   opticalOutput: opticalOutput)
         default:
             printUsage()
             return 64
@@ -162,6 +188,33 @@ enum ADKLiveCommands {
         }
     }
 
+    private static func observeHardware(slot: Int, rate: UInt32,
+                                        opticalInput: UInt32,
+                                        opticalOutput: UInt32) -> Int32 {
+        guard rate == 44_100 || rate == 48_000,
+              let profile = expectedProfiles().first(where: { $0.slot == slot }) else {
+            printUsage()
+            return 64
+        }
+        let client = ADKConfigClient()
+        do {
+            let before = try client.state(slot: slot)
+            try client.notifyHardwareObserved(
+                slot: slot, rate: rate, opticalInput: opticalInput,
+                opticalOutput: opticalOutput)
+            let result = try waitForConfiguration(
+                client: client, profile: profile, rate: rate,
+                opticalInput: opticalInput, opticalOutput: opticalOutput,
+                firstSequence: before.nextSequence)
+            printTransaction(profile: profile, firstSequence: before.nextSequence,
+                             result: result)
+            return result.converged && result.hasRequiredPhases ? 0 : 1
+        } catch {
+            print("FAIL observed hardware slot \(slot): \(error.localizedDescription)")
+            return 1
+        }
+    }
+
     private static func setRate(slot: Int, rate: UInt32) -> Int32 {
         guard definitions.indices.contains(slot), rate == 44_100 || rate == 48_000 else {
             printUsage()
@@ -215,6 +268,42 @@ enum ADKLiveCommands {
             return result.converged && result.hasRequiredPhases ? 0 : 1
         } catch {
             print("FAIL slot \(slot) configuration: \(error.localizedDescription)")
+            return 1
+        }
+    }
+
+    /// Runs the lab's deterministic "hardware did not change" branch and
+    /// verifies that the coordinator leaves both the dext model and CoreAudio
+    /// projection untouched. Keeping the scripting and request in one command
+    /// makes this a reliable negative-path probe rather than a shell sequence.
+    private static func rejectConfiguration(slot: Int, rate: UInt32,
+                                            opticalInput: UInt32,
+                                            opticalOutput: UInt32) -> Int32 {
+        guard definitions.indices.contains(slot), rate == 44_100 || rate == 48_000,
+              let profile = expectedProfiles().first(where: { $0.slot == slot }),
+              let beforeHAL = CoreAudioLabSnapshot.capture().first(where: {
+                  $0.uid == profile.uid
+              }) else {
+            printUsage()
+            return 64
+        }
+
+        let client = ADKConfigClient()
+        do {
+            let before = try client.state(slot: slot)
+            try client.setHardwareOutcome(slot: slot, outcome: 1)
+            try client.requestConfiguration(
+                slot: slot, rate: rate, opticalInput: opticalInput,
+                opticalOutput: opticalOutput)
+            let result = try waitForRejection(
+                client: client, profile: profile, before: before,
+                beforeHAL: beforeHAL, firstSequence: before.nextSequence)
+            printRejection(profile: profile, firstSequence: before.nextSequence,
+                           result: result)
+            return result.unchanged && result.hasRequiredPhases &&
+                !result.hasProjectionPhases ? 0 : 1
+        } catch {
+            print("FAIL slot \(slot) expected hardware rejection: \(error.localizedDescription)")
             return 1
         }
     }
@@ -380,6 +469,15 @@ enum ADKLiveCommands {
         let hasRequiredPhases: Bool
     }
 
+    private struct RejectionResult {
+        let state: ADKConfigState
+        let hal: CoreAudioLabDevice?
+        let events: [ADKConfigEvent]
+        let unchanged: Bool
+        let hasRequiredPhases: Bool
+        let hasProjectionPhases: Bool
+    }
+
     private static func waitForConfiguration(
         client: ADKConfigClient,
         profile: Profile,
@@ -455,6 +553,46 @@ enum ADKLiveCommands {
             hasRequiredPhases: required.isSubset(of: phases))
     }
 
+    private static func waitForRejection(
+        client: ADKConfigClient,
+        profile: Profile,
+        before: ADKConfigState,
+        beforeHAL: CoreAudioLabDevice,
+        firstSequence: UInt64
+    ) throws -> RejectionResult {
+        let deadline = Date().addingTimeInterval(3.0)
+        var state = try client.state(slot: profile.slot)
+        var device = CoreAudioLabSnapshot.capture().first { $0.uid == profile.uid }
+        var events = try client.events(slot: profile.slot, maxEvents: 48)
+        let required: Set<UInt32> = [1, 2, 3, 7, 9, 10, 21, 23, 25]
+
+        repeat {
+            let phases = Set(events.filter { $0.sequence >= firstSequence }.map(\.phase))
+            if required.isSubset(of: phases) { break }
+            Thread.sleep(forTimeInterval: 0.05)
+            state = try client.state(slot: profile.slot)
+            device = CoreAudioLabSnapshot.capture().first { $0.uid == profile.uid }
+            events = try client.events(slot: profile.slot, maxEvents: 48)
+        } while Date() < deadline
+
+        let transactionEvents = events.filter { $0.sequence >= firstSequence }
+        let phases = Set(transactionEvents.map(\.phase))
+        let unchanged = state.currentSampleRate == before.currentSampleRate &&
+            state.currentOpticalInput == before.currentOpticalInput &&
+            state.currentOpticalOutput == before.currentOpticalOutput &&
+            state.currentInputChannels == before.currentInputChannels &&
+            state.currentOutputChannels == before.currentOutputChannels &&
+            !state.configurationPending &&
+            UInt32(device?.nominalSampleRate ?? 0) == UInt32(beforeHAL.nominalSampleRate) &&
+            device?.inputChannels == beforeHAL.inputChannels &&
+            device?.outputChannels == beforeHAL.outputChannels
+        let projectionPhases: Set<UInt32> = [18, 19, 20, 27]
+        return RejectionResult(
+            state: state, hal: device, events: events, unchanged: unchanged,
+            hasRequiredPhases: required.isSubset(of: phases),
+            hasProjectionPhases: !phases.isDisjoint(with: projectionPhases))
+    }
+
     private static func printTransaction(
         profile: Profile,
         firstSequence: UInt64,
@@ -470,6 +608,31 @@ enum ADKLiveCommands {
               "halShape=\(halShape) " +
               "expected=\(result.state.currentInputChannels)in/\(result.state.currentOutputChannels)out " +
               "phases=\(result.hasRequiredPhases ? "complete" : "incomplete")")
+        for event in result.events.filter({ $0.sequence >= firstSequence }) {
+            let line = eventLine(profile: profile, event: event)
+            print("  \(line)")
+            ADKConfigTrace.emit(line)
+        }
+    }
+
+    private static func printRejection(
+        profile: Profile,
+        firstSequence: UInt64,
+        result: RejectionResult
+    ) {
+        let passed = result.unchanged && result.hasRequiredPhases &&
+            !result.hasProjectionPhases
+        let marker = passed ? "PASS" : "FAIL"
+        let halShape = result.hal.map {
+            "\($0.inputChannels)in/\($0.outputChannels)out"
+        } ?? "missing"
+        print("\(marker) slot \(profile.slot) \(profile.name): expected hardware rejection " +
+              "dext=\(result.state.currentSampleRate) " +
+              "hal=\(UInt32(result.hal?.nominalSampleRate ?? 0)) " +
+              "halShape=\(halShape) " +
+              "unchanged=\(result.unchanged) " +
+              "phases=\(result.hasRequiredPhases ? "complete" : "incomplete") " +
+              "projection=\(result.hasProjectionPhases ? "present" : "absent")")
         for event in result.events.filter({ $0.sequence >= firstSequence }) {
             let line = eventLine(profile: profile, event: event)
             print("  \(line)")
@@ -494,6 +657,8 @@ enum ADKLiveCommands {
         print("  ADKLabCLI adk hal-rate <slot 0...3> <44100|48000>")
         print("  ADKLabCLI adk config <slot> <44100|48000> <none|adat|spdif> <none|adat|spdif>")
         print("  ADKLabCLI adk outcome <slot 0...3> <confirmed|unchanged|unknown>")
+        print("  ADKLabCLI adk reject <slot> <44100|48000> <none|adat|spdif> <none|adat|spdif>")
+        print("  ADKLabCLI adk observe <slot> <44100|48000> <none|adat|spdif> <none|adat|spdif>")
         print("  ADKLabCLI adk smoke")
     }
 }

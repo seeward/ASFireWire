@@ -57,6 +57,27 @@ void RunLabConfigurationCoordinatorTests(TestContext& ctx) {
     const auto restored = coordinator.CompleteHardware(
         std::get<ApplyHardwareEffect>(step->effects[0]));
     CHECK(ctx, HardwareKind(restored) == HardwareOutcomeKind::ConfirmedRequested);
+
+    // An observation is already hardware-confirmed. It receives an ADK
+    // perform window and then projects directly, without consuming a script
+    // or producing an ApplyHardware effect.
+    ASFW::Lab::LabConfigurationCoordinator observed{0x99, 1, Config(48000)};
+    step = observed.Dispatch(ConfigurationEvent{HardwareObserved{
+        .endpointId = 0x99,
+        .routeGeneration = 1,
+        .confirmed = ConfirmedHardwareConfiguration{.configuration = Config(44100)},
+    }});
+    REQUIRE(ctx, step.has_value());
+    REQUIRE(ctx, step->effects.size() == 1);
+    CHECK(ctx, std::holds_alternative<RequestADKWindowEffect>(step->effects[0]));
+    const auto observationIdentity = Pending(observed);
+
+    step = observed.Dispatch(ConfigurationEvent{ADKPerformGranted{
+        .identity = observationIdentity,
+    }});
+    REQUIRE(ctx, step.has_value());
+    REQUIRE(ctx, step->effects.size() == 1);
+    CHECK(ctx, std::holds_alternative<ProjectADKEffect>(step->effects[0]));
 }
 
 } // namespace ASFW::LabTests

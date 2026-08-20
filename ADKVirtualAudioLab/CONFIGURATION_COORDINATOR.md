@@ -702,9 +702,10 @@ The existing event ring and CLI remain the observation surface. `adk outcome
 `unchanged` tests a known rejection and `unknown` deliberately enters the
 recovery/unavailable branch. This is lab fault injection only—there is still
 no FireWire control or streaming work here. The live ingress paths are the
-diagnostic control client and Core Audio's rate callback; a hardware-observed
-ingress waits for a later lab event source rather than being faked as an
-outcome of either path.
+diagnostic control client, Core Audio's rate callback, and the lab-only
+`adk observe` command. The latter injects an already-confirmed observation,
+then proves that the ADK adapter requests a perform window and projects it
+without invoking the fake hardware-apply port.
 
 ### Stage C — Production core coordinator
 
