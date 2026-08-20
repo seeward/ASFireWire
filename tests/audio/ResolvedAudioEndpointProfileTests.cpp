@@ -52,6 +52,19 @@ ResolvedAudioEndpointProfile MakeProfile() {
     profile.timing[0] = {96000, 32, 48, 16, 24, 12800, 13000, 750};
     profile.timingCount = 1;
     profile.facets = {{FacetKind::Clock, 1}, {FacetKind::Mixer, 0x53503234}};
+    profile.configurationCapabilityCount = 1;
+    auto& capability = profile.configurationCapabilities[0];
+    capability.configuration = {
+        .sampleRate = 48000,
+        .opticalInput = Configuration::OpticalMode::Adat,
+        .opticalOutput = Configuration::OpticalMode::Spdif,
+    };
+    capability.runtimeCaps = profile.runtimeCaps;
+    capability.runtimeCaps.sampleRateHz = 48000;
+    capability.runtimeCaps.hostInputPcmChannels = 16;
+    capability.runtimeCaps.hostOutputPcmChannels = 6;
+    capability.runtimeCaps.deviceToHostStreams[0].pcmChannels = 16;
+    capability.runtimeCaps.hostToDeviceStreams[0].pcmChannels = 6;
     return profile;
 }
 
@@ -75,6 +88,15 @@ TEST(AudioEndpointProfileWire, RoundTripsBoundedNumericSnapshot) {
     EXPECT_TRUE(decoded->txPacketPolicy.emptyPacketsDuringIdle);
     ASSERT_EQ(decoded->facets.size(), 2U);
     EXPECT_EQ(decoded->facets[1].schemaId, 0x53503234U);
+    ASSERT_EQ(decoded->configurationCapabilityCount, 1U);
+    const auto* configuration = decoded->ConfigurationFor({
+        .sampleRate = 48000,
+        .opticalInput = Configuration::OpticalMode::Adat,
+        .opticalOutput = Configuration::OpticalMode::Spdif,
+    });
+    ASSERT_NE(configuration, nullptr);
+    EXPECT_EQ(configuration->runtimeCaps.hostInputPcmChannels, 16U);
+    EXPECT_EQ(configuration->runtimeCaps.hostOutputPcmChannels, 6U);
 }
 
 TEST(AudioEndpointProfileWire, AcceptsEveryProfileBuilderTheCatalogCanEmit) {
@@ -138,7 +160,7 @@ TEST(AudioEndpointProfileWire, RejectsVersionTruncationAndMalformedSection) {
               Audio::Devices::Wire::WireError::InvalidHeader);
 
     auto badSection = *encoded;
-    Audio::Devices::Wire::AudioEndpointProfileWireV1 header{};
+    Audio::Devices::Wire::AudioEndpointProfileWireV2 header{};
     std::memcpy(&header, badSection.data(), sizeof(header));
     header.rates.offset = static_cast<uint16_t>(sizeof(header) - 1);
     std::memcpy(badSection.data(), &header, sizeof(header));
@@ -157,7 +179,7 @@ TEST(AudioEndpointProfileWire, RejectsOverlappingSectionsUnknownEnumsAndReserved
     auto encoded = Audio::Devices::Wire::Serialize(MakeProfile());
     ASSERT_TRUE(encoded.has_value());
 
-    Audio::Devices::Wire::AudioEndpointProfileWireV1 header{};
+    Audio::Devices::Wire::AudioEndpointProfileWireV2 header{};
     std::memcpy(&header, encoded->data(), sizeof(header));
 
     auto overlap = *encoded;

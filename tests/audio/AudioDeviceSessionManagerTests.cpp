@@ -462,6 +462,56 @@ TEST(ResolvedProfileBuilder, SafeProbeGeometryNarrowsEquivalenceOrUsesCommonSubs
     EXPECT_EQ(profile->definitionId, DeviceDefinitionId::Unknown);
 }
 
+TEST(ResolvedProfileBuilder, FireWire1814PublishesIndependentBaseRateCapabilities) {
+    Discovery::DeviceRecord record{};
+    record.instanceId = Discovery::DeviceInstanceId{7};
+    record.identity.observedGuid = 0x000D6C0000001814ULL;
+
+    DeviceProfiles::Audio::StaticAudioEndpointPlan plan{};
+    plan.unit = Discovery::UnitInstanceId{record.instanceId, 0x24};
+    plan.family = DeviceProfiles::Audio::AudioFamilyProviderId::BeBoB;
+    plan.probePolicy = DeviceProfiles::Audio::ProbePolicyId::BeBoBFilteredCommandSet;
+    plan.support = DeviceProfiles::Audio::SupportDisposition::Supported;
+    plan.profileBuilder = DeviceProfiles::Audio::ProfileBuilderId::MAudioFireWire1814;
+    plan.vendorName = "M-Audio";
+    plan.modelName = "FireWire 1814";
+
+    BeBoBProbeFacts facts{};
+    facts.streams.hostInputPcmChannels = 10;
+    facts.streams.hostOutputPcmChannels = 6;
+    facts.streams.deviceToHostAm824Slots = 11;
+    facts.streams.hostToDeviceAm824Slots = 7;
+    facts.streams.sampleRateHz = 48000;
+    facts.streams.deviceToHostStreamCount = 1;
+    facts.streams.hostToDeviceStreamCount = 1;
+    facts.streams.deviceToHostStreams[0] = {.pcmChannels = 10, .am824Slots = 11};
+    facts.streams.hostToDeviceStreams[0] = {.pcmChannels = 6, .am824Slots = 7};
+    facts.supportedRates = {44100, 48000, 88200, 96000, 176400, 192000};
+
+    const auto profile = ResolvedProfileBuilder::Build(
+        ProfileBuildContext{AudioEndpointId{9}, record, plan, facts});
+    ASSERT_TRUE(profile.has_value());
+    ASSERT_EQ(profile->configurationCapabilityCount, 8U);
+
+    const auto* adatInputSpdifOutput = profile->ConfigurationFor({
+        .sampleRate = 48000,
+        .opticalInput = ASFW::Configuration::OpticalMode::Adat,
+        .opticalOutput = ASFW::Configuration::OpticalMode::Spdif,
+    });
+    ASSERT_NE(adatInputSpdifOutput, nullptr);
+    EXPECT_EQ(adatInputSpdifOutput->runtimeCaps.hostInputPcmChannels, 16U);
+    EXPECT_EQ(adatInputSpdifOutput->runtimeCaps.hostOutputPcmChannels, 6U);
+
+    const auto* spdifInputAdatOutput = profile->ConfigurationFor({
+        .sampleRate = 44100,
+        .opticalInput = ASFW::Configuration::OpticalMode::Spdif,
+        .opticalOutput = ASFW::Configuration::OpticalMode::Adat,
+    });
+    ASSERT_NE(spdifInputAdatOutput, nullptr);
+    EXPECT_EQ(spdifInputAdatOutput->runtimeCaps.hostInputPcmChannels, 10U);
+    EXPECT_EQ(spdifInputAdatOutput->runtimeCaps.hostOutputPcmChannels, 12U);
+}
+
 // --- Bootloader preparation wiring -------------------------------------------
 //
 // The cue machine and its transport are covered in BeBoBBootloaderCueTests.

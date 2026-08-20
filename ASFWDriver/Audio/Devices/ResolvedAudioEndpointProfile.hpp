@@ -7,6 +7,7 @@
 #include "../../DeviceProfiles/Audio/AudioDeviceCatalog.hpp"
 #include "../Duplex/DuplexPolicies.hpp"
 #include "../Protocols/AudioTypes.hpp"
+#include "../Shared/Configuration/DeviceConfiguration.hpp"
 #include "../Wire/AMDTP/AmdtpTypes.hpp"
 
 #include <array>
@@ -18,6 +19,7 @@
 namespace ASFW::Audio::Devices {
 
 inline constexpr size_t kMaxResolvedRates = 8;
+inline constexpr size_t kMaxConfigurationCapabilities = 8;
 
 enum class StreamModePolicy : uint8_t { NonBlocking, Blocking };
 
@@ -73,6 +75,16 @@ struct ClockPolicy final {
     uint32_t stableReadCount{3};
 };
 
+// An immutable, endpoint-specific projection of one semantic configuration.
+// The coordinator selects records from this envelope; it never infers stream
+// geometry from control values. This keeps vendor protocol semantics out of
+// the DriverKit side and makes maximum direct-memory capacity calculable before
+// the nub is published.
+struct ConfigurationCapabilityRecord final {
+    Configuration::DeviceConfiguration configuration{};
+    AudioStreamRuntimeCaps runtimeCaps{};
+};
+
 // Immutable output of static catalog resolution plus a safe family probe.
 // Neither DriverKit nor the duplex planner performs identity matching after
 // this object is built.
@@ -103,6 +115,9 @@ struct ResolvedAudioEndpointProfile final {
     uint8_t supportedRateCount{0};
     uint32_t currentSampleRateHz{48000};
     AudioStreamRuntimeCaps runtimeCaps{};
+    std::array<ConfigurationCapabilityRecord, kMaxConfigurationCapabilities>
+        configurationCapabilities{};
+    uint8_t configurationCapabilityCount{0};
 
     Encoding::AudioWireFormat captureWireFormat{Encoding::AudioWireFormat::kAM824};
     Encoding::AudioWireFormat playbackWireFormat{Encoding::AudioWireFormat::kAM824};
@@ -138,6 +153,21 @@ struct ResolvedAudioEndpointProfile final {
             }
         }
         return timingCount != 0 ? &timing[0] : nullptr;
+    }
+
+    [[nodiscard]] const ConfigurationCapabilityRecord* ConfigurationFor(
+        const Configuration::DeviceConfiguration& configuration) const noexcept {
+        const uint8_t count = std::min(configurationCapabilityCount,
+                                       static_cast<uint8_t>(configurationCapabilities.size()));
+        for (uint8_t i = 0; i < count; ++i) {
+            const auto& candidate = configurationCapabilities[i];
+            if (candidate.configuration.sampleRate == configuration.sampleRate &&
+                candidate.configuration.opticalInput == configuration.opticalInput &&
+                candidate.configuration.opticalOutput == configuration.opticalOutput) {
+                return &candidate;
+            }
+        }
+        return nullptr;
     }
 };
 

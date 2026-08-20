@@ -12,7 +12,7 @@
 
 namespace ASFW::Audio::Devices::Wire {
 
-inline constexpr uint16_t kAudioEndpointProfileWireVersion = 1;
+inline constexpr uint16_t kAudioEndpointProfileWireVersion = 2;
 inline constexpr size_t kAudioEndpointProfileWireMaxBytes = 4096;
 
 struct Section final {
@@ -20,7 +20,39 @@ struct Section final {
     uint16_t byteSize{0};
 } __attribute__((packed));
 
-struct AudioEndpointProfileWireV1 final {
+struct StreamWireV1 final {
+    uint32_t pcmChannels{0};
+    uint32_t am824Slots{0};
+    uint8_t isoChannel{AudioStreamWireInfo::kInvalidIsoChannel};
+    uint8_t _reserved[3]{};
+} __attribute__((packed));
+
+// Numeric wire representation of Configuration::OpticalMode. Zero means the
+// endpoint has no independent optical selector in that direction.
+enum class OpticalModeWireV2 : uint8_t {
+    None = 0,
+    Adat = 1,
+    Spdif = 2,
+};
+
+struct ConfigurationCapabilityWireV2 final {
+    uint32_t sampleRateHz{0};
+    uint8_t opticalInput{static_cast<uint8_t>(OpticalModeWireV2::None)};
+    uint8_t opticalOutput{static_cast<uint8_t>(OpticalModeWireV2::None)};
+    uint8_t _reserved[2]{};
+    uint32_t hostInputPcmChannels{0};
+    uint32_t hostOutputPcmChannels{0};
+    uint32_t deviceToHostAm824Slots{0};
+    uint32_t hostToDeviceAm824Slots{0};
+    uint8_t deviceToHostIsoChannel{AudioStreamWireInfo::kInvalidIsoChannel};
+    uint8_t hostToDeviceIsoChannel{AudioStreamWireInfo::kInvalidIsoChannel};
+    uint8_t deviceToHostStreamCount{0};
+    uint8_t hostToDeviceStreamCount{0};
+    std::array<StreamWireV1, kMaxAudioStreamsPerDirection> deviceToHostStreams{};
+    std::array<StreamWireV1, kMaxAudioStreamsPerDirection> hostToDeviceStreams{};
+} __attribute__((packed));
+
+struct AudioEndpointProfileWireV2 final {
     uint16_t version{0};
     uint16_t headerSize{0};
     uint32_t byteSize{0};
@@ -70,13 +102,10 @@ struct AudioEndpointProfileWireV1 final {
     Section playbackStreams{};
     Section timing{};
     Section facets{};
-} __attribute__((packed));
-
-struct StreamWireV1 final {
-    uint32_t pcmChannels{0};
-    uint32_t am824Slots{0};
-    uint8_t isoChannel{AudioStreamWireInfo::kInvalidIsoChannel};
-    uint8_t _reserved[3]{};
+    uint8_t configurationCapabilityCount{0};
+    uint8_t _configurationReserved[3]{};
+    std::array<ConfigurationCapabilityWireV2, kMaxConfigurationCapabilities>
+        configurationCapabilities{};
 } __attribute__((packed));
 
 struct TimingWireV1 final {
