@@ -2517,19 +2517,30 @@ Important characteristics:
 
 - BeBoB-like streaming;
 - proprietary unsafe/write-only control plane;
-- 22×4 main mixer;
-- 22×2 aux mixer;
-- output/headphone source selectors;
+- 22×4 main mixer — eleven stereo input pairs (4 analog, 1 S/PDIF, 4 ADAT,
+  2 stream) feeding **two** stereo mixer outputs;
+- 22×2 aux mixer — the same eleven pairs feeding one stereo aux bus, with its
+  own independent set of input gains;
+- output/headphone source selectors — each analog output pair chooses its mixer
+  output or aux; each headphone pair chooses mixer 1, mixer 2 or aux;
 - extensive input/output/aux gains;
-- balances;
-- meters;
+- balances — physical inputs only; the parameter window has no stream balance;
+- meters — 19 stereo points;
 - sync state;
 - front-panel events;
 - configuration state may need host caching.
 
+Stream geometry is configuration-dependent and decomposes as
+`capture = 8 analog + digital_in` and `playback = 4 analog + digital_out`, where
+the digital half is one pair for either S/PDIF variant and eight channels of
+ADAT that S/MUX halves to four above 48 kHz.
+
 Architectural lessons:
 
 - mixer and router must remain different primitives;
+- **level and crosspoint existence are separate placements** — the 1814 holds
+  one gain per mixer *input channel*, shared by both mixer outputs, while the
+  crosspoints are the on/off bits of two routing masks. §13.1 in practice;
 - control state provenance matters;
 - family identity does not guarantee safe standard control;
 - output selectors belong in semantic routing;

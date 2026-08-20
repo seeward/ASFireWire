@@ -117,15 +117,15 @@ void RunNamingTests(TestContext& ctx) {
         checkEveryEndpointIsCanonical(ctx, t);
 
         checkName(ctx, t, 1, "Line In 1/2");
-        checkName(ctx, t, 4, "ADAT In 1/2");
-        checkName(ctx, t, 98, "Headphone Out 1/2");
+        checkName(ctx, t, 11, "ADAT In 1/2");
+        checkName(ctx, t, 143, "Headphone Out 1/2");
 
-        // Regression: these three fed the Headphone 1 selector and used to
+        // Regression: these three feed the headphone selector and used to
         // render as two identical "Digital Master Mix L/R" pills plus one
         // correct entry, because the label was sniffed from port-name text.
-        checkLabel(ctx, t, 81, "Main Mix 1/2");
-        checkLabel(ctx, t, 82, "Aux Mix 3/4");
-        checkLabel(ctx, t, 83, "Playback 1/2");
+        checkLabel(ctx, t, 131, "Mixer 1");
+        checkLabel(ctx, t, 132, "Mixer 2");
+        checkLabel(ctx, t, 133, "Aux");
     }
 
     {

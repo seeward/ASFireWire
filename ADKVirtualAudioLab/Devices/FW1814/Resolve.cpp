@@ -2,11 +2,116 @@
 #include "Capabilities.hpp"
 
 #include <algorithm>
+#include <string>
 
 namespace ASFW::Devices::FW1814 {
 
 using namespace ASFW::AudioModel;
 using namespace ASFW::Device;
+
+namespace {
+
+// Geometry, from the two references that agree on it.
+//
+// Stream channel counts: Linux `bebob_maudio.c:228-241` ch_table, which
+// decomposes exactly as `8 analog + digital_in` for capture and
+// `4 analog + digital_out` for playback, with ADAT S/MUX halving 8 -> 4 above
+// 48 kHz. Corroborated on the device by the firmware's own I18S/I14S bus
+// naming (documentation/1814.md 3.2a).
+//
+// Mixer shape: the ALSA userspace BeBoB crate's parameter window,
+// `protocols/bebob/src/maudio/special.rs` -- MaudioSpecialMixerParameters is
+// `[[bool; 4]; 2]` analog, `[bool; 2]` S/PDIF, `[[bool; 4]; 2]` ADAT and
+// `[[bool; 2]; 2]` stream pairs, i.e. two stereo mixer outputs fed from eleven
+// stereo input pairs, plus a separate aux mixer over the same inputs.
+struct Geometry {
+    uint32_t digitalInPairs{};
+    uint32_t digitalOutPairs{};
+    uint32_t mixerPairs{};
+    uint32_t capturePcm{};
+    uint32_t playbackPcm{};
+    SignalKind digitalInKind{};
+    SignalKind digitalOutKind{};
+};
+
+constexpr uint32_t kAnalogInPairs = 4;   // 8 analog inputs
+constexpr uint32_t kAnalogOutPairs = 2;  // 4 analog outputs
+constexpr uint32_t kStreamMixerPairs = 2;
+constexpr uint32_t kHeadphonePairs = 2;
+
+Geometry geometryFor(const DeviceConfiguration& config) {
+    // ADAT carries 8 channels at 44.1/48 kHz and 4 under S/MUX above that;
+    // either S/PDIF variant carries one pair at every rate.
+    const bool smux = config.sampleRate > 48000;
+    const auto optIn = config.opticalInput.value_or(OpticalMode::Adat);
+    const auto optOut = config.opticalOutput.value_or(OpticalMode::Adat);
+
+    Geometry geometry;
+    geometry.digitalInPairs = (optIn == OpticalMode::Adat) ? (smux ? 2 : 4) : 1;
+    geometry.digitalOutPairs = (optOut == OpticalMode::Adat) ? (smux ? 2 : 4) : 1;
+    geometry.digitalInKind = (optIn == OpticalMode::Adat) ? SignalKind::Adat : SignalKind::SpdifOptical;
+    geometry.digitalOutKind = (optOut == OpticalMode::Adat) ? SignalKind::Adat : SignalKind::SpdifOptical;
+    geometry.mixerPairs = kAnalogInPairs + geometry.digitalInPairs + kStreamMixerPairs;
+    geometry.capturePcm = (kAnalogInPairs + geometry.digitalInPairs) * 2;
+    geometry.playbackPcm = (kAnalogOutPairs + geometry.digitalOutPairs) * 2;
+    return geometry;
+}
+
+// Port identifiers. Ranges are spaced so a mode change never reuses an id for a
+// different signal within one revision.
+constexpr uint32_t kPhysAnalogIn = 1;    // .. 4
+constexpr uint32_t kPhysDigitalIn = 11;  // .. 14
+constexpr uint32_t kHostCapture = 21;    // .. 28
+constexpr uint32_t kHostPlayback = 41;   // .. 46
+constexpr uint32_t kMainMixerIn = 61;    // .. 71
+constexpr uint32_t kMainMixerOut0 = 81;
+constexpr uint32_t kMainMixerOut1 = 82;
+constexpr uint32_t kAuxMixerIn = 91;     // .. 101
+constexpr uint32_t kAuxMixerOut = 111;
+constexpr uint32_t kAnalogMuxMix0 = 121;
+constexpr uint32_t kAnalogMuxMix1 = 122;
+constexpr uint32_t kAnalogMuxAux = 123;
+constexpr uint32_t kAnalogMuxOut = 126;  // .. 127
+constexpr uint32_t kPhoneMuxMix0 = 131;
+constexpr uint32_t kPhoneMuxMix1 = 132;
+constexpr uint32_t kPhoneMuxAux = 133;
+constexpr uint32_t kPhoneMuxOut = 136;   // .. 137
+constexpr uint32_t kPhysAnalogOut = 141; // .. 142
+constexpr uint32_t kPhysHeadphone = 143; // .. 144
+constexpr uint32_t kPhysDigitalOut = 151;// .. 154
+
+const NodeId nPhysIn{1};
+const NodeId nHostIO{2};
+const NodeId nMainMixer{3};
+const NodeId nAuxMixer{4};
+const NodeId nAnalogOutMux{5};
+const NodeId nHeadphoneMux{6};
+const NodeId nPhysOut{7};
+
+// dB range of every gain and volume in the parameter window
+// (documentation/1814.md 6.4: "Range -128...0 dB").
+constexpr ScalarDomain kGainDomain{.min = -128.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels};
+constexpr ScalarDomain kBalanceDomain{.min = -100.0, .max = 100.0, .step = 1.0, .unit = ScalarUnit::Percent};
+constexpr ScalarDomain kMeterDomain{.min = -128.0, .max = 0.0, .unit = ScalarUnit::Decibels};
+
+std::string mixerInputName(const Geometry& geometry, uint32_t index) {
+    if (index < kAnalogInPairs) {
+        return "Line In " + std::to_string(index * 2 + 1) + "/" + std::to_string(index * 2 + 2);
+    }
+    if (index < kAnalogInPairs + geometry.digitalInPairs) {
+        const uint32_t digital = index - kAnalogInPairs;
+        const char* label = (geometry.digitalInKind == SignalKind::Adat) ? "ADAT In " : "Opt S/PDIF In ";
+        return label + std::to_string(digital * 2 + 1) + "/" + std::to_string(digital * 2 + 2);
+    }
+    const uint32_t stream = index - kAnalogInPairs - geometry.digitalInPairs;
+    return "Playback " + std::to_string(stream * 2 + 1) + "/" + std::to_string(stream * 2 + 2);
+}
+
+bool mixerInputIsPhysical(const Geometry& geometry, uint32_t index) {
+    return index < kAnalogInPairs + geometry.digitalInPairs;
+}
+
+} // namespace
 
 std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
     const DeviceConfiguration& config) {
@@ -19,20 +124,24 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         });
     }
 
-    const auto optIn = config.opticalInput.value_or(OpticalMode::Adat);
-    const auto optOut = config.opticalOutput.value_or(OpticalMode::Adat);
+    const Geometry geometry = geometryFor(config);
 
     ResolvedAudioConfiguration resolved;
 
-    const uint32_t capChannels = (optIn == OpticalMode::Adat) ? 18 : 8;
-    const uint32_t playChannels = (optOut == OpticalMode::Adat) ? 14 : 8;
-
-    // 1. Streams: 18 capture channels (or 8 with optical SPDIF), 14 playback channels (or 8 with optical SPDIF)
+    // 1. Streams
     resolved.streams = ResolvedStreamConfiguration{
         .sampleRate = config.sampleRate,
         .streams = {
-            ResolvedAudioStream{StreamDirection::Capture, capChannels, "FW1814 Capture (" + std::to_string(capChannels) + " ch)"},
-            ResolvedAudioStream{StreamDirection::Playback, playChannels, "FW1814 Playback (" + std::to_string(playChannels) + " ch)"},
+            ResolvedAudioStream{
+                StreamDirection::Capture,
+                geometry.capturePcm,
+                "FW1814 Capture (" + std::to_string(geometry.capturePcm) + " ch)",
+            },
+            ResolvedAudioStream{
+                StreamDirection::Playback,
+                geometry.playbackPcm,
+                "FW1814 Playback (" + std::to_string(geometry.playbackPcm) + " ch)",
+            },
         },
     };
 
@@ -40,474 +149,431 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
     Topology& t = resolved.topology;
     t.revision = 0;
 
-    const NodeId nPhysIn{1};
-    const NodeId nHostCaptureBus{2};
-    const NodeId nHostIO{3};
-    const NodeId nSumMixer{4};
-    const NodeId nAuxMixer{5};
-    const NodeId nHpMux{6};
-    const NodeId nLineOutMux{7};
-    const NodeId nPhysOut{8};
+    const uint32_t capturePairs = kAnalogInPairs + geometry.digitalInPairs;
+    const uint32_t playbackPairs = kStreamMixerPairs + geometry.digitalOutPairs;
 
-    std::vector<PortId> capInPorts;
-    std::vector<PortId> capOutPorts;
-    for (uint32_t i = 1; i <= 7; ++i) {
-        capInPorts.push_back(PortId{10 + i});
-        capOutPorts.push_back(PortId{20 + i});
+    // --- Ports -----------------------------------------------------------
+
+    for (uint32_t i = 0; i < kAnalogInPairs; ++i) {
+        t.ports.push_back(endpointPort(PortId{kPhysAnalogIn + i}, nPhysIn, PortDirection::Output, 2,
+                                       {SignalKind::AnalogLine, i * 2 + 1}));
+    }
+    for (uint32_t i = 0; i < geometry.digitalInPairs; ++i) {
+        t.ports.push_back(endpointPort(PortId{kPhysDigitalIn + i}, nPhysIn, PortDirection::Output, 2,
+                                       {geometry.digitalInKind, i * 2 + 1}));
     }
 
-    // Main Sum Mixer: 11 stereo inputs -> 1 stereo output (Main Mix 1/2) = 11 crosspoints
-    std::vector<PortId> sumMixerInputs;
-    for (uint32_t i = 1; i <= 11; ++i) sumMixerInputs.push_back(PortId{50 + i});
-    std::vector<PortId> sumMixerOutputs = {PortId{71}};
-
-    std::vector<MixerCrosspoint> sumCrosspoints;
-    for (uint32_t src = 1; src <= 11; ++src) {
-        sumCrosspoints.push_back(MixerCrosspoint{CrosspointId{src}, PortId{50 + src}, PortId{71}});
+    for (uint32_t i = 0; i < capturePairs; ++i) {
+        t.ports.push_back(endpointPort(PortId{kHostCapture + i}, nHostIO, PortDirection::Input, 2,
+                                       {SignalKind::HostStream, i * 2 + 1}));
+    }
+    for (uint32_t i = 0; i < playbackPairs; ++i) {
+        t.ports.push_back(endpointPort(PortId{kHostPlayback + i}, nHostIO, PortDirection::Output, 2,
+                                       {SignalKind::HostStream, i * 2 + 1}));
     }
 
-    // Aux Downmix Mixer: 11 stereo inputs -> 1 stereo output (Aux Mix 3/4) = 11 crosspoints
+    std::vector<PortId> mainInputs;
     std::vector<PortId> auxInputs;
-    for (uint32_t i = 1; i <= 11; ++i) auxInputs.push_back(PortId{100 + i});
-    std::vector<PortId> auxOutputs = {PortId{112}};
+    for (uint32_t i = 0; i < geometry.mixerPairs; ++i) {
+        const std::string name = mixerInputName(geometry, i);
+        mainInputs.push_back(PortId{kMainMixerIn + i});
+        auxInputs.push_back(PortId{kAuxMixerIn + i});
+        t.ports.push_back(Port{PortId{kMainMixerIn + i}, nMainMixer, PortDirection::Input, 2, "Mixer In: " + name});
+        t.ports.push_back(Port{PortId{kAuxMixerIn + i}, nAuxMixer, PortDirection::Input, 2, "Aux In: " + name});
+    }
+    t.ports.push_back(Port{PortId{kMainMixerOut0}, nMainMixer, PortDirection::Output, 2, "Mixer 1 Out"});
+    t.ports.push_back(Port{PortId{kMainMixerOut1}, nMainMixer, PortDirection::Output, 2, "Mixer 2 Out"});
+    t.ports.push_back(Port{PortId{kAuxMixerOut}, nAuxMixer, PortDirection::Output, 2, "Aux Out"});
 
+    t.ports.push_back(Port{PortId{kAnalogMuxMix0}, nAnalogOutMux, PortDirection::Input, 2, "Mixer 1"});
+    t.ports.push_back(Port{PortId{kAnalogMuxMix1}, nAnalogOutMux, PortDirection::Input, 2, "Mixer 2"});
+    t.ports.push_back(Port{PortId{kAnalogMuxAux}, nAnalogOutMux, PortDirection::Input, 2, "Aux"});
+    for (uint32_t i = 0; i < kAnalogOutPairs; ++i) {
+        t.ports.push_back(Port{PortId{kAnalogMuxOut + i}, nAnalogOutMux, PortDirection::Output, 2,
+                               "Analog Out Pair " + std::to_string(i + 1)});
+    }
+
+    t.ports.push_back(Port{PortId{kPhoneMuxMix0}, nHeadphoneMux, PortDirection::Input, 2, "Mixer 1"});
+    t.ports.push_back(Port{PortId{kPhoneMuxMix1}, nHeadphoneMux, PortDirection::Input, 2, "Mixer 2"});
+    t.ports.push_back(Port{PortId{kPhoneMuxAux}, nHeadphoneMux, PortDirection::Input, 2, "Aux"});
+    for (uint32_t i = 0; i < kHeadphonePairs; ++i) {
+        t.ports.push_back(Port{PortId{kPhoneMuxOut + i}, nHeadphoneMux, PortDirection::Output, 2,
+                               "Headphone Pair " + std::to_string(i + 1)});
+    }
+
+    for (uint32_t i = 0; i < kAnalogOutPairs; ++i) {
+        t.ports.push_back(endpointPort(PortId{kPhysAnalogOut + i}, nPhysOut, PortDirection::Input, 2,
+                                       {SignalKind::AnalogLine, i * 2 + 1}));
+    }
+    for (uint32_t i = 0; i < kHeadphonePairs; ++i) {
+        t.ports.push_back(endpointPort(PortId{kPhysHeadphone + i}, nPhysOut, PortDirection::Input, 2,
+                                       {SignalKind::Headphone, i * 2 + 1}));
+    }
+    for (uint32_t i = 0; i < geometry.digitalOutPairs; ++i) {
+        t.ports.push_back(endpointPort(PortId{kPhysDigitalOut + i}, nPhysOut, PortDirection::Input, 2,
+                                       {geometry.digitalOutKind, i * 2 + 1}));
+    }
+
+    // --- Nodes -----------------------------------------------------------
+
+    std::vector<MixerCrosspoint> mainCrosspoints;
+    uint32_t crosspointId = 1;
+    for (uint32_t i = 0; i < geometry.mixerPairs; ++i) {
+        mainCrosspoints.push_back({CrosspointId{crosspointId++}, PortId{kMainMixerIn + i}, PortId{kMainMixerOut0}});
+    }
+    for (uint32_t i = 0; i < geometry.mixerPairs; ++i) {
+        mainCrosspoints.push_back({CrosspointId{crosspointId++}, PortId{kMainMixerIn + i}, PortId{kMainMixerOut1}});
+    }
     std::vector<MixerCrosspoint> auxCrosspoints;
-    for (uint32_t src = 1; src <= 11; ++src) {
-        auxCrosspoints.push_back(MixerCrosspoint{CrosspointId{11 + src}, PortId{100 + src}, PortId{112}});
+    for (uint32_t i = 0; i < geometry.mixerPairs; ++i) {
+        auxCrosspoints.push_back({CrosspointId{crosspointId++}, PortId{kAuxMixerIn + i}, PortId{kAuxMixerOut}});
+    }
+
+    std::vector<RouteBundle> analogBundles;
+    for (uint32_t pair = 0; pair < kAnalogOutPairs; ++pair) {
+        const PortId out{kAnalogMuxOut + pair};
+        analogBundles.push_back({RouteBundleId{pair * 2 + 1}, {Route{PortId{kAnalogMuxMix0 + pair}, out}}});
+        analogBundles.push_back({RouteBundleId{pair * 2 + 2}, {Route{PortId{kAnalogMuxAux}, out}}});
+    }
+
+    std::vector<RouteBundle> phoneBundles;
+    uint32_t phoneBundleId = 1;
+    for (uint32_t pair = 0; pair < kHeadphonePairs; ++pair) {
+        const PortId out{kPhoneMuxOut + pair};
+        for (uint32_t source = 0; source < 3; ++source) {
+            phoneBundles.push_back({RouteBundleId{phoneBundleId++}, {Route{PortId{kPhoneMuxMix0 + source}, out}}});
+        }
     }
 
     t.nodes = {
-        Node{nPhysIn, "Physical Inputs (Line 1-4, SPDIF, ADAT 1-8)", EndpointNode{EndpointKind::Physical}},
+        Node{nPhysIn, "Physical Inputs", EndpointNode{EndpointKind::Physical}},
+        Node{nHostIO, "Host Audio Streams", EndpointNode{EndpointKind::Host}},
         Node{
-            nHostCaptureBus,
-            "I18S Host Capture Bus",
-            ProcessorNode{
-                .inputs = std::move(capInPorts),
-                .outputs = std::move(capOutPorts),
-            },
-        },
-        Node{nHostIO, "Host Audio Streams (18 In / 14 Out)", EndpointNode{EndpointKind::Host}},
-        Node{
-            nSumMixer,
-            "Main 11x1 Sum Mixer",
+            nMainMixer,
+            "Main Mixer",
             MixerNode{
-                .inputs = std::move(sumMixerInputs),
-                .outputs = std::move(sumMixerOutputs),
-                .crosspoints = std::move(sumCrosspoints),
+                .inputs = mainInputs,
+                .outputs = {PortId{kMainMixerOut0}, PortId{kMainMixerOut1}},
+                .crosspoints = std::move(mainCrosspoints),
             },
         },
         Node{
             nAuxMixer,
-            "Aux 11x1 Downmix Mixer",
+            "Aux Mixer",
             MixerNode{
-                .inputs = std::move(auxInputs),
-                .outputs = std::move(auxOutputs),
+                .inputs = auxInputs,
+                .outputs = {PortId{kAuxMixerOut}},
                 .crosspoints = std::move(auxCrosspoints),
             },
         },
         Node{
-            nHpMux,
-            "Headphone 1 & 2 Source Selectors",
+            nAnalogOutMux,
+            "Analog Output Pair Source",
             RouterNode{
-                .inputs = {PortId{81}, PortId{82}, PortId{83}, PortId{84}},
-                .outputs = {PortId{85}, PortId{86}},
-                .legalBundles = {
-                    RouteBundle{RouteBundleId{1}, {Route{PortId{81}, PortId{85}}}},
-                    RouteBundle{RouteBundleId{2}, {Route{PortId{82}, PortId{85}}}},
-                    RouteBundle{RouteBundleId{3}, {Route{PortId{83}, PortId{85}}}},
-                    RouteBundle{RouteBundleId{4}, {Route{PortId{81}, PortId{86}}}},
-                    RouteBundle{RouteBundleId{5}, {Route{PortId{82}, PortId{86}}}},
-                    RouteBundle{RouteBundleId{6}, {Route{PortId{84}, PortId{86}}}},
-                },
+                .inputs = {PortId{kAnalogMuxMix0}, PortId{kAnalogMuxMix1}, PortId{kAnalogMuxAux}},
+                .outputs = {PortId{kAnalogMuxOut}, PortId{kAnalogMuxOut + 1}},
+                .legalBundles = std::move(analogBundles),
                 .constraints = RouterConstraints{
-                    .maxActiveBundles = 2,
+                    .maxActiveBundles = kAnalogOutPairs,
                     .maxSourcesPerOutput = 1,
-                    .maxDestinationsPerInput = 2,
+                    .maxDestinationsPerInput = kAnalogOutPairs,
                 },
             },
         },
         Node{
-            nLineOutMux,
-            "Analog Line Out Source Selectors",
+            nHeadphoneMux,
+            "Headphone Pair Source",
             RouterNode{
-                .inputs = {PortId{121}, PortId{122}, PortId{123}, PortId{124}},
-                .outputs = {PortId{125}, PortId{126}},
-                .legalBundles = {
-                    RouteBundle{RouteBundleId{1}, {Route{PortId{121}, PortId{125}}}},
-                    RouteBundle{RouteBundleId{2}, {Route{PortId{123}, PortId{125}}}},
-                    RouteBundle{RouteBundleId{3}, {Route{PortId{122}, PortId{126}}}},
-                    RouteBundle{RouteBundleId{4}, {Route{PortId{124}, PortId{126}}}},
-                },
+                .inputs = {PortId{kPhoneMuxMix0}, PortId{kPhoneMuxMix1}, PortId{kPhoneMuxAux}},
+                .outputs = {PortId{kPhoneMuxOut}, PortId{kPhoneMuxOut + 1}},
+                .legalBundles = std::move(phoneBundles),
                 .constraints = RouterConstraints{
-                    .maxActiveBundles = 2,
+                    .maxActiveBundles = kHeadphonePairs,
                     .maxSourcesPerOutput = 1,
-                    .maxDestinationsPerInput = 2,
+                    .maxDestinationsPerInput = kHeadphonePairs,
                 },
             },
         },
-        Node{nPhysOut, "Physical Outputs (Line 1-4, SPDIF, ADAT, HP 1/2)", EndpointNode{EndpointKind::Physical}},
+        Node{nPhysOut, "Physical Outputs", EndpointNode{EndpointKind::Physical}},
     };
 
-    // Ports (all stereo pairs = 2 channels)
-    // Physical In: 1..9
-    const auto opticalInKind = (optIn == OpticalMode::Adat) ? SignalKind::Adat : SignalKind::SpdifOptical;
+    // --- Fixed links -----------------------------------------------------
 
-    t.ports.push_back(endpointPort(PortId{1}, nPhysIn, PortDirection::Output, 2, {SignalKind::AnalogLine, 1}));
-    t.ports.push_back(endpointPort(PortId{2}, nPhysIn, PortDirection::Output, 2, {SignalKind::AnalogLine, 3}));
-    t.ports.push_back(endpointPort(PortId{3}, nPhysIn, PortDirection::Output, 2, {SignalKind::SpdifCoaxial, 1}));
-    t.ports.push_back(endpointPort(PortId{4}, nPhysIn, PortDirection::Output, 2, {opticalInKind, 1}));
-    // Ports 5-7 only exist in ADAT mode; optical S/PDIF carries one pair. The
-    // mode-dependent structure lands with the stream-geometry rebuild, so for
-    // now they stay and are visibly mislabelled in S/PDIF mode rather than
-    // plausibly mislabelled as "(Off)".
-    t.ports.push_back(endpointPort(PortId{5}, nPhysIn, PortDirection::Output, 2, {SignalKind::Adat, 3}));
-    t.ports.push_back(endpointPort(PortId{6}, nPhysIn, PortDirection::Output, 2, {SignalKind::Adat, 5}));
-    t.ports.push_back(endpointPort(PortId{7}, nPhysIn, PortDirection::Output, 2, {SignalKind::Adat, 7}));
-
-    for (uint32_t i = 1; i <= 7; ++i) {
-        t.ports.push_back(Port{PortId{10 + i}, nHostCaptureBus, PortDirection::Input, 2, "Capture Bus In " + std::to_string(i)});
-        t.ports.push_back(Port{PortId{20 + i}, nHostCaptureBus, PortDirection::Output, 2, "Capture Bus Out " + std::to_string(i)});
-        t.ports.push_back(endpointPort(PortId{30 + i}, nHostIO, PortDirection::Input, 2, {SignalKind::HostStream, i * 2 - 1}));
+    // Capture is direct: it does not pass through the mixer
+    // (documentation/1814.md 3.2b -- the main mixer has no host destination).
+    for (uint32_t i = 0; i < capturePairs; ++i) {
+        const PortId source{(i < kAnalogInPairs) ? kPhysAnalogIn + i : kPhysDigitalIn + (i - kAnalogInPairs)};
+        t.fixedLinks.push_back({source, PortId{kHostCapture + i}});
+        t.fixedLinks.push_back({source, PortId{kMainMixerIn + i}});
+        t.fixedLinks.push_back({source, PortId{kAuxMixerIn + i}});
     }
 
-    for (uint32_t i = 1; i <= 7; ++i) {
-        t.ports.push_back(endpointPort(PortId{40 + i}, nHostIO, PortDirection::Output, 2, {SignalKind::HostStream, i * 2 - 1}));
+    // Only the first two playback pairs reach the mixers; the rest are the
+    // digital output slots and go straight to the connector.
+    for (uint32_t i = 0; i < kStreamMixerPairs; ++i) {
+        const uint32_t slot = kAnalogInPairs + geometry.digitalInPairs + i;
+        t.fixedLinks.push_back({PortId{kHostPlayback + i}, PortId{kMainMixerIn + slot}});
+        t.fixedLinks.push_back({PortId{kHostPlayback + i}, PortId{kAuxMixerIn + slot}});
+    }
+    for (uint32_t i = 0; i < geometry.digitalOutPairs; ++i) {
+        t.fixedLinks.push_back({PortId{kHostPlayback + kStreamMixerPairs + i}, PortId{kPhysDigitalOut + i}});
     }
 
-    // Main Sum Mixer Inputs: 51..61
-    const std::vector<std::string> chNames = {
-        "Line In 1/2", "Line In 3/4", "S/PDIF In",
-        (optIn == OpticalMode::Adat) ? "ADAT In 1/2" : "Opt SPDIF In",
-        (optIn == OpticalMode::Adat) ? "ADAT In 3/4" : "Opt In 3/4 (Off)",
-        (optIn == OpticalMode::Adat) ? "ADAT In 5/6" : "Opt In 5/6 (Off)",
-        (optIn == OpticalMode::Adat) ? "ADAT In 7/8" : "Opt In 7/8 (Off)",
-        "DAW Playback 1/2", "DAW Playback 3/4", "DAW Playback 5/6", "DAW Playback 7/8"
-    };
+    t.fixedLinks.push_back({PortId{kMainMixerOut0}, PortId{kAnalogMuxMix0}});
+    t.fixedLinks.push_back({PortId{kMainMixerOut1}, PortId{kAnalogMuxMix1}});
+    t.fixedLinks.push_back({PortId{kAuxMixerOut}, PortId{kAnalogMuxAux}});
+    t.fixedLinks.push_back({PortId{kMainMixerOut0}, PortId{kPhoneMuxMix0}});
+    t.fixedLinks.push_back({PortId{kMainMixerOut1}, PortId{kPhoneMuxMix1}});
+    t.fixedLinks.push_back({PortId{kAuxMixerOut}, PortId{kPhoneMuxAux}});
 
-    for (uint32_t i = 1; i <= 11; ++i) {
-        t.ports.push_back(Port{PortId{50 + i}, nSumMixer, PortDirection::Input, 2, "Main In: " + chNames[i - 1]});
-        t.ports.push_back(Port{PortId{100 + i}, nAuxMixer, PortDirection::Input, 2, "Aux In: " + chNames[i - 1]});
+    for (uint32_t i = 0; i < kAnalogOutPairs; ++i) {
+        t.fixedLinks.push_back({PortId{kAnalogMuxOut + i}, PortId{kPhysAnalogOut + i}});
     }
-    t.ports.push_back(Port{PortId{71}, nSumMixer, PortDirection::Output, 2, "Main Mix 1/2"});
-    t.ports.push_back(Port{PortId{112}, nAuxMixer, PortDirection::Output, 2, "Aux Mix 3/4"});
-
-    // HP Router Ports
-    t.ports.push_back(Port{PortId{81}, nHpMux, PortDirection::Input, 2, "Main Mix 1/2"});
-    t.ports.push_back(Port{PortId{82}, nHpMux, PortDirection::Input, 2, "Aux Mix 3/4"});
-    t.ports.push_back(Port{PortId{83}, nHpMux, PortDirection::Input, 2, "DAW Playback 1/2"});
-    t.ports.push_back(Port{PortId{84}, nHpMux, PortDirection::Input, 2, "DAW Playback 3/4"});
-    t.ports.push_back(Port{PortId{85}, nHpMux, PortDirection::Output, 2, "Headphone 1 (A)"});
-    t.ports.push_back(Port{PortId{86}, nHpMux, PortDirection::Output, 2, "Headphone 2 (B)"});
-
-    // Line Out Router Ports
-    t.ports.push_back(Port{PortId{121}, nLineOutMux, PortDirection::Input, 2, "Main Mix 1/2"});
-    t.ports.push_back(Port{PortId{122}, nLineOutMux, PortDirection::Input, 2, "Aux Mix 3/4"});
-    t.ports.push_back(Port{PortId{123}, nLineOutMux, PortDirection::Input, 2, "DAW Playback 1/2"});
-    t.ports.push_back(Port{PortId{124}, nLineOutMux, PortDirection::Input, 2, "DAW Playback 3/4"});
-    t.ports.push_back(Port{PortId{125}, nLineOutMux, PortDirection::Output, 2, "Line Out 1/2"});
-    t.ports.push_back(Port{PortId{126}, nLineOutMux, PortDirection::Output, 2, "Line Out 3/4"});
-
-    // Physical Outputs
-    t.ports.push_back(endpointPort(PortId{91}, nPhysOut, PortDirection::Input, 2, {SignalKind::AnalogLine, 1}));
-    t.ports.push_back(endpointPort(PortId{92}, nPhysOut, PortDirection::Input, 2, {SignalKind::AnalogLine, 3}));
-    t.ports.push_back(endpointPort(PortId{93}, nPhysOut, PortDirection::Input, 2, {SignalKind::SpdifCoaxial, 1}));
-    t.ports.push_back(endpointPort(PortId{98}, nPhysOut, PortDirection::Input, 2, {SignalKind::Headphone, 1}));
-    t.ports.push_back(endpointPort(PortId{99}, nPhysOut, PortDirection::Input, 2, {SignalKind::Headphone, 3}));
-
-    // Fixed Links
-    for (uint32_t i = 1; i <= 7; ++i) {
-        t.fixedLinks.push_back(FixedLink{PortId{i}, PortId{10 + i}});
-        t.fixedLinks.push_back(FixedLink{PortId{20 + i}, PortId{30 + i}});
-        t.fixedLinks.push_back(FixedLink{PortId{i}, PortId{50 + i}});
-        t.fixedLinks.push_back(FixedLink{PortId{i}, PortId{100 + i}});
-    }
-    for (uint32_t i = 1; i <= 4; ++i) {
-        t.fixedLinks.push_back(FixedLink{PortId{40 + i}, PortId{57 + i}});
-        t.fixedLinks.push_back(FixedLink{PortId{40 + i}, PortId{107 + i}});
+    for (uint32_t i = 0; i < kHeadphonePairs; ++i) {
+        t.fixedLinks.push_back({PortId{kPhoneMuxOut + i}, PortId{kPhysHeadphone + i}});
     }
 
-    t.fixedLinks.push_back(FixedLink{PortId{43}, PortId{93}}); // Direct SPDIF Playback
+    // --- Channels and buses ----------------------------------------------
 
-    t.fixedLinks.push_back(FixedLink{PortId{71}, PortId{121}});
-    t.fixedLinks.push_back(FixedLink{PortId{112}, PortId{122}});
-    t.fixedLinks.push_back(FixedLink{PortId{41}, PortId{123}});
-    t.fixedLinks.push_back(FixedLink{PortId{42}, PortId{124}});
-
-    t.fixedLinks.push_back(FixedLink{PortId{71}, PortId{81}});
-    t.fixedLinks.push_back(FixedLink{PortId{112}, PortId{82}});
-    t.fixedLinks.push_back(FixedLink{PortId{41}, PortId{83}});
-    t.fixedLinks.push_back(FixedLink{PortId{42}, PortId{84}});
-
-    t.fixedLinks.push_back(FixedLink{PortId{125}, PortId{91}});
-    t.fixedLinks.push_back(FixedLink{PortId{126}, PortId{92}});
-    t.fixedLinks.push_back(FixedLink{PortId{85}, PortId{98}});
-    t.fixedLinks.push_back(FixedLink{PortId{86}, PortId{99}});
-
-    // 3. Audio Semantics: Logical Channels (11) & Busses (2)
-    for (uint32_t i = 1; i <= 7; ++i) {
+    for (uint32_t i = 0; i < geometry.mixerPairs; ++i) {
+        std::vector<PortId> ports{PortId{kMainMixerIn + i}, PortId{kAuxMixerIn + i}};
+        if (mixerInputIsPhysical(geometry, i)) {
+            ports.push_back(PortId{(i < kAnalogInPairs) ? kPhysAnalogIn + i : kPhysDigitalIn + (i - kAnalogInPairs)});
+            ports.push_back(PortId{kHostCapture + i});
+        } else {
+            ports.push_back(PortId{kHostPlayback + (i - kAnalogInPairs - geometry.digitalInPairs)});
+        }
         t.channels.push_back(Channel{
-            .id = ChannelId{i},
-            .name = chNames[i - 1],
-            .ports = {PortId{i}, PortId{50 + i}, PortId{100 + i}},
-        });
-    }
-    for (uint32_t i = 8; i <= 11; ++i) {
-        t.channels.push_back(Channel{
-            .id = ChannelId{i},
-            .name = chNames[i - 1],
-            .ports = {PortId{40 + i - 7}, PortId{50 + i}, PortId{100 + i}},
+            .id = ChannelId{i + 1},
+            .name = mixerInputName(geometry, i),
+            .ports = std::move(ports),
         });
     }
 
     t.buses = {
-        Bus{
-            .id = BusId{1},
-            .semantic = BusSemantic::Main,
-            .name = "Main Mix 1/2",
-            .ports = {PortId{71}},
-        },
-        Bus{
-            .id = BusId{2},
-            .semantic = BusSemantic::Aux,
-            .name = "Aux Mix 3/4",
-            .ports = {PortId{112}},
-        },
+        Bus{BusId{1}, BusSemantic::Main, "Mixer 1", {PortId{kMainMixerOut0}}},
+        Bus{BusId{2}, BusSemantic::Main, "Mixer 2", {PortId{kMainMixerOut1}}},
+        Bus{BusId{3}, BusSemantic::Aux, "Aux", {PortId{kAuxMixerOut}}},
     };
 
-    // 4. Parameters
-    // 11 Main Sends (CrosspointId 1..11)
-    for (uint32_t i = 1; i <= 11; ++i) {
+    // --- Parameters ------------------------------------------------------
+    //
+    // Level sits on the mixer *input port*, not on the crosspoint: the
+    // parameter window holds one gain per input channel, shared by both mixer
+    // outputs, while the crosspoints are the on/off bits of the 0x90/0x94
+    // routing masks. This is AUAA 13.1 in practice.
+
+    uint32_t parameterId = 1;
+
+    for (uint32_t i = 0; i < geometry.mixerPairs; ++i) {
         t.parameters.push_back(Parameter{
-            .id = ParameterId{i},
-            .target = CrosspointId{i},
+            .id = ParameterId{parameterId++},
+            .target = PortId{kMainMixerIn + i},
             .semantic = ParameterSemantic::Level,
-            .domain = ScalarDomain{.min = -128.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
-            .name = chNames[i - 1] + " Main Send",
+            .domain = kGainDomain,
+            .name = mixerInputName(geometry, i) + " Mixer Gain",
         });
     }
-
-    // 11 Aux Sends (CrosspointId 12..22)
-    for (uint32_t i = 1; i <= 11; ++i) {
+    // Balance exists for the physical inputs only; the parameter window has no
+    // stream balance registers.
+    for (uint32_t i = 0; i < geometry.mixerPairs; ++i) {
+        if (!mixerInputIsPhysical(geometry, i)) continue;
         t.parameters.push_back(Parameter{
-            .id = ParameterId{11 + i},
-            .target = CrosspointId{11 + i},
-            .semantic = ParameterSemantic::Level,
-            .domain = ScalarDomain{.min = -128.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
-            .name = chNames[i - 1] + " Aux Send",
+            .id = ParameterId{parameterId++},
+            .target = PortId{kMainMixerIn + i},
+            .semantic = ParameterSemantic::Balance,
+            .domain = kBalanceDomain,
+            .name = mixerInputName(geometry, i) + " Balance",
         });
     }
-
-    // 11 Pan Controls (PortId 51..61)
-    for (uint32_t i = 1; i <= 11; ++i) {
+    for (const auto& crosspoint : std::get<MixerNode>(t.nodes[2].body).crosspoints) {
         t.parameters.push_back(Parameter{
-            .id = ParameterId{22 + i},
-            .target = PortId{50 + i},
-            .semantic = ParameterSemantic::Pan,
-            .domain = ScalarDomain{.min = -100.0, .max = 100.0, .step = 1.0, .unit = ScalarUnit::Percent},
-            .name = chNames[i - 1] + " Pan",
-        });
-    }
-
-    // 11 Mute Controls (PortId 51..61)
-    for (uint32_t i = 1; i <= 11; ++i) {
-        t.parameters.push_back(Parameter{
-            .id = ParameterId{33 + i},
-            .target = PortId{50 + i},
+            .id = ParameterId{parameterId++},
+            .target = crosspoint.id,
             .semantic = ParameterSemantic::Mute,
             .domain = BooleanDomain{},
-            .name = chNames[i - 1] + " Mute",
+            .name = "Mixer Send Disabled",
         });
     }
-
-    // 11 Solo Controls (PortId 51..61)
-    for (uint32_t i = 1; i <= 11; ++i) {
+    for (uint32_t i = 0; i < geometry.mixerPairs; ++i) {
         t.parameters.push_back(Parameter{
-            .id = ParameterId{44 + i},
-            .target = PortId{50 + i},
-            .semantic = ParameterSemantic::Solo,
-            .domain = BooleanDomain{},
-            .name = chNames[i - 1] + " Solo",
-        });
-    }
-
-    // 5 Output Masters (Level + Mute)
-    const std::vector<std::pair<PortId, std::string>> outMasters = {
-        {PortId{91}, "Analog Out 1/2"},
-        {PortId{92}, "Analog Out 3/4"},
-        {PortId{98}, "Headphone 1 (A)"},
-        {PortId{99}, "Headphone 2 (B)"},
-        {PortId{93}, "S/PDIF Out"},
-    };
-
-    uint32_t pId = 56;
-    for (const auto& [port, name] : outMasters) {
-        t.parameters.push_back(Parameter{
-            .id = ParameterId{pId++},
-            .target = port,
+            .id = ParameterId{parameterId++},
+            .target = PortId{kAuxMixerIn + i},
             .semantic = ParameterSemantic::Level,
-            .domain = ScalarDomain{.min = -128.0, .max = 0.0, .step = 0.5, .unit = ScalarUnit::Decibels},
-            .name = name + " Level",
-        });
-        t.parameters.push_back(Parameter{
-            .id = ParameterId{pId++},
-            .target = port,
-            .semantic = ParameterSemantic::Mute,
-            .domain = BooleanDomain{},
-            .name = name + " Mute",
+            .domain = kGainDomain,
+            .name = mixerInputName(geometry, i) + " Aux Gain",
         });
     }
 
-    const auto pClock = ParameterId{pId++};
     t.parameters.push_back(Parameter{
-        .id = pClock,
+        .id = ParameterId{parameterId++},
+        .target = PortId{kAuxMixerOut},
+        .semantic = ParameterSemantic::Level,
+        .domain = kGainDomain,
+        .name = "Aux Output Volume",
+    });
+    for (uint32_t i = 0; i < kAnalogOutPairs; ++i) {
+        t.parameters.push_back(Parameter{
+            .id = ParameterId{parameterId++},
+            .target = PortId{kPhysAnalogOut + i},
+            .semantic = ParameterSemantic::Level,
+            .domain = kGainDomain,
+            .name = "Analog Out " + std::to_string(i * 2 + 1) + "/" + std::to_string(i * 2 + 2) + " Volume",
+        });
+    }
+    for (uint32_t i = 0; i < kHeadphonePairs; ++i) {
+        t.parameters.push_back(Parameter{
+            .id = ParameterId{parameterId++},
+            .target = PortId{kPhysHeadphone + i},
+            .semantic = ParameterSemantic::Level,
+            .domain = kGainDomain,
+            .name = "Headphone " + std::to_string(i + 1) + " Volume",
+        });
+    }
+
+    // Wire values from Linux bebob_maudio.c:342-348. Value 1 is "Digital",
+    // whichever source the digital input interface selects -- the device does
+    // not expose separate S/PDIF and ADAT clock sources.
+    t.parameters.push_back(Parameter{
+        .id = ParameterId{parameterId++},
         .target = nPhysIn,
         .semantic = ParameterSemantic::ClockSource,
         .domain = EnumDomain{
             .values = {
-                EnumItem{0, "Internal"},
-                EnumItem{1, "S/PDIF Coaxial"},
-                EnumItem{2, "ADAT Optical"},
-                EnumItem{3, "Word Clock BNC"},
+                EnumItem{0, "Internal with Digital Mute"},
+                EnumItem{1, "Digital"},
+                EnumItem{2, "Word Clock"},
+                EnumItem{3, "Internal"},
             },
         },
         .name = "Clock Source",
     });
 
-    // 5. Meters (11 Channel Meters + 5 Output Meters)
-    for (uint32_t i = 1; i <= 7; ++i) {
+    // --- Meters ----------------------------------------------------------
+    //
+    // 19 stereo points, from Linux bebob_maudio.c:618-627 special_meter_labels.
+    // Only those that exist in the current mode are published.
+
+    uint32_t meterId = 1;
+    auto addMeter = [&](PortId port, const std::string& name) {
         t.meters.push_back(Meter{
-            .id = MeterId{i},
-            .target = PortId{i},
-            .semantic = MeterSemantic::Peak,
-            .domain = ScalarDomain{.min = -128.0, .max = 0.0, .unit = ScalarUnit::Decibels},
-            .name = chNames[i - 1] + " Peak Meter",
-        });
-    }
-    for (uint32_t i = 8; i <= 11; ++i) {
-        t.meters.push_back(Meter{
-            .id = MeterId{i},
-            .target = PortId{40 + i - 7},
-            .semantic = MeterSemantic::Peak,
-            .domain = ScalarDomain{.min = -128.0, .max = 0.0, .unit = ScalarUnit::Decibels},
-            .name = chNames[i - 1] + " Peak Meter",
-        });
-    }
-    uint32_t mId = 12;
-    for (const auto& [port, name] : outMasters) {
-        t.meters.push_back(Meter{
-            .id = MeterId{mId++},
+            .id = MeterId{meterId++},
             .target = port,
             .semantic = MeterSemantic::Peak,
-            .domain = ScalarDomain{.min = -128.0, .max = 0.0, .unit = ScalarUnit::Decibels},
-            .name = name + " Peak Meter",
+            .domain = kMeterDomain,
+            .name = name,
         });
-    }
-
-    // 6. Presentation Hints (Thin presentation hints only)
-    resolved.presentation.routers = {
-        Presentation::RouterPresentationHint{
-            .router = NodeId{6},
-            .style = Presentation::RouterPresentationStyle::Selector,
-            .bundleGroups = {
-                Presentation::RouteBundleGroup{
-                    .name = "Headphone 1 (A) Source",
-                    .bundles = {RouteBundleId{1}, RouteBundleId{2}, RouteBundleId{3}},
-                },
-                Presentation::RouteBundleGroup{
-                    .name = "Headphone 2 (B) Source",
-                    .bundles = {RouteBundleId{4}, RouteBundleId{5}, RouteBundleId{6}},
-                },
-            },
-        },
-        Presentation::RouterPresentationHint{
-            .router = NodeId{7},
-            .style = Presentation::RouterPresentationStyle::Selector,
-            .bundleGroups = {
-                Presentation::RouteBundleGroup{
-                    .name = "Line Out 1/2 Source",
-                    .bundles = {RouteBundleId{1}, RouteBundleId{2}},
-                },
-                Presentation::RouteBundleGroup{
-                    .name = "Line Out 3/4 Source",
-                    .bundles = {RouteBundleId{3}, RouteBundleId{4}},
-                },
-            },
-        },
     };
+    for (uint32_t i = 0; i < capturePairs; ++i) {
+        const PortId port{(i < kAnalogInPairs) ? kPhysAnalogIn + i : kPhysDigitalIn + (i - kAnalogInPairs)};
+        addMeter(port, mixerInputName(geometry, i) + " Peak");
+    }
+    for (uint32_t i = 0; i < kAnalogOutPairs; ++i) {
+        addMeter(PortId{kPhysAnalogOut + i}, "Analog Out " + std::to_string(i + 1) + " Peak");
+    }
+    for (uint32_t i = 0; i < kHeadphonePairs; ++i) {
+        addMeter(PortId{kPhysHeadphone + i}, "Headphone " + std::to_string(i + 1) + " Peak");
+    }
+    for (uint32_t i = 0; i < geometry.digitalOutPairs; ++i) {
+        addMeter(PortId{kPhysDigitalOut + i}, "Digital Out " + std::to_string(i + 1) + " Peak");
+    }
+    addMeter(PortId{kAuxMixerOut}, "Aux Out Peak");
+
+    // --- Presentation ----------------------------------------------------
 
     resolved.presentation.mixers = {
         Presentation::MixerPresentationHint{
-            .mixer = NodeId{4},
+            .mixer = nMainMixer,
             .style = Presentation::MixerPresentationStyle::ChannelStrips,
         },
         Presentation::MixerPresentationHint{
-            .mixer = NodeId{5},
+            .mixer = nAuxMixer,
             .style = Presentation::MixerPresentationStyle::ChannelStrips,
         },
     };
 
-    // Parameter Presentation Hints (Fader for Main, Rotary for Aux & Pan, Toggle for Mute & Solo)
-    for (uint32_t i = 1; i <= 11; ++i) {
-        resolved.presentation.parameters.push_back(Presentation::ParameterPresentationHint{
-            .parameter = ParameterId{i},
-            .presentation = Presentation::ControlPresentation::Fader,
-        });
-        resolved.presentation.parameters.push_back(Presentation::ParameterPresentationHint{
-            .parameter = ParameterId{11 + i},
-            .presentation = Presentation::ControlPresentation::Rotary,
-        });
-        resolved.presentation.parameters.push_back(Presentation::ParameterPresentationHint{
-            .parameter = ParameterId{22 + i},
-            .presentation = Presentation::ControlPresentation::Rotary,
-        });
-        resolved.presentation.parameters.push_back(Presentation::ParameterPresentationHint{
-            .parameter = ParameterId{33 + i},
-            .presentation = Presentation::ControlPresentation::Toggle,
-        });
-        resolved.presentation.parameters.push_back(Presentation::ParameterPresentationHint{
-            .parameter = ParameterId{44 + i},
-            .presentation = Presentation::ControlPresentation::Toggle,
+    std::vector<Presentation::RouteBundleGroup> analogGroups;
+    for (uint32_t pair = 0; pair < kAnalogOutPairs; ++pair) {
+        analogGroups.push_back({
+            "Analog Out " + std::to_string(pair * 2 + 1) + "/" + std::to_string(pair * 2 + 2) + " Source",
+            {RouteBundleId{pair * 2 + 1}, RouteBundleId{pair * 2 + 2}},
         });
     }
+    std::vector<Presentation::RouteBundleGroup> phoneGroups;
+    for (uint32_t pair = 0; pair < kHeadphonePairs; ++pair) {
+        phoneGroups.push_back({
+            "Headphone " + std::to_string(pair + 1) + " Source",
+            {RouteBundleId{pair * 3 + 1}, RouteBundleId{pair * 3 + 2}, RouteBundleId{pair * 3 + 3}},
+        });
+    }
+    resolved.presentation.routers = {
+        Presentation::RouterPresentationHint{
+            .router = nAnalogOutMux,
+            .style = Presentation::RouterPresentationStyle::Selector,
+            .bundleGroups = std::move(analogGroups),
+        },
+        Presentation::RouterPresentationHint{
+            .router = nHeadphoneMux,
+            .style = Presentation::RouterPresentationStyle::Selector,
+            .bundleGroups = std::move(phoneGroups),
+        },
+    };
 
     return resolved;
 }
 
 DeviceState makeInitialState(const ResolvedAudioConfiguration& resolved) {
     DeviceState state;
-    state.topologyRevision = resolved.topology.revision;
+    const Topology& t = resolved.topology;
 
-    // Default Main Sends: Unity (0.0 dB) for DAW Playback 1/2 and Line In 1/2, -128 dB for others
-    for (uint32_t i = 1; i <= 11; ++i) {
-        state.parameters[ParameterId{i}] = (i == 1 || i == 8) ? 0.0 : -128.0;
-        state.parameters[ParameterId{11 + i}] = -128.0; // Aux sends at -inf
-        state.parameters[ParameterId{22 + i}] = 0.0;    // Pan center
-        state.parameters[ParameterId{33 + i}] = false;  // Unmuted
-        state.parameters[ParameterId{44 + i}] = false;  // Unsoloed
+    for (const auto& parameter : t.parameters) {
+        std::visit([&](const auto& domain) {
+            using D = std::decay_t<decltype(domain)>;
+            if constexpr (std::is_same_v<D, BooleanDomain>) {
+                state.parameters[parameter.id] = false;
+            } else if constexpr (std::is_same_v<D, ScalarDomain>) {
+                // Gains are i16 with 0 = maximum (documentation/1814.md 6.1).
+                state.parameters[parameter.id] =
+                    (parameter.semantic == ParameterSemantic::Balance) ? 0.0 : domain.max;
+            } else if constexpr (std::is_same_v<D, EnumDomain>) {
+                // Internal, which is what Linux selects at discovery
+                // (bebob_maudio.c:276 sends clk_src 0x03).
+                const int64_t fallback = domain.values.empty() ? 0 : domain.values.front().value;
+                state.parameters[parameter.id] =
+                    (parameter.semantic == ParameterSemantic::ClockSource) ? int64_t{3} : fallback;
+            }
+        }, parameter.domain);
     }
 
-    // Output Masters (56..65)
-    for (uint32_t p = 56; p < 66; p += 2) {
-        state.parameters[ParameterId{p}] = 0.0;      // Level 0.0 dB
-        state.parameters[ParameterId{p + 1}] = false; // Unmuted
+    // The device powers up with every physical send disabled and only the two
+    // stream pairs routed -- 0x90 defaults to 0 and 0x94 to 0x00000009. That
+    // empty mixer is what made the unit silent until the driver asserted the
+    // routing (documentation/1814.md 6.2, 2.2).
+    const auto& mainMixer = std::get<MixerNode>(t.nodes[2].body);
+    const uint32_t mixerPairs = static_cast<uint32_t>(mainMixer.inputs.size());
+    const uint32_t streamFirst = mixerPairs - kStreamMixerPairs;
+    for (const auto& crosspoint : mainMixer.crosspoints) {
+        for (const auto& parameter : t.parameters) {
+            if (!std::holds_alternative<CrosspointId>(parameter.target)) continue;
+            if (std::get<CrosspointId>(parameter.target) != crosspoint.id) continue;
+
+            const uint32_t input = crosspoint.input.value - kMainMixerIn;
+            const bool isStream = input >= streamFirst;
+            const uint32_t streamPair = isStream ? input - streamFirst : 0;
+            const bool toMixer0 = crosspoint.output.value == kMainMixerOut0;
+            const bool routed = isStream && (toMixer0 ? streamPair == 0 : streamPair == 1);
+            state.parameters[parameter.id] = !routed;  // parameter is "send disabled"
+        }
     }
 
-    // Clock Source (ParameterId 66)
-    state.parameters[ParameterId{66}] = int64_t{0}; // Internal Clock
-
-    // Headphone Mux (Node 6): HP 1 <- Mix 0 (Bundle 1), HP 2 <- Mix 1 (Bundle 5)
-    state.routers[NodeId{6}] = RouterState{
-        .activeBundles = {RouteBundleId{1}, RouteBundleId{5}},
-    };
-
-    // LineOut Mux (Node 7): LineOut 1/2 <- Mix 0 (Bundle 1), LineOut 3/4 <- Mix 1 (Bundle 3)
-    state.routers[NodeId{7}] = RouterState{
-        .activeBundles = {RouteBundleId{1}, RouteBundleId{3}},
-    };
-
-    for (uint32_t m = 1; m <= 16; ++m) {
-        state.meters[MeterId{m}] = -128.0;
+    for (const auto& meter : t.meters) {
+        state.meters[meter.id] = kMeterDomain.min;
     }
+
+    // Analog pairs take their own mixer output; headphone pairs follow the
+    // mixer pairs (0x9c = 0x00000000, 0x98 = 0x00020001).
+    state.routers[nAnalogOutMux] = RouterState{.activeBundles = {RouteBundleId{1}, RouteBundleId{3}}};
+    state.routers[nHeadphoneMux] = RouterState{.activeBundles = {RouteBundleId{1}, RouteBundleId{5}}};
 
     return state;
 }

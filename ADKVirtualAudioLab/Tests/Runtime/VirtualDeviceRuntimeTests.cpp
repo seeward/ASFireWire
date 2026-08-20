@@ -146,6 +146,77 @@ void RunVirtualDeviceRuntimeTests(TestContext& ctx) {
         CHECK(ctx, validateState(rt.resolved().topology, rt.state()).has_value());
     }
 
+    // 4. FW1814 configuration cascade: rate and optical mode both rebuild the
+    // topology, the stream plan and the state together, under one revision.
+    {
+        auto rtRes = VirtualDeviceRuntime::create(VirtualDeviceKind::FW1814);
+        REQUIRE(ctx, rtRes.has_value());
+        auto& rt = *rtRes;
+
+        struct Step {
+            uint32_t rate;
+            OpticalMode in;
+            OpticalMode out;
+            uint32_t capture;
+            uint32_t playback;
+        };
+        // Counts from Linux bebob_maudio.c:228-241.
+        const Step steps[] = {
+            {48000, OpticalMode::Adat,  OpticalMode::Adat,  16, 12},
+            {96000, OpticalMode::Adat,  OpticalMode::Adat,  12,  8},
+            {96000, OpticalMode::Spdif, OpticalMode::Adat,  10,  8},
+            {44100, OpticalMode::Spdif, OpticalMode::Spdif, 10,  6},
+            {48000, OpticalMode::Adat,  OpticalMode::Adat,  16, 12},
+        };
+
+        uint64_t previousRevision = rt.revision();
+        for (const auto& step : steps) {
+            auto applied = rt.setConfiguration(DeviceConfiguration{
+                .sampleRate = step.rate,
+                .opticalInput = step.in,
+                .opticalOutput = step.out,
+            });
+            CHECK(ctx, applied.has_value());
+
+            CHECK(ctx, rt.revision() == previousRevision + 1);
+            previousRevision = rt.revision();
+
+            // Everything the revision covers must agree: stream plan, topology
+            // and state all describe the mode just committed.
+            CHECK_EQ_U32(ctx, rt.resolved().streams.streams[0].channels, step.capture);
+            CHECK_EQ_U32(ctx, rt.resolved().streams.streams[1].channels, step.playback);
+            CHECK_EQ_U32(ctx, rt.resolved().streams.sampleRate, step.rate);
+            CHECK(ctx, rt.resolved().topology.revision == rt.revision());
+            CHECK(ctx, rt.state().topologyRevision == rt.revision());
+            CHECK(ctx, validate(rt.resolved().topology).has_value());
+            CHECK(ctx, validateState(rt.resolved().topology, rt.state()).has_value());
+
+            // Host capture ports track the stream plan exactly.
+            uint32_t captureChannels = 0;
+            for (const auto& node : rt.resolved().topology.nodes) {
+                auto* endpoint = std::get_if<EndpointNode>(&node.body);
+                if (endpoint == nullptr || endpoint->kind != EndpointKind::Host) continue;
+                for (const auto& port : rt.resolved().topology.ports) {
+                    if (port.owner == node.id && port.direction == PortDirection::Input) {
+                        captureChannels += port.channels;
+                    }
+                }
+            }
+            CHECK_EQ_U32(ctx, captureChannels, step.capture);
+        }
+
+        // A rate the device does not support leaves the committed revision alone.
+        const uint64_t before = rt.revision();
+        auto rejected = rt.setConfiguration(DeviceConfiguration{
+            .sampleRate = 192000,
+            .opticalInput = OpticalMode::Adat,
+            .opticalOutput = OpticalMode::Adat,
+        });
+        CHECK(ctx, !rejected.has_value());
+        CHECK(ctx, rt.revision() == before);
+        CHECK_EQ_U32(ctx, rt.resolved().streams.streams[0].channels, 16);
+    }
+
     // 4. Saffire Dynamic Optical Configuration
     {
         auto rtRes = VirtualDeviceRuntime::create(VirtualDeviceKind::SaffirePro24DSP);
