@@ -95,6 +95,24 @@ void RunFW1814TopologyTests(TestContext& ctx) {
                 CHECK(ctx, hasPort(t, 10 + digIn));
                 CHECK(ctx, !hasPort(t, 11 + digIn));
 
+                // The connector choice exists only where the device offers one:
+                // in S/PDIF format there are two jacks for one digital input,
+                // in ADAT format there is only the optical one. Confirmed from
+                // the M-Audio Panel -- CFW1814HardwareView::AdaptPortsToSettings
+                // disables the "active input" group when the optical setting
+                // is 2 (= ADAT).
+                const RouterNode* digitalSelector = nullptr;
+                for (const auto& node : t.nodes) {
+                    if (node.name == "Digital Input Source") {
+                        digitalSelector = std::get_if<RouterNode>(&node.body);
+                    }
+                }
+                CHECK(ctx, (digitalSelector != nullptr) == (in == OpticalMode::Spdif));
+                if (digitalSelector != nullptr) {
+                    CHECK_EQ_U32(ctx, digitalSelector->legalBundles.size(), 2);
+                    CHECK_EQ_U32(ctx, *digitalSelector->constraints.maxActiveBundles, 1);
+                }
+
                 auto state = Devices::FW1814::makeInitialState(*resolved);
                 CHECK(ctx, validateState(t, state).has_value());
             }

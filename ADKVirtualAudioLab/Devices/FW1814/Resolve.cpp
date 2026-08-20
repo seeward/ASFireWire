@@ -32,6 +32,9 @@ struct Geometry {
     uint32_t playbackPcm{};
     SignalKind digitalInKind{};
     SignalKind digitalOutKind{};
+    // The digital input is one selected source. In S/PDIF format the device
+    // offers two connectors for it, so the choice becomes a router.
+    bool hasDigitalInputSelector{};
 };
 
 constexpr uint32_t kAnalogInPairs = 4;   // 8 analog inputs
@@ -42,6 +45,13 @@ constexpr uint32_t kHeadphonePairs = 2;
 Geometry geometryFor(const DeviceConfiguration& config) {
     // ADAT carries 8 channels at 44.1/48 kHz and 4 under S/MUX above that;
     // either S/PDIF variant carries one pair at every rate.
+    //
+    // OPEN: derived from rate here because Linux's formation table is indexed
+    // purely by rate band, and that table *is* the stream geometry the driver
+    // negotiates. The M-Audio Panel also carries an independent S/MUX checkbox
+    // (control 5531 -> setting 1553, enabled only when either optical setting
+    // is ADAT) that hides the last two ADAT pairs, so the two sources disagree
+    // on whether S/MUX is settable at 44.1/48 kHz. Needs hardware to settle.
     const bool smux = config.sampleRate > 48000;
     const auto optIn = config.opticalInput.value_or(OpticalMode::Adat);
     const auto optOut = config.opticalOutput.value_or(OpticalMode::Adat);
@@ -51,6 +61,7 @@ Geometry geometryFor(const DeviceConfiguration& config) {
     geometry.digitalOutPairs = (optOut == OpticalMode::Adat) ? (smux ? 2 : 4) : 1;
     geometry.digitalInKind = (optIn == OpticalMode::Adat) ? SignalKind::Adat : SignalKind::SpdifOptical;
     geometry.digitalOutKind = (optOut == OpticalMode::Adat) ? SignalKind::Adat : SignalKind::SpdifOptical;
+    geometry.hasDigitalInputSelector = (optIn != OpticalMode::Adat);
     geometry.mixerPairs = kAnalogInPairs + geometry.digitalInPairs + kStreamMixerPairs;
     geometry.capturePcm = (kAnalogInPairs + geometry.digitalInPairs) * 2;
     geometry.playbackPcm = (kAnalogOutPairs + geometry.digitalOutPairs) * 2;
@@ -60,7 +71,8 @@ Geometry geometryFor(const DeviceConfiguration& config) {
 // Port identifiers. Ranges are spaced so a mode change never reuses an id for a
 // different signal within one revision.
 constexpr uint32_t kPhysAnalogIn = 1;    // .. 4
-constexpr uint32_t kPhysDigitalIn = 11;  // .. 14
+constexpr uint32_t kPhysSpdifCoaxIn = 8; // S/PDIF format only
+constexpr uint32_t kPhysDigitalIn = 11;  // .. 14 (the optical connector)
 constexpr uint32_t kHostCapture = 21;    // .. 28
 constexpr uint32_t kHostPlayback = 41;   // .. 46
 constexpr uint32_t kMainMixerIn = 61;    // .. 71
@@ -79,6 +91,9 @@ constexpr uint32_t kPhoneMuxOut = 136;   // .. 137
 constexpr uint32_t kPhysAnalogOut = 141; // .. 142
 constexpr uint32_t kPhysHeadphone = 143; // .. 144
 constexpr uint32_t kPhysDigitalOut = 151;// .. 154
+constexpr uint32_t kDigitalMuxCoax = 161;
+constexpr uint32_t kDigitalMuxOptical = 162;
+constexpr uint32_t kDigitalMuxOut = 165;
 
 const NodeId nPhysIn{1};
 const NodeId nHostIO{2};
@@ -87,6 +102,7 @@ const NodeId nAuxMixer{4};
 const NodeId nAnalogOutMux{5};
 const NodeId nHeadphoneMux{6};
 const NodeId nPhysOut{7};
+const NodeId nDigitalInMux{8};
 
 // dB range of every gain and volume in the parameter window
 // (documentation/1814.md 6.4: "Range -128...0 dB").
@@ -105,6 +121,13 @@ std::string mixerInputName(const Geometry& geometry, uint32_t index) {
     }
     const uint32_t stream = index - kAnalogInPairs - geometry.digitalInPairs;
     return "Playback " + std::to_string(stream * 2 + 1) + "/" + std::to_string(stream * 2 + 2);
+}
+
+// The port carrying digital input pair `i` into the rest of the graph: the
+// connector itself for ADAT, or the selector's output when the format is
+// S/PDIF and the user picks between the coaxial and optical jacks.
+PortId digitalInputSource(const Geometry& geometry, uint32_t i) {
+    return geometry.hasDigitalInputSelector ? PortId{kDigitalMuxOut} : PortId{kPhysDigitalIn + i};
 }
 
 bool mixerInputIsPhysical(const Geometry& geometry, uint32_t index) {
@@ -161,6 +184,13 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
     for (uint32_t i = 0; i < geometry.digitalInPairs; ++i) {
         t.ports.push_back(endpointPort(PortId{kPhysDigitalIn + i}, nPhysIn, PortDirection::Output, 2,
                                        {geometry.digitalInKind, i * 2 + 1}));
+    }
+    if (geometry.hasDigitalInputSelector) {
+        t.ports.push_back(endpointPort(PortId{kPhysSpdifCoaxIn}, nPhysIn, PortDirection::Output, 2,
+                                       {SignalKind::SpdifCoaxial, 1}));
+        t.ports.push_back(Port{PortId{kDigitalMuxCoax}, nDigitalInMux, PortDirection::Input, 2, "Coaxial"});
+        t.ports.push_back(Port{PortId{kDigitalMuxOptical}, nDigitalInMux, PortDirection::Input, 2, "Optical"});
+        t.ports.push_back(Port{PortId{kDigitalMuxOut}, nDigitalInMux, PortDirection::Output, 2, "Digital In"});
     }
 
     for (uint32_t i = 0; i < capturePairs; ++i) {
@@ -297,12 +327,44 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         Node{nPhysOut, "Physical Outputs", EndpointNode{EndpointKind::Physical}},
     };
 
+    // Only one digital input is live at a time. The Panel splits that choice
+    // into format (S/PDIF vs ADAT) and connector (coaxial vs optical), and only
+    // offers the connector control in S/PDIF format -- CFW1814HardwareView::
+    // AdaptPortsToSettings disables the "active input" group when the optical
+    // setting is ADAT. Linux encodes the same thing as one three-way selector,
+    // (dig_in_fmt << 1) | iface, in bebob_maudio.c:441.
+    if (geometry.hasDigitalInputSelector) {
+        t.nodes.push_back(Node{
+            nDigitalInMux,
+            "Digital Input Source",
+            RouterNode{
+                .inputs = {PortId{kDigitalMuxCoax}, PortId{kDigitalMuxOptical}},
+                .outputs = {PortId{kDigitalMuxOut}},
+                .legalBundles = {
+                    RouteBundle{RouteBundleId{1}, {Route{PortId{kDigitalMuxCoax}, PortId{kDigitalMuxOut}}}},
+                    RouteBundle{RouteBundleId{2}, {Route{PortId{kDigitalMuxOptical}, PortId{kDigitalMuxOut}}}},
+                },
+                .constraints = RouterConstraints{
+                    .maxActiveBundles = 1,
+                    .maxSourcesPerOutput = 1,
+                    .maxDestinationsPerInput = 1,
+                },
+            },
+        });
+    }
+
     // --- Fixed links -----------------------------------------------------
 
     // Capture is direct: it does not pass through the mixer
     // (documentation/1814.md 3.2b -- the main mixer has no host destination).
+    if (geometry.hasDigitalInputSelector) {
+        t.fixedLinks.push_back({PortId{kPhysSpdifCoaxIn}, PortId{kDigitalMuxCoax}});
+        t.fixedLinks.push_back({PortId{kPhysDigitalIn}, PortId{kDigitalMuxOptical}});
+    }
     for (uint32_t i = 0; i < capturePairs; ++i) {
-        const PortId source{(i < kAnalogInPairs) ? kPhysAnalogIn + i : kPhysDigitalIn + (i - kAnalogInPairs)};
+        const PortId source = (i < kAnalogInPairs)
+            ? PortId{kPhysAnalogIn + i}
+            : digitalInputSource(geometry, i - kAnalogInPairs);
         t.fixedLinks.push_back({source, PortId{kHostCapture + i}});
         t.fixedLinks.push_back({source, PortId{kMainMixerIn + i}});
         t.fixedLinks.push_back({source, PortId{kAuxMixerIn + i}});
@@ -338,7 +400,9 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
     for (uint32_t i = 0; i < geometry.mixerPairs; ++i) {
         std::vector<PortId> ports{PortId{kMainMixerIn + i}, PortId{kAuxMixerIn + i}};
         if (mixerInputIsPhysical(geometry, i)) {
-            ports.push_back(PortId{(i < kAnalogInPairs) ? kPhysAnalogIn + i : kPhysDigitalIn + (i - kAnalogInPairs)});
+            ports.push_back((i < kAnalogInPairs)
+                ? PortId{kPhysAnalogIn + i}
+                : digitalInputSource(geometry, i - kAnalogInPairs));
             ports.push_back(PortId{kHostCapture + i});
         } else {
             ports.push_back(PortId{kHostPlayback + (i - kAnalogInPairs - geometry.digitalInPairs)});
@@ -465,7 +529,9 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         });
     };
     for (uint32_t i = 0; i < capturePairs; ++i) {
-        const PortId port{(i < kAnalogInPairs) ? kPhysAnalogIn + i : kPhysDigitalIn + (i - kAnalogInPairs)};
+        const PortId port = (i < kAnalogInPairs)
+            ? PortId{kPhysAnalogIn + i}
+            : digitalInputSource(geometry, i - kAnalogInPairs);
         addMeter(port, mixerInputName(geometry, i) + " Peak");
     }
     for (uint32_t i = 0; i < kAnalogOutPairs; ++i) {
@@ -506,7 +572,14 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
             {RouteBundleId{pair * 3 + 1}, RouteBundleId{pair * 3 + 2}, RouteBundleId{pair * 3 + 3}},
         });
     }
-    resolved.presentation.routers = {
+    if (geometry.hasDigitalInputSelector) {
+        resolved.presentation.routers.push_back(Presentation::RouterPresentationHint{
+            .router = nDigitalInMux,
+            .style = Presentation::RouterPresentationStyle::Selector,
+            .bundleGroups = {{"Digital Input Source", {RouteBundleId{1}, RouteBundleId{2}}}},
+        });
+    }
+    const std::vector<Presentation::RouterPresentationHint> outputRouters = {
         Presentation::RouterPresentationHint{
             .router = nAnalogOutMux,
             .style = Presentation::RouterPresentationStyle::Selector,
@@ -518,6 +591,8 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
             .bundleGroups = std::move(phoneGroups),
         },
     };
+    resolved.presentation.routers.insert(resolved.presentation.routers.end(),
+                                         outputRouters.begin(), outputRouters.end());
 
     return resolved;
 }
@@ -572,6 +647,13 @@ DeviceState makeInitialState(const ResolvedAudioConfiguration& resolved) {
 
     // Analog pairs take their own mixer output; headphone pairs follow the
     // mixer pairs (0x9c = 0x00000000, 0x98 = 0x00020001).
+    for (const auto& node : t.nodes) {
+        if (node.name == "Digital Input Source") {
+            // Coaxial: the driver hardcodes S/PDIF today and the Panel's own
+            // default is the first button.
+            state.routers[node.id] = RouterState{.activeBundles = {RouteBundleId{1}}};
+        }
+    }
     state.routers[nAnalogOutMux] = RouterState{.activeBundles = {RouteBundleId{1}, RouteBundleId{3}}};
     state.routers[nHeadphoneMux] = RouterState{.activeBundles = {RouteBundleId{1}, RouteBundleId{5}}};
 
