@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeviceIdentity.hpp"
+#include "../../../ASFWDriver/Audio/Shared/Configuration/DeviceConfiguration.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -8,12 +9,8 @@
 
 namespace ASFW::Device {
 
-using SampleRate = uint32_t;
-
-enum class OpticalMode {
-    Adat,
-    Spdif,
-};
+using SampleRate = ::ASFW::Configuration::SampleRate;
+using OpticalMode = ::ASFW::Configuration::OpticalMode;
 
 struct OpticalCapabilities {
     std::vector<OpticalMode> inputModes;

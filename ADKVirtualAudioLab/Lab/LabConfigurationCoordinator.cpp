@@ -23,11 +23,11 @@ PendingIdentity(const Configuration::DeviceConfigurationState& state) noexcept
     }, state);
 }
 
-std::optional<Device::DeviceConfiguration>
+std::optional<::ASFW::Device::DeviceConfiguration>
 PendingConfiguration(const Configuration::DeviceConfigurationState& state) noexcept
 {
     return std::visit([](const auto& value)
-        -> std::optional<Device::DeviceConfiguration> {
+        -> std::optional<::ASFW::Device::DeviceConfiguration> {
         using State = std::decay_t<decltype(value)>;
         if constexpr (std::is_same_v<State, Configuration::AwaitingCandidate>) {
             return value.requested;
@@ -63,7 +63,7 @@ LastFailure(const Configuration::DeviceConfigurationState& state) noexcept
 LabConfigurationCoordinator::LabConfigurationCoordinator(
     Configuration::EndpointId endpointId,
     Configuration::RouteGeneration routeGeneration,
-    const Device::DeviceConfiguration& initial) noexcept
+    const ::ASFW::Device::DeviceConfiguration& initial) noexcept
     : machine_{
         .state = Configuration::Idle{
             .committed = Configuration::CommittedConfiguration{

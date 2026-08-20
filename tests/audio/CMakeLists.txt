@@ -74,6 +74,11 @@ add_audio_test(AudioDriverConfigPolicyTests
     "${ASFW_DRIVER_DIR}/Audio/DriverKit/Config/AudioDriverConfigPolicy.cpp"
 )
 
+add_audio_test(DeviceConfigurationStateMachineTests
+    DeviceConfigurationStateMachineTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Shared/Configuration/DeviceConfigurationStateMachine.cpp"
+)
+
 
 
 # Direct ADK audio skeleton tests (AudioRuntime files)

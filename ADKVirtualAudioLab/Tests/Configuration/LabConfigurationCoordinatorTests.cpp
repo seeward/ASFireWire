@@ -8,11 +8,11 @@ namespace {
 
 using namespace ASFW::Configuration;
 
-Device::DeviceConfiguration Config(uint32_t rate) {
-    return Device::DeviceConfiguration{
+::ASFW::Device::DeviceConfiguration Config(uint32_t rate) {
+    return ::ASFW::Device::DeviceConfiguration{
         .sampleRate = rate,
-        .opticalInput = Device::OpticalMode::Adat,
-        .opticalOutput = Device::OpticalMode::Adat,
+        .opticalInput = ::ASFW::Device::OpticalMode::Adat,
+        .opticalOutput = ::ASFW::Device::OpticalMode::Adat,
     };
 }
 

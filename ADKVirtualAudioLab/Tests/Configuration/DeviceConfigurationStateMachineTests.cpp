@@ -12,10 +12,10 @@ using namespace ASFW::Configuration;
 constexpr EndpointId kEndpoint = 0x1814;
 constexpr RouteGeneration kGeneration = 7;
 
-Device::DeviceConfiguration Config(Device::SampleRate sampleRate,
-                                   Device::OpticalMode input = Device::OpticalMode::Adat,
-                                   Device::OpticalMode output = Device::OpticalMode::Adat) {
-    return Device::DeviceConfiguration{
+::ASFW::Device::DeviceConfiguration Config(::ASFW::Device::SampleRate sampleRate,
+                                           ::ASFW::Device::OpticalMode input = ::ASFW::Device::OpticalMode::Adat,
+                                           ::ASFW::Device::OpticalMode output = ::ASFW::Device::OpticalMode::Adat) {
+    return ::ASFW::Device::DeviceConfiguration{
         .sampleRate = sampleRate,
         .opticalInput = input,
         .opticalOutput = output,

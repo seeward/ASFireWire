@@ -19,7 +19,7 @@ enum class ScriptedHardwareOutcome : uint32_t {
 struct LabConfigurationSnapshot final {
     Configuration::CommittedConfiguration committed{};
     std::optional<Configuration::ConfigurationIdentity> pendingIdentity{};
-    std::optional<Device::DeviceConfiguration> pendingConfiguration{};
+    std::optional<::ASFW::Device::DeviceConfiguration> pendingConfiguration{};
     std::optional<Configuration::FailureReason> lastFailure{};
 };
 
@@ -27,7 +27,7 @@ class LabConfigurationCoordinator final {
 public:
     LabConfigurationCoordinator(Configuration::EndpointId endpointId,
                                 Configuration::RouteGeneration routeGeneration,
-                                const Device::DeviceConfiguration& initial) noexcept;
+                                const ::ASFW::Device::DeviceConfiguration& initial) noexcept;
 
     [[nodiscard]] std::expected<Configuration::TransitionResult,
                                 Configuration::StateMachineError>

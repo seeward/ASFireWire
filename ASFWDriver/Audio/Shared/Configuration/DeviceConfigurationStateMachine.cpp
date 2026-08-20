@@ -25,9 +25,9 @@ PendingIdentity(const DeviceConfigurationState& state) noexcept {
     }, state);
 }
 
-[[nodiscard]] const Device::DeviceConfiguration*
+[[nodiscard]] const DeviceConfiguration*
 PendingRequested(const DeviceConfigurationState& state) noexcept {
-    return std::visit([](const auto& value) -> const Device::DeviceConfiguration* {
+    return std::visit([](const auto& value) -> const DeviceConfiguration* {
         using T = std::decay_t<decltype(value)>;
         if constexpr (std::is_same_v<T, AwaitingCandidate>) {
             return &value.requested;
@@ -118,8 +118,8 @@ StartRecovery(const Machine& machine, const ConfigurationIdentity& identity,
 
 } // namespace
 
-bool SameConfiguration(const Device::DeviceConfiguration& lhs,
-                       const Device::DeviceConfiguration& rhs) noexcept {
+bool SameConfiguration(const DeviceConfiguration& lhs,
+                       const DeviceConfiguration& rhs) noexcept {
     return lhs.sampleRate == rhs.sampleRate &&
            lhs.opticalInput == rhs.opticalInput &&
            lhs.opticalOutput == rhs.opticalOutput;
@@ -213,7 +213,7 @@ Reduce(const Machine& machine, const ConfigurationEvent& event) noexcept {
                 return std::unexpected(StateMachineError::GenerationMismatch);
             }
             if (!Is<Idle>(machine.state)) return std::unexpected(StateMachineError::Busy);
-            Device::DeviceConfiguration requested = coherent->configuration;
+            DeviceConfiguration requested = coherent->configuration;
             requested.sampleRate = value.sampleRate;
             if (SameConfiguration(requested, coherent->configuration)) {
                 return TransitionResult{.next = machine,
