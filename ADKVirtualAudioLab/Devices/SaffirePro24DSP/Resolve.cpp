@@ -468,31 +468,47 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
 
     // 2. Channel Strip Mixer Sends, Pans, Mutes, Solos (12 Channels)
     std::vector<ParameterId> panParamIds;
-    std::vector<ParameterId> auxSendParamIds;
 
+    // Every crosspoint of a TCAT mixer carries a coefficient: the extension's
+    // mixer section is a full output_count x input_count matrix of u16 values
+    // (tcat/extension/mixer_section.rs -- MixerCoefficientParams, MAX_INPUT_COUNT
+    // 18, MAX_OUTPUT_COUNT 16). The opposite placement from the 1814, which puts
+    // one gain on the mixer input port and switches crosspoints on and off:
+    // same primitive, two hardware answers, which is why AUAA 13.1 keeps them
+    // separate.
+    //
+    // The domain is the raw coefficient, matching what the reference driver
+    // exposes to userspace -- 0..0xFFFF step 1, 2:14 fixed-point, so 0x4000 is
+    // unity (runtime/dice/src/tcd22xx_ctl.rs:701-703). Rendering it as dB here
+    // would be inventing a mapping the semantic layer has no business owning
+    // (AUAA 15.4); the binding layer converts.
+    {
+        const auto& mixerNode = std::get<MixerNode>(t.nodes[3].body);
+        for (const auto& crosspoint : mixerNode.crosspoints) {
+            const uint32_t inIndex = crosspoint.input.value - 150;
+            const uint32_t outIndex = crosspoint.output.value - 170;
+            t.parameters.push_back(Parameter{
+                .id = ParameterId{pId++},
+                .target = crosspoint.id,
+                .semantic = ParameterSemantic::Level,
+                .domain = ScalarDomain{
+                    .min = 0.0,
+                    .max = 65535.0,
+                    .step = 1.0,
+                    .unit = ScalarUnit::Generic,
+                },
+                .name = "Mix " + std::to_string(outIndex) + " <- " +
+                        (inIndex <= 12 && inIndex >= 1 ? chNames[inIndex - 1]
+                                                       : "Input " + std::to_string(inIndex)),
+            });
+        }
+    }
+
+    // Pan, mute and solo are host-side conveniences over those coefficients --
+    // TCAT's mixer section has no per-input controls of its own, only the matrix
+    // and a read-only saturation flag. Kept because a mixer surface needs them;
+    // flagged because they are derived, not device state.
     for (uint32_t i = 1; i <= 12; ++i) {
-        // Mix 1/2 Send (Crosspoint to Bus 1)
-        const uint32_t cpMain = (i - 1) * 16 + 1;
-        t.parameters.push_back(Parameter{
-            .id = ParameterId{pId++},
-            .target = CrosspointId{cpMain},
-            .semantic = ParameterSemantic::Level,
-            .domain = ScalarDomain{.min = -128.0, .max = 6.0, .step = 0.5, .unit = ScalarUnit::Decibels},
-            .name = chNames[i - 1] + " Mix 1/2 Send",
-        });
-
-        // Mix 3/4 Send (Crosspoint to Bus 2)
-        const uint32_t cpAux = (i - 1) * 16 + 3;
-        const auto auxPid = ParameterId{pId++};
-        auxSendParamIds.push_back(auxPid);
-        t.parameters.push_back(Parameter{
-            .id = auxPid,
-            .target = CrosspointId{cpAux},
-            .semantic = ParameterSemantic::Level,
-            .domain = ScalarDomain{.min = -128.0, .max = 6.0, .step = 0.5, .unit = ScalarUnit::Decibels},
-            .name = chNames[i - 1] + " Mix 3/4 Send",
-        });
-
         // Pan
         const auto panPid = ParameterId{pId++};
         panParamIds.push_back(panPid);
@@ -795,18 +811,14 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         .mixers = {
             Presentation::MixerPresentationHint{
                 .mixer = NodeId{4},
-                .style = Presentation::MixerPresentationStyle::ChannelStrips,
+                // 18x16 with a coefficient on every crosspoint is a crossbar,
+                // not a strip bank: as strips it is sixteen sends per channel.
+                .style = Presentation::MixerPresentationStyle::Matrix,
             },
         },
     };
 
     for (const auto& pid : panParamIds) {
-        resolved.presentation.parameters.push_back(Presentation::ParameterPresentationHint{
-            .parameter = pid,
-            .presentation = Presentation::ControlPresentation::Rotary,
-        });
-    }
-    for (const auto& pid : auxSendParamIds) {
         resolved.presentation.parameters.push_back(Presentation::ParameterPresentationHint{
             .parameter = pid,
             .presentation = Presentation::ControlPresentation::Rotary,
@@ -828,13 +840,13 @@ DeviceState makeInitialState(const ResolvedAudioConfiguration& resolved) {
         } else if (auto* sc = std::get_if<ScalarDomain>(&param.domain)) {
             if (param.semantic == ParameterSemantic::Pan) {
                 state.parameters[param.id] = 0.0;
+            } else if (std::holds_alternative<CrosspointId>(param.target)) {
+                // A DICE mixer powers up with its coefficient matrix zeroed;
+                // the router carries the direct paths. Silent, not unity.
+                state.parameters[param.id] = 0.0;
             } else if (param.semantic == ParameterSemantic::Level) {
-                // If it's a main send (Mix 1/2) or master monitor volume, default to 0 dB
-                if (param.name.find("Mix 1/2 Send") != std::string::npos || param.name.find("Master") != std::string::npos || param.name.find("Volume") != std::string::npos) {
-                    state.parameters[param.id] = 0.0;
-                } else {
-                    state.parameters[param.id] = sc->min;
-                }
+                // Output volumes rest at the top of their range.
+                state.parameters[param.id] = sc->max;
             } else {
                 state.parameters[param.id] = sc->min;
             }

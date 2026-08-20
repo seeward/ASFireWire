@@ -37,6 +37,38 @@ void RunSaffireTopologyTests(TestContext& ctx) {
     CHECK(ctx, mixer->outputs.size() == 16);
     CHECK(ctx, mixer->crosspoints.size() == 18 * 16);
 
+    // Every crosspoint of a TCAT mixer carries a coefficient -- the extension's
+    // mixer section is a full 18x16 matrix of u16 values (dice/src/tcat/
+    // extension/mixer_section.rs). Only 24 of the 288 used to have one.
+    {
+        uint32_t coefficients = 0;
+        for (const auto& parameter : saffire.parameters) {
+            if (!std::holds_alternative<CrosspointId>(parameter.target)) continue;
+            CHECK(ctx, parameter.semantic == ParameterSemantic::Level);
+            const auto* domain = std::get_if<ScalarDomain>(&parameter.domain);
+            REQUIRE(ctx, domain != nullptr);
+            // The raw coefficient the reference driver exposes: 0..0xFFFF,
+            // 2:14 fixed-point. Rendering it as dB would invent a mapping the
+            // semantic layer does not own (AUAA 15.4).
+            CHECK(ctx, domain->min == 0.0);
+            CHECK(ctx, domain->max == 65535.0);
+            CHECK(ctx, domain->unit == ScalarUnit::Generic);
+            ++coefficients;
+        }
+        CHECK_EQ_U32(ctx, coefficients, 18 * 16);
+    }
+
+    // A DICE mixer powers up with the matrix zeroed; the router carries the
+    // direct paths.
+    {
+        auto state = Devices::SaffirePro24DSP::makeInitialState(*resolvedRes);
+        for (const auto& parameter : saffire.parameters) {
+            if (!std::holds_alternative<CrosspointId>(parameter.target)) continue;
+            CHECK(ctx, std::get<double>(state.parameters.at(parameter.id)) == 0.0);
+        }
+        CHECK(ctx, validateState(saffire, state).has_value());
+    }
+
     // Verify Processors
     auto* outGroup = std::get_if<ProcessorNode>(&saffire.nodes[4].body);
     REQUIRE(ctx, outGroup != nullptr);

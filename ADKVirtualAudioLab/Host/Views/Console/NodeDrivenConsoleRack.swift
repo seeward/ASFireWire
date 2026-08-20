@@ -6,10 +6,7 @@ struct NodeDrivenConsoleRack: View {
 
     // Check if any mixer requested Matrix presentation explicitly
     private var matrixMixers: [MixerModel] {
-        snap.mixers.filter { mixer in
-            let hint = snap.presentation.mixerHint(for: mixer.id)
-            return hint?.style == ASFW_MIXER_STYLE_MATRIX || (hint?.style == ASFW_MIXER_STYLE_AUTO && mixer.crosspoints.count > 32)
-        }
+        snap.mixers.filter { GenericAudioPresenter.isMatrixMixer($0, in: snap) }
     }
 
     var body: some View {

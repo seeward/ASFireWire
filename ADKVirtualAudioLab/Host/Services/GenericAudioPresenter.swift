@@ -4,6 +4,17 @@ import Foundation
 /// from the authoritative AudioModel semantics (Channels, Buses, Crosspoints, Parameters, Meters).
 enum GenericAudioPresenter {
 
+    /// A mixer big enough to be shown as a crossbar contributes its crosspoints
+    /// to the matrix view, not to channel strips: an 18x16 TCAT matrix has a
+    /// coefficient per crosspoint, and stacking sixteen of them in one strip is
+    /// truthful and unusable. Same rule the console rack uses to pick the view.
+    static func isMatrixMixer(_ mixer: MixerModel, in snapshot: LabDeviceSnapshot) -> Bool {
+        let hint = snapshot.presentation.mixerHint(for: mixer.id)
+        if hint?.style == ASFW_MIXER_STYLE_MATRIX { return true }
+        if hint?.style == ASFW_MIXER_STYLE_CHANNEL_STRIPS { return false }
+        return mixer.crosspoints.count > 32
+    }
+
     static func deriveChannelStrips(from snapshot: LabDeviceSnapshot) -> [ChannelStripModel] {
         var strips: [ChannelStripModel] = []
 
@@ -24,7 +35,7 @@ enum GenericAudioPresenter {
                 var sendsByLevelParam: [UInt32: Int] = [:]   // parameterId -> index in collected
                 var collected: [SendControlModel] = []
 
-                for mixer in snapshot.mixers {
+                for mixer in snapshot.mixers where !isMatrixMixer(mixer, in: snapshot) {
                     for cp in mixer.crosspoints where chPorts.contains(cp.inputPortId) {
                         let destBus = snapshot.buses.first { Set($0.portIds).contains(cp.outputPortId) }
                         let busName = destBus?.name ?? snapshot.portName(for: cp.outputPortId)
