@@ -674,6 +674,21 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         .name = "Mix 1/2 Master Mute",
     });
 
+    const auto pClock = ParameterId{pId++};
+    t.parameters.push_back(Parameter{
+        .id = pClock,
+        .target = nPhysIn,
+        .semantic = ParameterSemantic::ClockSource,
+        .domain = EnumDomain{
+            .values = {
+                EnumItem{0, "Internal"},
+                EnumItem{1, "S/PDIF Coaxial"},
+                EnumItem{2, "ADAT / Optical"},
+            },
+        },
+        .name = "Clock Source",
+    });
+
     // 5. Meters (12 Channel Meters + 5 Output Meters)
     for (uint32_t i = 1; i <= 12; ++i) {
         t.meters.push_back(Meter{

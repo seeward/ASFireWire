@@ -4,6 +4,10 @@ struct DeviceWaistsSection: View {
     let snap: LabDeviceSnapshot
     @ObservedObject var state: VirtualLabState
 
+    private var clockSourceParam: ParameterModel? {
+        snap.parameters.first { $0.semantic == ASFW_SEMANTIC_CLOCK_SOURCE }
+    }
+
     var body: some View {
         VStack(spacing: 12) {
             HStack(spacing: 18) {
@@ -24,7 +28,31 @@ struct DeviceWaistsSection: View {
                         }
                     }
                     .labelsHidden()
-                    .frame(width: 130)
+                    .frame(width: 125)
+                }
+
+                // Clock Source Control
+                if let clk = clockSourceParam, !clk.enumItems.isEmpty {
+                    Divider().frame(height: 20)
+
+                    HStack(spacing: 8) {
+                        Image(systemName: "clock.badge.checkmark")
+                            .foregroundStyle(.green)
+                        Text("Clock Source:")
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+
+                        Picker("", selection: Binding(
+                            get: { clk.enumValue },
+                            set: { state.setParameterEnum(id: clk.id, value: $0) }
+                        )) {
+                            ForEach(clk.enumItems) { item in
+                                Text(item.name).tag(item.value)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(minWidth: 130, maxWidth: 210)
+                    }
                 }
 
                 // Optical Modes

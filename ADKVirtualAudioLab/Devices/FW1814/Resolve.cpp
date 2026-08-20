@@ -19,21 +19,20 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         });
     }
 
-    if (config.opticalInput.has_value() || config.opticalOutput.has_value()) {
-        return std::unexpected(ResolveError{
-            ResolveErrorKind::UnsupportedOpticalMode,
-            "FW1814 has no optical mode switches"
-        });
-    }
+    const auto optIn = config.opticalInput.value_or(OpticalMode::Adat);
+    const auto optOut = config.opticalOutput.value_or(OpticalMode::Adat);
 
     ResolvedAudioConfiguration resolved;
 
-    // 1. Streams: 18 capture channels (9 stereo pairs), 14 playback channels (7 stereo pairs)
+    const uint32_t capChannels = (optIn == OpticalMode::Adat) ? 18 : 8;
+    const uint32_t playChannels = (optOut == OpticalMode::Adat) ? 14 : 8;
+
+    // 1. Streams: 18 capture channels (or 8 with optical SPDIF), 14 playback channels (or 8 with optical SPDIF)
     resolved.streams = ResolvedStreamConfiguration{
         .sampleRate = config.sampleRate,
         .streams = {
-            ResolvedAudioStream{StreamDirection::Capture, 18, "FW1814 Capture (18 ch)"},
-            ResolvedAudioStream{StreamDirection::Playback, 14, "FW1814 Playback (14 ch)"},
+            ResolvedAudioStream{StreamDirection::Capture, capChannels, "FW1814 Capture (" + std::to_string(capChannels) + " ch)"},
+            ResolvedAudioStream{StreamDirection::Playback, playChannels, "FW1814 Playback (" + std::to_string(playChannels) + " ch)"},
         },
     };
 
@@ -154,10 +153,10 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
     t.ports.push_back(Port{PortId{1}, nPhysIn, PortDirection::Output, 2, "Line In 1/2"});
     t.ports.push_back(Port{PortId{2}, nPhysIn, PortDirection::Output, 2, "Line In 3/4"});
     t.ports.push_back(Port{PortId{3}, nPhysIn, PortDirection::Output, 2, "S/PDIF In"});
-    t.ports.push_back(Port{PortId{4}, nPhysIn, PortDirection::Output, 2, "ADAT In 1/2"});
-    t.ports.push_back(Port{PortId{5}, nPhysIn, PortDirection::Output, 2, "ADAT In 3/4"});
-    t.ports.push_back(Port{PortId{6}, nPhysIn, PortDirection::Output, 2, "ADAT In 5/6"});
-    t.ports.push_back(Port{PortId{7}, nPhysIn, PortDirection::Output, 2, "ADAT In 7/8"});
+    t.ports.push_back(Port{PortId{4}, nPhysIn, PortDirection::Output, 2, (optIn == OpticalMode::Adat) ? "ADAT In 1/2" : "Opt SPDIF In"});
+    t.ports.push_back(Port{PortId{5}, nPhysIn, PortDirection::Output, 2, (optIn == OpticalMode::Adat) ? "ADAT In 3/4" : "Opt In 3/4 (Off)"});
+    t.ports.push_back(Port{PortId{6}, nPhysIn, PortDirection::Output, 2, (optIn == OpticalMode::Adat) ? "ADAT In 5/6" : "Opt In 5/6 (Off)"});
+    t.ports.push_back(Port{PortId{7}, nPhysIn, PortDirection::Output, 2, (optIn == OpticalMode::Adat) ? "ADAT In 7/8" : "Opt In 7/8 (Off)"});
 
     for (uint32_t i = 1; i <= 7; ++i) {
         t.ports.push_back(Port{PortId{10 + i}, nHostCaptureBus, PortDirection::Input, 2, "Capture Bus In " + std::to_string(i)});
@@ -172,7 +171,10 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
     // Main Sum Mixer Inputs: 51..61
     const std::vector<std::string> chNames = {
         "Line In 1/2", "Line In 3/4", "S/PDIF In",
-        "ADAT In 1/2", "ADAT In 3/4", "ADAT In 5/6", "ADAT In 7/8",
+        (optIn == OpticalMode::Adat) ? "ADAT In 1/2" : "Opt SPDIF In",
+        (optIn == OpticalMode::Adat) ? "ADAT In 3/4" : "Opt In 3/4 (Off)",
+        (optIn == OpticalMode::Adat) ? "ADAT In 5/6" : "Opt In 5/6 (Off)",
+        (optIn == OpticalMode::Adat) ? "ADAT In 7/8" : "Opt In 7/8 (Off)",
         "DAW Playback 1/2", "DAW Playback 3/4", "DAW Playback 5/6", "DAW Playback 7/8"
     };
 
@@ -349,6 +351,22 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         });
     }
 
+    const auto pClock = ParameterId{pId++};
+    t.parameters.push_back(Parameter{
+        .id = pClock,
+        .target = nPhysIn,
+        .semantic = ParameterSemantic::ClockSource,
+        .domain = EnumDomain{
+            .values = {
+                EnumItem{0, "Internal"},
+                EnumItem{1, "S/PDIF Coaxial"},
+                EnumItem{2, "ADAT Optical"},
+                EnumItem{3, "Word Clock BNC"},
+            },
+        },
+        .name = "Clock Source",
+    });
+
     // 5. Meters (11 Channel Meters + 5 Output Meters)
     for (uint32_t i = 1; i <= 7; ++i) {
         t.meters.push_back(Meter{
@@ -467,6 +485,9 @@ DeviceState makeInitialState(const ResolvedAudioConfiguration& resolved) {
         state.parameters[ParameterId{p}] = 0.0;      // Level 0.0 dB
         state.parameters[ParameterId{p + 1}] = false; // Unmuted
     }
+
+    // Clock Source (ParameterId 66)
+    state.parameters[ParameterId{66}] = int64_t{0}; // Internal Clock
 
     // Headphone Mux (Node 6): HP 1 <- Mix 0 (Bundle 1), HP 2 <- Mix 1 (Bundle 5)
     state.routers[NodeId{6}] = RouterState{

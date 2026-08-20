@@ -9,7 +9,10 @@ const Device::DeviceCapabilities& capabilities() {
             .model = "FireWire 1814",
         },
         .sampleRates = {44100, 48000, 88200, 96000},
-        .optical = std::nullopt,
+        .optical = Device::OpticalCapabilities{
+            .inputModes = {Device::OpticalMode::Adat, Device::OpticalMode::Spdif},
+            .outputModes = {Device::OpticalMode::Adat, Device::OpticalMode::Spdif},
+        },
     };
     return kCaps;
 }
@@ -17,8 +20,8 @@ const Device::DeviceCapabilities& capabilities() {
 Device::DeviceConfiguration defaultConfiguration() {
     return Device::DeviceConfiguration{
         .sampleRate = 48000,
-        .opticalInput = std::nullopt,
-        .opticalOutput = std::nullopt,
+        .opticalInput = Device::OpticalMode::Adat,
+        .opticalOutput = Device::OpticalMode::Adat,
     };
 }
 
