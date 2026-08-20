@@ -515,6 +515,8 @@ kern_return_t BuildAudioGraph(ASFWAudioDriver& driver,
     const bool directAudioSkeletonBound = BindDirectAudioSkeleton(
         ivars,
         DirectAudioMemoryGeometry{
+            .inputFrames = directInputFrames,
+            .outputFrames = directOutputFrames,
             .inputChannels = directInputChannels,
             .outputChannels = directOutputChannels,
         });

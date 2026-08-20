@@ -557,44 +557,106 @@ kern_return_t IMPL(ASFWAudioNub, FreeTxIsochResources)
     return ctx->isoch.FreeTxIsochResources();
 }
 
-// IIG dispatch across queues, not across processes (see ASFWAudioNub.iig:111
-// and Info.plist IOUserServerOneProcess): runs in the nub's own
-// process, so ivars and the parent -> ServiceContext -> AudioCoordinator chain
-// are valid here (a LOCALONLY variant would dereference the audio side's proxy
-// ivars, which are null).
-kern_return_t IMPL(ASFWAudioNub, RequestSampleRateChange)
+namespace {
+
+[[nodiscard]] std::optional<ASFW::Configuration::OpticalMode>
+DecodeOpticalMode(uint32_t raw) noexcept {
+    switch (raw) {
+    case 1:
+        return ASFW::Configuration::OpticalMode::Adat;
+    case 2:
+        return ASFW::Configuration::OpticalMode::Spdif;
+    default:
+        return std::nullopt;
+    }
+}
+
+[[nodiscard]] bool BuildDeviceConfiguration(
+    uint32_t sampleRateHz, uint32_t opticalInput, uint32_t opticalOutput,
+    ASFW::Configuration::DeviceConfiguration& out) noexcept {
+    const auto input = DecodeOpticalMode(opticalInput);
+    const auto output = DecodeOpticalMode(opticalOutput);
+    if (sampleRateHz == 0 || !input || !output) {
+        return false;
+    }
+    out = {
+        .sampleRate = sampleRateHz,
+        .opticalInput = input,
+        .opticalOutput = output,
+    };
+    return true;
+}
+
+} // namespace
+
+// IIG dispatch across queues, not across processes: it runs on the nub side,
+// where parent -> ServiceContext -> AudioCoordinator is valid. Only bounded
+// scalar configuration crosses this seam; the ADK service remains the sole
+// owner of AudioDriverKit objects and descriptor mappings.
+kern_return_t IMPL(ASFWAudioNub, ApplyDeviceConfiguration)
 {
-    if (!ivars) {
-        ASFW_LOG(Audio, "ASFWAudioNub: RequestSampleRateChange not ready (ivars=null)");
-        return kIOReturnNotReady;
+    if (outInputChannels) *outInputChannels = 0;
+    if (outOutputChannels) *outOutputChannels = 0;
+    if (!ivars || !outInputChannels || !outOutputChannels) {
+        return kIOReturnBadArgument;
     }
     auto* coordinator = GetAudioCoordinator(ivars);
-    if (!coordinator) {
-        ASFW_LOG(Audio,
-                 "ASFWAudioNub: RequestSampleRateChange not ready (no coordinator) endpoint=%llu",
-                 ivars->endpointId);
-        return kIOReturnNotReady;
-    }
-
-    // The seam is protocol-neutral: carry only the rate. The DICE adapter
-    // (MakeDiceClockConfiguration) owns the CLOCK_SELECT register encoding.
-    const ASFW::Audio::AudioClockConfig desired{
-        .sampleRateHz = sampleRateHz,
-    };
-    if (!ASFW::Audio::IsSupportedAudioClockConfig(desired)) {
-        ASFW_LOG(Audio, "ASFWAudioNub: RequestSampleRateChange unsupported rate %u Hz", sampleRateHz);
+    ASFW::Configuration::DeviceConfiguration desired{};
+    if (!coordinator || !BuildDeviceConfiguration(sampleRateHz, opticalInput,
+                                                  opticalOutput, desired)) {
         return kIOReturnUnsupported;
     }
 
+    ASFW::Audio::AudioConfigurationApplyResult result{};
+    const kern_return_t kr = coordinator->ApplyDeviceConfiguration(
+        ASFW::Audio::Devices::AudioEndpointId{ivars->endpointId}, desired, result);
+    if (kr != kIOReturnSuccess) {
+        return kr;
+    }
+    *outInputChannels = result.runtimeCaps.hostInputPcmChannels;
+    *outOutputChannels = result.runtimeCaps.hostOutputPcmChannels;
     ASFW_LOG(Audio,
-             "ASFWAudioNub: RequestSampleRateChange %u Hz endpoint=%llu",
-             sampleRateHz, ivars->endpointId);
-    const kern_return_t kr = coordinator->RequestClockConfig(
+             "[AudioConfig] hardware accepted endpoint=%llu rate=%u in=%u out=%u",
+             ivars->endpointId, sampleRateHz, *outInputChannels, *outOutputChannels);
+    return kIOReturnSuccess;
+}
+
+kern_return_t IMPL(ASFWAudioNub, CommitDeviceConfiguration)
+{
+    if (!ivars) {
+        return kIOReturnNotReady;
+    }
+    auto* coordinator = GetAudioCoordinator(ivars);
+    ASFW::Configuration::DeviceConfiguration confirmed{};
+    if (!coordinator || !BuildDeviceConfiguration(sampleRateHz, opticalInput,
+                                                  opticalOutput, confirmed)) {
+        return kIOReturnUnsupported;
+    }
+    // Runtime caps come from the immutable profile; callers cannot invent a
+    // geometry by choosing selector values. This lookup stays on the core side.
+    auto* registry = GetAudioRuntimeRegistry(ivars);
+    if (!registry) {
+        return kIOReturnNotReady;
+    }
+    const auto resolved = registry->FindProfile(
+        ASFW::Audio::Devices::AudioEndpointId{ivars->endpointId});
+    const auto* capability = resolved ? resolved->ConfigurationFor(confirmed) : nullptr;
+    if (!capability) {
+        return kIOReturnUnsupported;
+    }
+    const kern_return_t kr = coordinator->CommitDeviceConfiguration(
         ASFW::Audio::Devices::AudioEndpointId{ivars->endpointId},
-        desired,
-        ASFW::Audio::DuplexRestartReason::kSampleRateChange);
+        {.configuration = confirmed, .runtimeCaps = capability->runtimeCaps});
     if (kr == kIOReturnSuccess) {
         ivars->currentSampleRateHz = sampleRateHz;
+        ivars->inputChannelCount = capability->runtimeCaps.hostInputPcmChannels;
+        ivars->outputChannelCount = capability->runtimeCaps.hostOutputPcmChannels;
+        ivars->channelCount = std::max(ivars->inputChannelCount,
+                                       ivars->outputChannelCount);
+        ASFW_LOG(Audio,
+                 "[AudioConfig] runtime committed endpoint=%llu rate=%u in=%u out=%u",
+                 ivars->endpointId, sampleRateHz, ivars->inputChannelCount,
+                 ivars->outputChannelCount);
     }
     return kr;
 }

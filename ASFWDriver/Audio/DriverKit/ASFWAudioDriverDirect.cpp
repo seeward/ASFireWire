@@ -249,24 +249,6 @@ namespace {
 
 } // namespace
 
-uint32_t FrameCapacityFromSegment(const IOAddressSegment& segment,
-                                  uint32_t channels) noexcept {
-    if (segment.address == 0 || segment.length == 0 || channels == 0) {
-        return 0;
-    }
-
-    const uint64_t bytesPerFrame = uint64_t{sizeof(int32_t)} * channels;
-    if (bytesPerFrame == 0) {
-        return 0;
-    }
-
-    const uint64_t frameCapacity = segment.length / bytesPerFrame;
-    constexpr uint32_t kMaxFrameCapacity = std::numeric_limits<uint32_t>::max();
-    return frameCapacity > kMaxFrameCapacity
-         ? kMaxFrameCapacity
-         : static_cast<uint32_t>(frameCapacity);
-}
-
 bool BindDirectAudioSkeleton(ASFWAudioDriver_IVars& ivars,
                              DirectAudioMemoryGeometry physicalGeometry) noexcept {
     if (!ivars.audioDevice) {
@@ -299,10 +281,28 @@ bool BindDirectAudioSkeleton(ASFWAudioDriver_IVars& ivars,
     outputSegment.address = ivars.outputMap->GetAddress();
     outputSegment.length = ivars.outputMap->GetLength();
 
-    const uint32_t inputFrameCapacity =
-        FrameCapacityFromSegment(inputSegment, physicalGeometry.inputChannels);
-    const uint32_t outputFrameCapacity =
-        FrameCapacityFromSegment(outputSegment, physicalGeometry.outputChannels);
+    const auto hasRequiredBytes = [](const IOAddressSegment& segment,
+                                     uint32_t frames,
+                                     uint32_t channels) noexcept {
+        if (segment.address == 0 || frames == 0 || channels == 0) {
+            return false;
+        }
+        const uint64_t bytes = static_cast<uint64_t>(frames) *
+            static_cast<uint64_t>(channels) * sizeof(float);
+        return bytes <= segment.length;
+    };
+    if (!hasRequiredBytes(inputSegment, physicalGeometry.inputFrames,
+                          physicalGeometry.inputChannels) ||
+        !hasRequiredBytes(outputSegment, physicalGeometry.outputFrames,
+                          physicalGeometry.outputChannels)) {
+        ASFW_LOG_ERROR(DirectAudio,
+                       "ADK FATAL BIND skeleton logical geometry exceeds mapping "
+                       "in=%u*%u/%llu out=%u*%u/%llu",
+                       physicalGeometry.inputFrames, physicalGeometry.inputChannels,
+                       inputSegment.length, physicalGeometry.outputFrames,
+                       physicalGeometry.outputChannels, outputSegment.length);
+        return false;
+    }
 
     // The copied endpoint snapshot is the sole wire-format source on the ADK side.
     ASFW::Audio::Runtime::AudioWireFormat wireFormat = ASFW::Audio::Runtime::AudioWireFormat::kAM824;
@@ -317,8 +317,8 @@ bool BindDirectAudioSkeleton(ASFWAudioDriver_IVars& ivars,
         .memory = ASFW::Audio::Runtime::AudioStreamMemory{
             .inputBase = reinterpret_cast<float*>(static_cast<uintptr_t>(ivars.inputMap->GetAddress())),
             .outputBase = reinterpret_cast<const float*>(static_cast<uintptr_t>(ivars.outputMap->GetAddress())),
-            .inputFrameCapacity = inputFrameCapacity,
-            .outputFrameCapacity = outputFrameCapacity,
+            .inputFrameCapacity = physicalGeometry.inputFrames,
+            .outputFrameCapacity = physicalGeometry.outputFrames,
             .inputChannels = physicalGeometry.inputChannels,
             .outputChannels = physicalGeometry.outputChannels,
             .storage = ASFW::Audio::Runtime::AudioSampleStorage::kFloat32Native,
@@ -349,6 +349,43 @@ bool BindDirectAudioSkeleton(ASFWAudioDriver_IVars& ivars,
              static_cast<void*>(ivars.runtime.directAudioGraph.audioDevice),
              ivars.runtime.directAudioGraph.sampleRateHz);
     return true;
+}
+
+bool UpdateDirectAudioGeometry(ASFWAudioDriver_IVars& ivars,
+                               DirectAudioMemoryGeometry physicalGeometry) noexcept {
+    if (!ivars.runtime.directAudioSkeletonBound.load(std::memory_order_acquire) ||
+        !ivars.runtime.directAudioGraph.control || physicalGeometry.inputFrames == 0 ||
+        physicalGeometry.outputFrames == 0 || physicalGeometry.inputChannels == 0 ||
+        physicalGeometry.outputChannels == 0 || !ivars.inputMap || !ivars.outputMap) {
+        return false;
+    }
+    const uint64_t requiredInputBytes = static_cast<uint64_t>(physicalGeometry.inputFrames) *
+        physicalGeometry.inputChannels * sizeof(float);
+    const uint64_t requiredOutputBytes = static_cast<uint64_t>(physicalGeometry.outputFrames) *
+        physicalGeometry.outputChannels * sizeof(float);
+    if (requiredInputBytes > ivars.inputMap->GetLength() ||
+        requiredOutputBytes > ivars.outputMap->GetLength()) {
+        ASFW_LOG_ERROR(DirectAudio,
+                       "[AudioConfig] ADK geometry exceeds retained mapping in=%u*%u out=%u*%u",
+                       physicalGeometry.inputFrames, physicalGeometry.inputChannels,
+                       physicalGeometry.outputFrames, physicalGeometry.outputChannels);
+        return false;
+    }
+
+    auto& graph = ivars.runtime.directAudioGraph;
+    graph.sampleRateHz = static_cast<uint32_t>(ivars.device.currentSampleRate);
+    graph.memory.inputFrameCapacity = physicalGeometry.inputFrames;
+    graph.memory.outputFrameCapacity = physicalGeometry.outputFrames;
+    graph.memory.inputChannels = physicalGeometry.inputChannels;
+    graph.memory.outputChannels = physicalGeometry.outputChannels;
+    graph.deviceToHostAm824Slots = physicalGeometry.inputChannels;
+    graph.hostToDeviceAm824Slots = physicalGeometry.outputChannels;
+    ASFW_LOG(DirectAudio,
+             "[AudioConfig] ADK direct view updated rate=%u in=%u/%u out=%u/%u",
+             graph.sampleRateHz, graph.memory.inputFrameCapacity,
+             graph.memory.inputChannels, graph.memory.outputFrameCapacity,
+             graph.memory.outputChannels);
+    return graph.IsValid();
 }
 
 void UnbindDirectAudioSkeleton(ASFWAudioDriver_IVars& ivars) noexcept {

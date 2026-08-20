@@ -7,6 +7,7 @@
 #include "../Devices/AudioDeviceSessionManager.hpp"
 #include "../Duplex/AudioDuplexCoordinator.hpp"
 #include "../Duplex/IsochDuplexHostTransport.hpp"
+#include "../Protocols/Configuration/IAudioConfigurationControl.hpp"
 
 #include <DriverKit/IOLib.h>
 
@@ -61,6 +62,17 @@ public:
         EndpointId endpointId,
         const AudioClockConfig& desiredClock,
         DuplexRestartReason reason) noexcept;
+
+    // Applies only the hardware side of a semantic configuration. The ADK
+    // service owns the corresponding CoreAudio projection and invokes
+    // CommitDeviceConfiguration only after that projection succeeds.
+    [[nodiscard]] IOReturn ApplyDeviceConfiguration(
+        EndpointId endpointId,
+        const Configuration::DeviceConfiguration& desired,
+        AudioConfigurationApplyResult& outResult) noexcept;
+    [[nodiscard]] IOReturn CommitDeviceConfiguration(
+        EndpointId endpointId,
+        const AudioConfigurationApplyResult& confirmed) noexcept;
     void BeginTeardown() noexcept;
 
     [[nodiscard]] ASFWAudioNub* GetNub(EndpointId endpointId) const noexcept {

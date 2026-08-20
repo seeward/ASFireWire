@@ -5,6 +5,8 @@
 
 #include "AudioEndpointRuntime.hpp"
 #include "AudioRuntimeRegistry.hpp"
+#include "../Duplex/SyncAsyncBridge.hpp"
+#include "../Protocols/IDeviceProtocol.hpp"
 #include "../../Logging/Logging.hpp"
 
 #include <utility>
@@ -245,6 +247,83 @@ IOReturn AudioCoordinator::RequestClockConfig(
         }
     }
     return status;
+}
+
+IOReturn AudioCoordinator::ApplyDeviceConfiguration(
+    EndpointId endpointId,
+    const Configuration::DeviceConfiguration& desired,
+    AudioConfigurationApplyResult& outResult) noexcept {
+    outResult = {};
+    if (!endpointId || teardownRequested_.load(std::memory_order_acquire)) {
+        return kIOReturnNotReady;
+    }
+    const auto profile = runtime_.FindProfile(endpointId);
+    const auto protocol = runtime_.FindShared(endpointId);
+    if (!profile || !protocol) {
+        return kIOReturnNoDevice;
+    }
+    const auto* capability = profile->ConfigurationFor(desired);
+    auto* control = protocol->AsAudioConfigurationControl();
+    if (!capability || !control || !control->SupportsConfiguration(desired)) {
+        ASFW_LOG(Audio,
+                 "[AudioConfig] endpoint=%llu rejected unsupported rate=%u opticalIn=%u opticalOut=%u",
+                 endpointId.value, desired.sampleRate,
+                 desired.opticalInput ? static_cast<unsigned>(*desired.opticalInput) : 0U,
+                 desired.opticalOutput ? static_cast<unsigned>(*desired.opticalOutput) : 0U);
+        return kIOReturnUnsupported;
+    }
+
+    // The FCP completion is delivered independently from the nub dispatch
+    // queue. The bridge is bounded and deliberately mirrors the existing
+    // clock-config synchronization policy; no ADK object is touched here.
+    const auto completed = WaitForAsyncResult<AudioConfigurationApplyResult>(
+        [control, desired](IAudioConfigurationControl::ApplyCallback callback) {
+            control->ApplyConfiguration(desired, std::move(callback));
+        },
+        profile->clockPolicy.lockTimeoutMs + 2'000U,
+        kIOReturnTimeout,
+        &teardownRequested_);
+    if (completed.status != kIOReturnSuccess) {
+        ASFW_LOG_ERROR(Audio,
+                       "[AudioConfig] endpoint=%llu hardware apply failed kr=0x%x",
+                       endpointId.value, completed.status);
+        return completed.status;
+    }
+    const auto* confirmedCapability =
+        profile->ConfigurationFor(completed.value.configuration);
+    if (!confirmedCapability ||
+        confirmedCapability->runtimeCaps.hostInputPcmChannels !=
+            completed.value.runtimeCaps.hostInputPcmChannels ||
+        confirmedCapability->runtimeCaps.hostOutputPcmChannels !=
+            completed.value.runtimeCaps.hostOutputPcmChannels) {
+        ASFW_LOG_ERROR(Audio,
+                       "[AudioConfig] endpoint=%llu hardware returned unadvertised topology",
+                       endpointId.value);
+        return kIOReturnError;
+    }
+    outResult = completed.value;
+    return kIOReturnSuccess;
+}
+
+IOReturn AudioCoordinator::CommitDeviceConfiguration(
+    EndpointId endpointId,
+    const AudioConfigurationApplyResult& confirmed) noexcept {
+    if (!endpointId || teardownRequested_.load(std::memory_order_acquire)) {
+        return kIOReturnNotReady;
+    }
+    const auto profile = runtime_.FindProfile(endpointId);
+    const auto endpoint = runtime_.FindEndpointRuntime(endpointId);
+    const auto* capability = profile ? profile->ConfigurationFor(confirmed.configuration)
+                                     : nullptr;
+    if (!endpoint || !capability ||
+        capability->runtimeCaps.hostInputPcmChannels !=
+            confirmed.runtimeCaps.hostInputPcmChannels ||
+        capability->runtimeCaps.hostOutputPcmChannels !=
+            confirmed.runtimeCaps.hostOutputPcmChannels) {
+        return kIOReturnBadArgument;
+    }
+    return endpoint->ApplyConfiguration(confirmed.runtimeCaps)
+        ? kIOReturnSuccess : kIOReturnError;
 }
 
 void AudioCoordinator::HandleCycleInconsistent() noexcept {

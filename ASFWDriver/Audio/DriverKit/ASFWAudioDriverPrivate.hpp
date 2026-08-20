@@ -15,6 +15,7 @@
 #include "../Families/BeBoB/MAudio/MAudioInternalTxTiming.hpp"
 #include "../Families/BeBoB/MAudio/MAudioTxClockAdapter.hpp"
 #include "../Runtime/TxPcmStagingRing.hpp"
+#include "../Shared/Configuration/DeviceConfigurationStateMachine.hpp"
 #include "../../Isoch/Core/IsochTxQueue.hpp"
 #include "../../Shared/Isoch/TxPayloadSeal.hpp"
 #include "../../Logging/Logging.hpp"
@@ -49,9 +50,6 @@ struct AudioDriverDeviceState {
     double sampleRates[8]{};
     uint32_t sampleRateCount{0};
     double currentSampleRate{0};
-    // Rate reported by a device-initiated clock change (front panel/external
-    // sync), pending until PerformDeviceConfigurationChange commits it.
-    std::atomic<uint32_t> pendingExternalRateHz{0};
     uint32_t streamModeRaw{0};
     uint32_t boolControlCount{0};
     ASFW::Isoch::Audio::BoolControlSlot boolControls[ASFW::Isoch::Audio::kMaxBoolControls]{};
@@ -325,7 +323,6 @@ struct ASFWAudioDriver_IVars {
     OSSharedPtr<IODispatchQueue> txPreparationQueue;
     OSSharedPtr<OSAction> ztsAnchorAction;
     OSSharedPtr<IODispatchQueue> ztsQueue;
-    OSSharedPtr<OSAction> deviceClockChangedAction;
 
 
 
@@ -346,13 +343,22 @@ namespace ASFW::Audio::DriverKit {
 // topology. DICE devices can require a hidden return stream for clock/control
 // purposes even when their user-facing device has no input stream.
 struct DirectAudioMemoryGeometry final {
+    // Logical ring lengths are supplied by AudioEndpointRuntime.  The backing
+    // descriptors may be allocated for a wider configuration, so deriving the
+    // count from descriptor bytes and an active channel stride would invent
+    // frames after an ADAT -> S/PDIF transition.
+    uint32_t inputFrames{0};
+    uint32_t outputFrames{0};
     uint32_t inputChannels{0};
     uint32_t outputChannels{0};
 };
 
-[[nodiscard]] uint32_t FrameCapacityFromSegment(const IOAddressSegment& segment,
-                                                uint32_t channels) noexcept;
 [[nodiscard]] bool BindDirectAudioSkeleton(
+    ASFWAudioDriver_IVars& ivars,
+    DirectAudioMemoryGeometry physicalGeometry) noexcept;
+// Re-shapes the active view of the lifetime-owned descriptors while I/O is
+// stopped. It never replaces a descriptor or mapping.
+[[nodiscard]] bool UpdateDirectAudioGeometry(
     ASFWAudioDriver_IVars& ivars,
     DirectAudioMemoryGeometry physicalGeometry) noexcept;
 void UnbindDirectAudioSkeleton(ASFWAudioDriver_IVars& ivars) noexcept;
