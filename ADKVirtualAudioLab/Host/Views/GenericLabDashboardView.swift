@@ -30,6 +30,9 @@ struct GenericLabDashboardView: View {
                             NodeDrivenProcessorsSection(procNodes: dspNodes, snap: snap, state: state)
                         }
                     }
+
+                    // 6. What the controls did, straight from the model's log
+                    BehaviourLogSection(events: state.events, state: state)
                 } else {
                     ProgressView("Connecting to virtual audio runtime…")
                         .frame(maxWidth: .infinity, minHeight: 250)

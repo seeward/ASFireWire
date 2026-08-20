@@ -2,6 +2,7 @@ import SwiftUI
 
 final class VirtualLabState: ObservableObject {
     @Published var snapshot: LabDeviceSnapshot?
+    @Published var events: [LabEventModel] = []
 
     init() {
         asfw_lab_init()
@@ -9,6 +10,7 @@ final class VirtualLabState: ObservableObject {
     }
 
     func refresh() {
+        refreshEvents()
         let dto = asfw_lab_get_snapshot()
 
         var rates: [UInt32] = []
@@ -381,6 +383,35 @@ final class VirtualLabState: ObservableObject {
         if asfw_lab_select_device(kind) {
             refresh()
         }
+    }
+
+    private func refreshEvents() {
+        let log = asfw_lab_get_event_log()
+        var collected: [LabEventModel] = []
+        collected.reserveCapacity(Int(log.count))
+        if let ptr = log.events {
+            for i in 0..<Int(log.count) {
+                let e = ptr[i]
+                collected.append(LabEventModel(
+                    id: e.sequence,
+                    kind: e.kind,
+                    accepted: e.accepted,
+                    revision: e.revision,
+                    targetId: e.targetId,
+                    label: e.label != nil ? String(cString: e.label) : "",
+                    before: e.before != nil ? String(cString: e.before) : "",
+                    after: e.after != nil ? String(cString: e.after) : "",
+                    detail: e.detail != nil ? String(cString: e.detail) : "",
+                    line: e.line != nil ? String(cString: e.line) : ""
+                ))
+            }
+        }
+        events = collected.reversed()   // newest first for the UI
+    }
+
+    func clearEventLog() {
+        asfw_lab_clear_event_log()
+        refreshEvents()
     }
 
     func setSampleRate(_ rate: UInt32) {

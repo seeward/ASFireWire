@@ -262,3 +262,28 @@ struct LabDeviceSnapshot {
         return meters.filter { $0.targetPortId == portId }
     }
 }
+
+struct LabEventModel: Identifiable {
+    let id: UInt64
+    let kind: ASFWEventKind
+    let accepted: Bool
+    let revision: UInt64
+    let targetId: UInt32
+    let label: String
+    let before: String
+    let after: String
+    let detail: String
+    let line: String
+
+    var isConfiguration: Bool {
+        kind == ASFW_EVENT_CONFIG_COMMITTED || kind == ASFW_EVENT_CONFIG_REJECTED
+    }
+
+    var kindText: String {
+        switch kind {
+        case ASFW_EVENT_CONFIG_COMMITTED, ASFW_EVENT_CONFIG_REJECTED: return "CONFIG"
+        case ASFW_EVENT_PARAMETER_CHANGED, ASFW_EVENT_PARAMETER_REJECTED: return "PARAM"
+        default: return "ROUTE"
+        }
+    }
+}

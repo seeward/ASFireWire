@@ -1,10 +1,12 @@
 #pragma once
 
+#include "LabEventLog.hpp"
 #include "VirtualDeviceRegistry.hpp"
 #include "../Core/AudioModel/Validate.hpp"
 
 #include <functional>
 #include <span>
+#include <string>
 
 namespace ASFW::Runtime {
 
@@ -57,6 +59,15 @@ public:
         changeCallback_ = std::move(callback);
     }
 
+    /// Ordered history of everything that has mutated this device, including
+    /// the mutations that were refused. See LabEventLog.hpp.
+    const LabEventLog& eventLog() const noexcept { return eventLog_; }
+    LabEventLog& eventLog() noexcept { return eventLog_; }
+
+    /// Human-readable one-liner for the current configuration, as it appears
+    /// on both sides of a configuration event.
+    std::string describeShape() const;
+
 private:
     explicit VirtualDeviceRuntime(const VirtualDeviceDefinition* def)
         : definition_(def) {}
@@ -73,6 +84,7 @@ private:
     Device::ResolvedAudioConfiguration resolved_{};
     AudioModel::DeviceState state_{};
     ChangeCallback changeCallback_{};
+    LabEventLog eventLog_{};
 };
 
 } // namespace ASFW::Runtime

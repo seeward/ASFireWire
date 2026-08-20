@@ -53,6 +53,14 @@ struct SnapshotStorage {
     std::vector<std::vector<std::vector<ASFWRouteDTO>>> routerRouteArrays;
     std::vector<std::vector<ASFWRouteBundleDTO>> routerBundleArrays;
     std::vector<std::vector<std::string>> routerBundleLabels;
+
+    // Event log strings, kept alive for the caller between calls.
+    std::vector<std::string> eventLabels;
+    std::vector<std::string> eventBefores;
+    std::vector<std::string> eventAfters;
+    std::vector<std::string> eventDetails;
+    std::vector<std::string> eventLines;
+    std::vector<ASFWEventDTO> eventDTOs;
     std::vector<std::vector<uint32_t>> activeBundleArrays;
     std::vector<ASFWRouterDTO> routerDTOs;
 
@@ -868,6 +876,54 @@ ASFWDeviceSnapshotDTO asfw_lab_get_snapshot(void) {
     snapshot.presentation.parameterHints = gStorage.parameterHintDTOs.data();
 
     return snapshot;
+}
+
+ASFWEventLogDTO asfw_lab_get_event_log(void) {
+    std::lock_guard<std::mutex> guard(gMutex);
+
+    ASFWEventLogDTO dto{};
+    if (gRuntime == nullptr) return dto;
+
+    const auto& events = gRuntime->eventLog().events();
+    const size_t count = events.size();
+
+    gStorage.eventLabels.resize(count);
+    gStorage.eventBefores.resize(count);
+    gStorage.eventAfters.resize(count);
+    gStorage.eventDetails.resize(count);
+    gStorage.eventLines.resize(count);
+    gStorage.eventDTOs.resize(count);
+
+    size_t i = 0;
+    for (const auto& event : events) {
+        gStorage.eventLabels[i] = event.label;
+        gStorage.eventBefores[i] = event.before;
+        gStorage.eventAfters[i] = event.after;
+        gStorage.eventDetails[i] = event.detail;
+        gStorage.eventLines[i] = ASFW::Runtime::formatEvent(event);
+        gStorage.eventDTOs[i] = ASFWEventDTO{
+            .sequence = event.sequence,
+            .kind = static_cast<ASFWEventKind>(event.kind),
+            .accepted = event.accepted,
+            .revision = event.revision,
+            .targetId = event.targetId,
+            .label = gStorage.eventLabels[i].c_str(),
+            .before = gStorage.eventBefores[i].c_str(),
+            .after = gStorage.eventAfters[i].c_str(),
+            .detail = gStorage.eventDetails[i].c_str(),
+            .line = gStorage.eventLines[i].c_str(),
+        };
+        ++i;
+    }
+
+    dto.count = static_cast<uint32_t>(count);
+    dto.events = gStorage.eventDTOs.data();
+    return dto;
+}
+
+void asfw_lab_clear_event_log(void) {
+    std::lock_guard<std::mutex> guard(gMutex);
+    if (gRuntime != nullptr) gRuntime->eventLog().clear();
 }
 
 #endif // !TARGET_OS_DRIVERKIT

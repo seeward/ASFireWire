@@ -362,6 +362,38 @@ bool asfw_lab_set_parameter_enum(uint32_t parameterId, int64_t value);
 
 bool asfw_lab_set_active_route_bundles(uint32_t routerNodeId, const uint32_t* bundleIds, uint32_t bundleCount);
 
+typedef enum {
+    ASFW_EVENT_CONFIG_COMMITTED = 0,
+    ASFW_EVENT_CONFIG_REJECTED = 1,
+    ASFW_EVENT_PARAMETER_CHANGED = 2,
+    ASFW_EVENT_PARAMETER_REJECTED = 3,
+    ASFW_EVENT_ROUTE_CHANGED = 4,
+    ASFW_EVENT_ROUTE_REJECTED = 5,
+} ASFWEventKind;
+
+typedef struct {
+    uint64_t sequence;
+    ASFWEventKind kind;
+    bool accepted;
+    uint64_t revision;
+    uint32_t targetId;
+    const char* label;
+    const char* before;
+    const char* after;
+    const char* detail;
+    const char* line;   // the whole event as one formatted line
+} ASFWEventDTO;
+
+typedef struct {
+    uint32_t count;
+    const ASFWEventDTO* events;   // oldest first
+} ASFWEventLogDTO;
+
+/// Snapshot of the device's mutation history. Pointers stay valid until the
+/// next call to this function.
+ASFWEventLogDTO asfw_lab_get_event_log(void);
+void asfw_lab_clear_event_log(void);
+
 #endif // !TARGET_OS_DRIVERKIT
 
 #ifdef __cplusplus
