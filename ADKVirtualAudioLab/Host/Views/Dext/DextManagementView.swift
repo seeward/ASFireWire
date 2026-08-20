@@ -27,6 +27,11 @@ struct DextManagementView: View {
 
             Divider()
 
+            ADKConfigLabView()
+                .frame(maxWidth: .infinity)
+
+            Divider()
+
             PacketInspectorView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }

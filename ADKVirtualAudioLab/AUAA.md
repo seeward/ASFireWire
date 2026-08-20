@@ -1195,6 +1195,27 @@ The core invariant is:
 
 ASFW must not publish half-applied configuration.
 
+## 21.1 Current hardware-free ADK experiment
+
+`ADKVirtualAudioLab` now publishes four simultaneous Core Audio devices from
+the same resolved model used by the CLI: Duet (2 in / 2 out), PHASE 88
+(10 / 10), FireWire 1814 (16 / 12), and Saffire Pro 24 DSP (16 / 8). This is
+deliberately a projection test: the dormant packet fixture does not define the
+HAL channel geometry.
+
+The diagnostic user client can request 44.1 or 48 kHz for each device. The
+device records `RequestDeviceConfigurationChange`,
+`PerformDeviceConfigurationChange`, and `AbortDeviceConfigurationChange`, plus
+separate device-rate, output-stream-format, and input-stream-format mutations.
+Mutation happens only inside the perform callback. A bounded event ring makes
+the transient transaction available to the host and CLI after the callback,
+while `[ADKConfig]` and `[ADKConfigHost]` provide driver and host-side traces.
+
+This experiment validates ADK lifecycle, state ownership, HAL projection, and
+observability. It does **not** validate playback, capture, packet timing, or a
+sample-rate-dependent topology change yet. See `BENCH.md` for the executable
+procedure and CLI oracle.
+
 ---
 
 # 22. Capabilities and Discovery
@@ -3065,4 +3086,3 @@ That combination turns reverse-engineered knowledge into an executable specifica
 If the entire design must be reduced to one paragraph:
 
 > **ASFW is a hardware-driven, configuration-resolved audio architecture in which family-specific discovery and protocol bindings are normalized into a small semantic model of endpoints, ports, routers, mixers, processors, parameters, and meters. The current configuration is resolved together with wire-stream geometry into one committed revision, flattened into bounded allocation-free tables for realtime streaming and projected coherently into AudioDriverKit, SwiftUI, and runtime state. Device quirks and vendor-specific features remain below or beside the common model in typed extensions rather than contaminating it. Every supported device acts as a conformance test for the semantic language, starting as a declarative specification whose recurring rules graduate into core validators, backed by exhaustive configuration sweeps and property/invariant testing.**
-

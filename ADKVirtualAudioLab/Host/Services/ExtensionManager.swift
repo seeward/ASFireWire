@@ -30,8 +30,8 @@ final class ExtensionManager: NSObject, ObservableObject, OSSystemExtensionReque
 
     private func submit(_ request: OSSystemExtensionRequest) {
         request.delegate = self
-        OSSystemExtensionManager.shared.submitRequest(request)
         status = "Request submitted…"
+        OSSystemExtensionManager.shared.submitRequest(request)
     }
 
     func request(_ request: OSSystemExtensionRequest,

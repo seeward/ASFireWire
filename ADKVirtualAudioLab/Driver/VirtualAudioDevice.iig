@@ -34,6 +34,18 @@ public:
 
     virtual kern_return_t HandleChangeSampleRate(double in_sample_rate) override LOCALONLY;
 
+    // Configuration-change experiment controls. These are intentionally
+    // local-only: the host reaches them through LabDiagUserClient so the
+    // request/perform/abort transaction is visible in one merged trace.
+    virtual void SetLabSlot(uint32_t in_slot) LOCALONLY;
+    virtual kern_return_t RequestSampleRateChange(uint32_t in_sample_rate) LOCALONLY;
+    virtual kern_return_t RequestConfigurationChange(uint32_t in_sample_rate,
+                                                     uint32_t in_optical_input,
+                                                     uint32_t in_optical_output) LOCALONLY;
+    virtual kern_return_t CopyADKConfigLog(uint32_t in_max_events,
+                                           OSData** out_data) LOCALONLY;
+    virtual kern_return_t CopyADKConfigState(OSData** out_data) LOCALONLY;
+
     // M3: the dext clock model — a timer fires once per ZTS period, anchors
     // UpdateCurrentZeroTimestamp with the raw fire time, and exposes the next
     // period's packets (the lab's stand-in for a hardware ring interrupt).

@@ -41,5 +41,8 @@ struct GenericLabDashboardView: View {
             .padding(20)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .task {
+            state.refresh()
+        }
     }
 }

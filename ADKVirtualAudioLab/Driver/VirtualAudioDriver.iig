@@ -22,6 +22,7 @@ public:
                                      IOUserAudioStartStopFlags in_flags) override;
 
     // Borrowed pointer for the diag user client (null until Start / after
-    // Stop). Callers must tolerate teardown — CopyPacketDump self-guards.
+    // Stop). Callers must tolerate teardown — device methods self-guard.
     virtual VirtualAudioDevice* GetVirtualAudioDevice() LOCALONLY;
+    virtual VirtualAudioDevice* GetVirtualAudioDeviceForSlot(uint32_t in_slot) LOCALONLY;
 };

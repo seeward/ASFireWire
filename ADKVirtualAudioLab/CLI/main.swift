@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 // MARK: - ADKLab Console Diagnostic & Render Inspector
 
@@ -137,7 +138,10 @@ func dumpDeviceSnapshot(_ snap: LabDeviceSnapshot) {
 
 let args = CommandLine.arguments
 
-asfw_lab_init()
+if let result = ADKLiveCommands.runIfRequested(Array(args.dropFirst())) {
+    exit(result)
+}
+
 let bridgeState = VirtualLabState()
 
 func dumpCurrent() {
@@ -165,7 +169,7 @@ if args.contains("--duet") {
     }
 } else {
     print("\(Ansi.bold)ADKVirtualLab Diagnostic CLI Inspector\(Ansi.reset)")
-    print("Usage: ADKLabCLI [--duet | --phase88 | --fw1814 | --saffire | --all]")
+    print("Usage: ADKLabCLI [--duet | --phase88 | --fw1814 | --saffire | --all | adk status | adk rate <slot> <44100|48000> | adk config <slot> <44100|48000> <none|adat|spdif> <none|adat|spdif> | adk smoke]")
     print("\nDefaulting to all devices inspection:")
     for dev in [ASFW_VIRTUAL_DEVICE_DUET, ASFW_VIRTUAL_DEVICE_PHASE88, ASFW_VIRTUAL_DEVICE_FW1814, ASFW_VIRTUAL_DEVICE_SAFFIRE_PRO24_DSP] {
         bridgeState.selectDevice(dev)

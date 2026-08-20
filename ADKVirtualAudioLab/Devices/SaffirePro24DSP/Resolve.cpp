@@ -28,15 +28,23 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
 
     const OpticalMode optIn = *config.opticalInput;
     const OpticalMode optOut = *config.opticalOutput;
+    const uint32_t optInCount = (optIn == OpticalMode::Adat) ? 8 : 2;
+    const uint32_t captureChannels = 8 + optInCount; // 6 analog + coax S/PDIF
+    constexpr uint32_t kPlaybackChannels = 8;        // fixed DICE DAW stream
 
     ResolvedAudioConfiguration resolved;
 
-    // 1. Streams: 16 capture channels, 8 DAW playback channels
+    // 1. Streams. The physical optical input mode changes the capture stream
+    // from 16 channels (ADAT) to 10 (optical S/PDIF). The DICE DAW playback
+    // stream remains eight channels: its routing destination changes with
+    // optical output mode, but its FireWire-facing geometry does not.
     resolved.streams = ResolvedStreamConfiguration{
         .sampleRate = config.sampleRate,
         .streams = {
-            ResolvedAudioStream{StreamDirection::Capture, 16, "Saffire Capture (16 ch)"},
-            ResolvedAudioStream{StreamDirection::Playback, 8, "DAW Playback (8 ch)"},
+            ResolvedAudioStream{StreamDirection::Capture, captureChannels,
+                                "Saffire Capture (" + std::to_string(captureChannels) + " ch)"},
+            ResolvedAudioStream{StreamDirection::Playback, kPlaybackChannels,
+                                "DAW Playback (8 ch)"},
         },
     };
 
@@ -104,7 +112,10 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
             optIn == OpticalMode::Adat ? "Physical Inputs (6 Analog + 2 SPDIF + 8 ADAT)" : "Physical Inputs (6 Analog + 2 SPDIF + 2 Opt SPDIF)",
             EndpointNode{EndpointKind::Physical}
         },
-        Node{nHostIO, "Host Audio Streams (16 In / 8 DAW Out)", EndpointNode{EndpointKind::Host}},
+        Node{nHostIO,
+             "Host Audio Streams (" + std::to_string(captureChannels) +
+                 " In / 8 DAW Out)",
+             EndpointNode{EndpointKind::Host}},
         Node{
             nDiceRouter,
             "DICE 46x46 Router Crossbar",
@@ -166,7 +177,6 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
     }
     t.ports.push_back(endpointPort(PortId{7}, nPhysIn, PortDirection::Output, 1, {SignalKind::SpdifCoaxial, 1}));
     t.ports.push_back(endpointPort(PortId{8}, nPhysIn, PortDirection::Output, 1, {SignalKind::SpdifCoaxial, 2}));
-    const uint32_t optInCount = (optIn == OpticalMode::Adat) ? 8 : 2;
     for (uint32_t i = 1; i <= optInCount; ++i) {
         t.ports.push_back(endpointPort(
             PortId{8 + i},
@@ -177,7 +187,7 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
     }
 
     // Host IO
-    for (uint32_t i = 1; i <= 16; ++i) {
+    for (uint32_t i = 1; i <= captureChannels; ++i) {
         t.ports.push_back(endpointPort(PortId{20 + i}, nHostIO, PortDirection::Input, 1, {SignalKind::HostStream, i}));
     }
     for (uint32_t i = 1; i <= 8; ++i) {
@@ -296,7 +306,7 @@ std::expected<ResolvedAudioConfiguration, ResolveError> resolve(
         t.fixedLinks.push_back(FixedLink{PortId{108}, PortId{244}});
     }
 
-    for (uint32_t i = 1; i <= 16; ++i) {
+    for (uint32_t i = 1; i <= captureChannels; ++i) {
         t.fixedLinks.push_back(FixedLink{PortId{108 + i}, PortId{20 + i}});
     }
     for (uint32_t i = 1; i <= 18; ++i) {

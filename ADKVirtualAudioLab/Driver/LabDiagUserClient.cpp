@@ -7,6 +7,7 @@
 #include "VirtualAudioDriver.h"
 #include "VirtualAudioDevice.h"
 
+#include "../Lab/ADKConfigChange.hpp"
 #include "../Lab/PacketDumpBlob.hpp"
 
 #define LAB_LOG(fmt, ...) os_log(OS_LOG_DEFAULT, "[ADKLab] " fmt, ##__VA_ARGS__)
@@ -84,6 +85,89 @@ kern_return_t LabDiagUserClient::ExternalMethod(
             return kr;
         }
         arguments->structureOutput = blob; // ownership passes to the dispatcher
+        return kIOReturnSuccess;
+    }
+    case ASFW::Lab::kLabDiagSelectorRequestSampleRate: {
+        if (arguments->scalarInput == nullptr || arguments->scalarInputCount < 2) {
+            return kIOReturnBadArgument;
+        }
+        const uint32_t slot = static_cast<uint32_t>(arguments->scalarInput[0]);
+        const uint32_t sampleRate = static_cast<uint32_t>(arguments->scalarInput[1]);
+        VirtualAudioDevice* device =
+            ivars->driver->GetVirtualAudioDeviceForSlot(slot);
+        if (device == nullptr) {
+            return kIOReturnBadArgument;
+        }
+        LAB_LOG("request sample rate: slot=%{public}u rate=%{public}u", slot, sampleRate);
+        const kern_return_t kr = device->RequestSampleRateChange(sampleRate);
+        if (arguments->scalarOutput != nullptr &&
+            arguments->scalarOutputCount >= 1) {
+            arguments->scalarOutput[0] = static_cast<uint64_t>(kr);
+            arguments->scalarOutputCount = 1;
+        }
+        return kr;
+    }
+    case ASFW::Lab::kLabDiagSelectorRequestConfiguration: {
+        if (arguments->scalarInput == nullptr || arguments->scalarInputCount < 4) {
+            return kIOReturnBadArgument;
+        }
+        const uint32_t slot = static_cast<uint32_t>(arguments->scalarInput[0]);
+        const uint32_t sampleRate = static_cast<uint32_t>(arguments->scalarInput[1]);
+        const uint32_t opticalInput = static_cast<uint32_t>(arguments->scalarInput[2]);
+        const uint32_t opticalOutput = static_cast<uint32_t>(arguments->scalarInput[3]);
+        VirtualAudioDevice* device =
+            ivars->driver->GetVirtualAudioDeviceForSlot(slot);
+        if (device == nullptr) {
+            return kIOReturnBadArgument;
+        }
+        LAB_LOG("request configuration: slot=%{public}u rate=%{public}u optical_in=%{public}u optical_out=%{public}u",
+                slot, sampleRate, opticalInput, opticalOutput);
+        const kern_return_t kr = device->RequestConfigurationChange(
+            sampleRate, opticalInput, opticalOutput);
+        if (arguments->scalarOutput != nullptr &&
+            arguments->scalarOutputCount >= 1) {
+            arguments->scalarOutput[0] = static_cast<uint64_t>(kr);
+            arguments->scalarOutputCount = 1;
+        }
+        return kr;
+    }
+    case ASFW::Lab::kLabDiagSelectorCopyConfigLog: {
+        if (arguments->scalarInput == nullptr || arguments->scalarInputCount < 1) {
+            return kIOReturnBadArgument;
+        }
+        const uint32_t slot = static_cast<uint32_t>(arguments->scalarInput[0]);
+        const uint32_t maxEvents = arguments->scalarInputCount >= 2
+            ? static_cast<uint32_t>(arguments->scalarInput[1])
+            : ASFW::Lab::kADKConfigLogDefaultEvents;
+        VirtualAudioDevice* device =
+            ivars->driver->GetVirtualAudioDeviceForSlot(slot);
+        if (device == nullptr) {
+            return kIOReturnBadArgument;
+        }
+        OSData* blob = nullptr;
+        const kern_return_t kr = device->CopyADKConfigLog(maxEvents, &blob);
+        if (kr != kIOReturnSuccess) {
+            return kr;
+        }
+        arguments->structureOutput = blob;
+        return kIOReturnSuccess;
+    }
+    case ASFW::Lab::kLabDiagSelectorCopyConfigState: {
+        if (arguments->scalarInput == nullptr || arguments->scalarInputCount < 1) {
+            return kIOReturnBadArgument;
+        }
+        const uint32_t slot = static_cast<uint32_t>(arguments->scalarInput[0]);
+        VirtualAudioDevice* device =
+            ivars->driver->GetVirtualAudioDeviceForSlot(slot);
+        if (device == nullptr) {
+            return kIOReturnBadArgument;
+        }
+        OSData* blob = nullptr;
+        const kern_return_t kr = device->CopyADKConfigState(&blob);
+        if (kr != kIOReturnSuccess) {
+            return kr;
+        }
+        arguments->structureOutput = blob;
         return kIOReturnSuccess;
     }
     default:

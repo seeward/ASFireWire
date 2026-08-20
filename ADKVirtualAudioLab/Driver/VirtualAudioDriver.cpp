@@ -7,14 +7,30 @@
 #include "VirtualAudioDriver.h"
 #include "VirtualAudioDevice.h"
 
+#include "../Lab/ADKConfigChange.hpp"
 #include "../Lab/PacketDumpBlob.hpp"
 
 #define LAB_LOG(fmt, ...) os_log(OS_LOG_DEFAULT, "[ADKLab] " fmt, ##__VA_ARGS__)
 
+constexpr uint32_t kVirtualAudioDeviceCount = ASFW::Lab::kADKConfigDeviceCount;
+
 struct VirtualAudioDriver_IVars
 {
     OSSharedPtr<IODispatchQueue> workQueue;
-    OSSharedPtr<VirtualAudioDevice> audioDevice;
+    OSSharedPtr<VirtualAudioDevice> audioDevices[kVirtualAudioDeviceCount];
+};
+
+struct LabDeviceSpec final
+{
+    const char* uid;
+    const char* name;
+};
+
+constexpr LabDeviceSpec kLabDeviceSpecs[kVirtualAudioDeviceCount] = {
+    {"VirtualADKAudioLab.Duet", "ADK Config Lab — Duet"},
+    {"VirtualADKAudioLab.Phase88", "ADK Config Lab — PHASE 88"},
+    {"VirtualADKAudioLab.FW1814", "ADK Config Lab — FireWire 1814"},
+    {"VirtualADKAudioLab.Saffire", "ADK Config Lab — Saffire Pro 24 DSP"},
 };
 
 bool VirtualAudioDriver::init()
@@ -35,7 +51,9 @@ void VirtualAudioDriver::free()
 {
     if (ivars != nullptr) {
         ivars->workQueue.reset();
-        ivars->audioDevice.reset();
+        for (auto& device : ivars->audioDevices) {
+            device.reset();
+        }
     }
     IOSafeDeleteNULL(ivars, VirtualAudioDriver_IVars, 1);
     super::free();
@@ -56,40 +74,58 @@ kern_return_t VirtualAudioDriver::Start_Impl(IOService* provider)
         return kIOReturnInvalid;
     }
     
-    LAB_LOG("Allocating VirtualAudioDevice");
-    ivars->audioDevice = OSSharedPtr(OSTypeAlloc(VirtualAudioDevice), OSNoRetain);
-    if (!ivars->audioDevice) {
-        LAB_LOG("Failed to allocate VirtualAudioDevice");
-        return kIOReturnNoMemory;
-    }
-    
-    auto deviceUID = OSSharedPtr(OSString::withCString("VirtualADKAudioLabDevice"), OSNoRetain);
-    auto modelUID = OSSharedPtr(OSString::withCString("VirtualADKAudioLabModel"), OSNoRetain);
-    auto manufacturerUID = OSSharedPtr(OSString::withCString("Alexander Shabelnikov"), OSNoRetain);
-    
-    if (!deviceUID || !modelUID || !manufacturerUID) {
-        LAB_LOG("Failed to allocate UID strings");
-        return kIOReturnNoMemory;
-    }
-    
-    LAB_LOG("Initializing VirtualAudioDevice");
-    if (!ivars->audioDevice->init(this, false, deviceUID.get(), modelUID.get(), manufacturerUID.get(), 512)) {
-        LAB_LOG("VirtualAudioDevice::init failed");
-        return kIOReturnInternalError;
-    }
-    
-    LAB_LOG("Setting device name");
-    kr = ivars->audioDevice->SetName(deviceUID.get());
-    if (kr != kIOReturnSuccess) {
-        LAB_LOG("SetName failed with 0x%{public}08x", kr);
-        return kr;
-    }
-    
-    LAB_LOG("Adding device object");
-    kr = AddObject(ivars->audioDevice.get());
-    if (kr != kIOReturnSuccess) {
-        LAB_LOG("AddObject failed with 0x%{public}08x", kr);
-        return kr;
+    LAB_LOG("Allocating %{public}u VirtualAudioDevice objects", kVirtualAudioDeviceCount);
+    for (uint32_t slot = 0; slot < kVirtualAudioDeviceCount; ++slot) {
+        const auto& spec = kLabDeviceSpecs[slot];
+        auto& device = ivars->audioDevices[slot];
+
+        device = OSSharedPtr(OSTypeAlloc(VirtualAudioDevice), OSNoRetain);
+        if (!device) {
+            LAB_LOG("Failed to allocate VirtualAudioDevice slot %{public}u", slot);
+            return kIOReturnNoMemory;
+        }
+
+        auto deviceUID = OSSharedPtr(OSString::withCString(spec.uid), OSNoRetain);
+        auto modelUID = OSSharedPtr(OSString::withCString("VirtualADKAudioLabModel"), OSNoRetain);
+        auto manufacturerUID = OSSharedPtr(OSString::withCString("Alexander Shabelnikov"), OSNoRetain);
+        if (!deviceUID || !modelUID || !manufacturerUID) {
+            LAB_LOG("Failed to allocate UID strings for slot %{public}u", slot);
+            return kIOReturnNoMemory;
+        }
+
+        LAB_LOG("Initializing VirtualAudioDevice slot %{public}u (%{public}s)", slot, spec.name);
+        if (!device->init(this, false, deviceUID.get(), modelUID.get(),
+                          manufacturerUID.get(), 512)) {
+            LAB_LOG("VirtualAudioDevice::init failed for slot %{public}u", slot);
+            return kIOReturnInternalError;
+        }
+
+        device->SetLabSlot(slot);
+        auto deviceName = OSSharedPtr(OSString::withCString(spec.name), OSNoRetain);
+        if (!deviceName) {
+            LAB_LOG("Failed to allocate name for slot %{public}u", slot);
+            return kIOReturnNoMemory;
+        }
+        kr = device->SetName(deviceName.get());
+        if (kr != kIOReturnSuccess) {
+            LAB_LOG("SetName failed for slot %{public}u with 0x%{public}08x", slot, kr);
+            return kr;
+        }
+
+        // Keep the experiment devices from competing to become the system
+        // default. Slot 0 remains eligible so the HAL can still exercise the
+        // ordinary default-device path when desired.
+        if (slot != 0) {
+            device->SetCanBeDefaultOutputDevice(false);
+            device->SetCanBeDefaultSystemOutputDevice(false);
+        }
+
+        LAB_LOG("Adding device object slot %{public}u", slot);
+        kr = AddObject(device.get());
+        if (kr != kIOReturnSuccess) {
+            LAB_LOG("AddObject failed for slot %{public}u with 0x%{public}08x", slot, kr);
+            return kr;
+        }
     }
     
     LAB_LOG("Registering service");
@@ -107,9 +143,11 @@ kern_return_t VirtualAudioDriver::Stop_Impl(IOService* provider)
 {
     LAB_LOG("Stop_Impl");
     
-    if (ivars->audioDevice) {
-        RemoveObject(ivars->audioDevice.get());
-        ivars->audioDevice.reset();
+    for (auto& device : ivars->audioDevices) {
+        if (device) {
+            RemoveObject(device.get());
+            device.reset();
+        }
     }
     
     ivars->workQueue.reset();
@@ -145,7 +183,15 @@ kern_return_t VirtualAudioDriver::NewUserClient_Impl(uint32_t in_type, IOUserCli
 
 VirtualAudioDevice* VirtualAudioDriver::GetVirtualAudioDevice()
 {
-    return (ivars != nullptr) ? ivars->audioDevice.get() : nullptr;
+    return GetVirtualAudioDeviceForSlot(0);
+}
+
+VirtualAudioDevice* VirtualAudioDriver::GetVirtualAudioDeviceForSlot(uint32_t in_slot)
+{
+    if (ivars == nullptr || in_slot >= kVirtualAudioDeviceCount) {
+        return nullptr;
+    }
+    return ivars->audioDevices[in_slot].get();
 }
 
 kern_return_t VirtualAudioDriver::StartDevice(IOUserAudioObjectID in_object_id,
@@ -153,7 +199,14 @@ kern_return_t VirtualAudioDriver::StartDevice(IOUserAudioObjectID in_object_id,
 {
     LAB_LOG("StartDevice 0x%{public}x", (uint32_t)in_object_id);
     
-    if (!ivars->audioDevice || in_object_id != ivars->audioDevice->GetObjectID()) {
+    VirtualAudioDevice* device = nullptr;
+    for (auto& candidate : ivars->audioDevices) {
+        if (candidate && candidate->GetObjectID() == in_object_id) {
+            device = candidate.get();
+            break;
+        }
+    }
+    if (device == nullptr) {
         LAB_LOG("StartDevice - unknown object id 0x%{public}x", (uint32_t)in_object_id);
         return kIOReturnBadArgument;
     }
@@ -174,7 +227,14 @@ kern_return_t VirtualAudioDriver::StopDevice(IOUserAudioObjectID in_object_id,
 {
     LAB_LOG("StopDevice 0x%{public}x", (uint32_t)in_object_id);
     
-    if (!ivars->audioDevice || in_object_id != ivars->audioDevice->GetObjectID()) {
+    VirtualAudioDevice* device = nullptr;
+    for (auto& candidate : ivars->audioDevices) {
+        if (candidate && candidate->GetObjectID() == in_object_id) {
+            device = candidate.get();
+            break;
+        }
+    }
+    if (device == nullptr) {
         LAB_LOG("StopDevice - unknown object id 0x%{public}x", (uint32_t)in_object_id);
         return kIOReturnBadArgument;
     }

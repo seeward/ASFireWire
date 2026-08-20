@@ -4,9 +4,9 @@
 #include <DriverKit/IOUserClient.iig>
 
 // Diagnostic user client for the ADKLab host inspector. Opened with
-// connection type 'LDBG' (see Lab/PacketDumpBlob.hpp); selector 0 returns a
-// PacketDumpBlob via structureOutput. Strictly read-only: it never mutates
-// driver state and never touches the RT path.
+// connection type 'LDBG'. Selector 0 returns a PacketDumpBlob; selectors 1–4
+// drive/read the AudioDriverKit configuration-change experiment. None of the
+// configuration calls touch the RT path.
 class LabDiagUserClient : public IOUserClient
 {
 public:

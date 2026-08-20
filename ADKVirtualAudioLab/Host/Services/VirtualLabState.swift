@@ -1,12 +1,27 @@
 import SwiftUI
 
+// The generic model remains useful when the dext is absent, but when the
+// lab dext is active its structural controls must also issue the real ADK
+// transaction. This actor owns the non-Sendable IOKit connection off the UI
+// actor; the dext remains authoritative for the CoreAudio publication.
+private actor GenericLabADKConfigurationBridge {
+    private let client = ADKConfigClient()
+
+    func request(slot: Int, rate: UInt32, opticalInput: UInt32,
+                 opticalOutput: UInt32) throws {
+        try client.requestConfiguration(
+            slot: slot, rate: rate, opticalInput: opticalInput,
+            opticalOutput: opticalOutput)
+    }
+}
+
 final class VirtualLabState: ObservableObject {
     @Published var snapshot: LabDeviceSnapshot?
     @Published var events: [LabEventModel] = []
+    private let adkConfigurationBridge = GenericLabADKConfigurationBridge()
 
     init() {
         asfw_lab_init()
-        refresh()
     }
 
     func refresh() {
@@ -380,6 +395,7 @@ final class VirtualLabState: ObservableObject {
     }
 
     func selectDevice(_ kind: ASFWVirtualDeviceKind) {
+        guard snapshot?.deviceKind != kind else { return }
         if asfw_lab_select_device(kind) {
             refresh()
         }
@@ -416,31 +432,93 @@ final class VirtualLabState: ObservableObject {
 
     func setSampleRate(_ rate: UInt32) {
         guard let snap = snapshot else { return }
+        guard snap.currentSampleRate != rate else { return }
         if asfw_lab_set_configuration(rate, snap.opticalInput, snap.opticalOutput) {
             refresh()
+            requestADKConfiguration(
+                deviceKind: snap.deviceKind, rate: rate,
+                opticalInput: snap.opticalInput, opticalOutput: snap.opticalOutput)
         }
     }
 
     func setOpticalMode(input: ASFWOpticalMode, output: ASFWOpticalMode) {
         guard let snap = snapshot else { return }
+        guard snap.opticalInput != input || snap.opticalOutput != output else {
+            return
+        }
         if asfw_lab_set_configuration(snap.currentSampleRate, input, output) {
             refresh()
+            requestADKConfiguration(
+                deviceKind: snap.deviceKind, rate: snap.currentSampleRate,
+                opticalInput: input, opticalOutput: output)
+        }
+    }
+
+    private func requestADKConfiguration(deviceKind: ASFWVirtualDeviceKind,
+                                         rate: UInt32,
+                                         opticalInput: ASFWOpticalMode,
+                                         opticalOutput: ASFWOpticalMode) {
+        // The dormant packet/clock experiment advertises only these rates.
+        // Keep the generic model free to explore its wider capability table,
+        // but make the missing ADK projection visible in the merged trace.
+        guard rate == 44_100 || rate == 48_000 else {
+            ADKConfigTrace.emit(
+                "generic configuration not sent to ADK: rate \(rate) is outside the 44.1/48 kHz experiment")
+            return
+        }
+        guard let slot = adkSlot(for: deviceKind) else { return }
+        let input = opticalWireValue(opticalInput)
+        let output = opticalWireValue(opticalOutput)
+        let bridge = adkConfigurationBridge
+        Task {
+            do {
+                try await bridge.request(slot: slot, rate: rate,
+                                         opticalInput: input,
+                                         opticalOutput: output)
+            } catch {
+                ADKConfigTrace.emit(
+                    "generic configuration slot=\(slot) failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func adkSlot(for kind: ASFWVirtualDeviceKind) -> Int? {
+        switch kind {
+        case ASFW_VIRTUAL_DEVICE_DUET: return 0
+        case ASFW_VIRTUAL_DEVICE_PHASE88: return 1
+        case ASFW_VIRTUAL_DEVICE_FW1814: return 2
+        case ASFW_VIRTUAL_DEVICE_SAFFIRE_PRO24_DSP: return 3
+        default: return nil
+        }
+    }
+
+    private func opticalWireValue(_ mode: ASFWOpticalMode) -> UInt32 {
+        switch mode {
+        case ASFW_OPTICAL_ADAT: return 1
+        case ASFW_OPTICAL_SPDIF: return 2
+        default: return 0
         }
     }
 
     func setParameterScalar(id: UInt32, value: Double) {
+        guard let parameter = snapshot?.parameters.first(where: { $0.id == id }),
+              parameter.scalarValue != value else { return }
         if asfw_lab_set_parameter_scalar(id, value) {
             refresh()
         }
     }
 
     func setParameterBool(id: UInt32, value: Bool) {
+        guard let parameter = snapshot?.parameters.first(where: { $0.id == id }),
+              parameter.boolValue != value else { return }
         if asfw_lab_set_parameter_bool(id, value) {
             refresh()
         }
     }
 
     func setParameterEnum(id: UInt32, value: Int64) {
+        guard let parameter = snapshot?.parameters.first(where: { $0.id == id }),
+              parameter.enumValue != value else { return }
         if asfw_lab_set_parameter_enum(id, value) {
             refresh()
         }

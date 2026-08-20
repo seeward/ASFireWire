@@ -14,6 +14,10 @@ C1–C4 questions with counters; this file is the procedure around it.
 - The Step 6 `Verifying(Fake)` decorator runs for the whole IO session.
 - `StopIO` dumps everything via `IOLog` with the `ADKLab[dump]` prefix.
 - Output ring = 8 ZTS periods (4096 frames). Transport type reports FireWire.
+- Four stable CoreAudio devices are published for configuration experiments:
+  Duet, PHASE 88, FireWire 1814, and Saffire Pro 24 DSP. Their current
+  transport/packet rig is still the Saffire-shaped playback fixture; the
+  configuration experiment below deliberately does not depend on playback.
 
 ## Build
 
@@ -68,8 +72,9 @@ host app's is `Host/ADKLabHost.entitlements` (system-extension install).
    log stream --predicate 'sender CONTAINS "ADKVirtualAudioLab"' --style compact
    ```
 
-3. The virtual device ("VirtualADKAudioLabDevice", FireWire transport) appears
-   in Audio MIDI Setup. Play audio at it:
+3. The virtual devices ("ADK Config Lab — …", FireWire transport) appear in
+   Audio MIDI Setup. Play audio at one of them if running the M3 playback
+   experiment:
 
    ```bash
    # simplest: set it as output in Audio MIDI Setup, then
@@ -81,6 +86,66 @@ host app's is `Host/ADKLabHost.entitlements` (system-extension install).
    output away — `StopIO` fires and the `ADKLab[dump]` lines appear.
 5. Deactivate from the app when done (or leave active for repeat runs —
    each StartIO resets counters).
+
+## Configuration-change experiment (no playback required)
+
+The **AudioDriverKit Configuration Transactions** panel in the host app is the
+first focused experiment for the ADK request/perform/abort contract. It shows a
+CoreAudio HAL snapshot, the per-device dext state, and the tail of the bounded
+configuration event ring. Use the **44.1 kHz** and **48 kHz** buttons for any
+slot while the device is idle; the panel issues a diagnostic user-client call,
+not a playback request.
+
+The expected driver-side sequence is:
+
+```
+HostRequest → RequestCalled → RequestReturned
+             [host stops IO if necessary]
+             → PerformEnter
+             → DeviceRateMutation
+             → OutputStreamMutation
+             → InputStreamMutation
+             → PerformMutation → PerformSuper → PerformReturn
+             [host may restart IO]
+```
+
+An aborted host transaction records `AbortEnter → AbortSuper → AbortReturn`.
+The current experiment changes only the nominal device rate and the matching
+stream format selection. It intentionally does not reconfigure the simulated
+FireWire packet engine for 44.1 kHz yet.
+
+For the merged dext + host trace, start this before pressing a rate button:
+
+```bash
+log stream --info --debug --style compact \
+  --predicate 'eventMessage CONTAINS "[ADKConfig]" OR eventMessage CONTAINS "[ADKConfigHost]"'
+```
+
+The same events are available through the panel's bounded ring, so a transient
+transaction can still be inspected after the callback has returned. The host
+mirrors newly observed ring events as `[ADKConfigHost]` to stderr as well, so
+they are visible directly in Xcode's console.
+
+The CLI is the authoritative smoke test because it compares three independent
+views: the checked-in device model, CoreAudio HAL, and the live dext state.
+It carries the diagnostic user-client entitlement and refuses to change a
+device that CoreAudio reports as running.
+
+```bash
+CLI=build/dd/Build/Products/Debug/ADKLabCLI
+
+$CLI adk status                 # topology/rate snapshot; nonzero on mismatch
+$CLI adk events                 # read/mirror all bounded event rings
+$CLI adk rate 2 44100           # one FW1814 transaction
+$CLI adk smoke                  # all slots: alternate rate, then restore
+```
+
+`adk smoke` requires the full request/perform sequence plus device, output
+stream, and input stream mutation events. Every parsed event is written to
+stdout and mirrored as `[ADKConfigHost]` to stderr and unified logging, so the
+same trace appears when the CLI scheme is run from Xcode. The dext-side detail
+continues to use `[ADKConfig]` and includes each stream's before/after rate and
+channel count.
 
 ## Reading the dump
 

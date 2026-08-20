@@ -1,5 +1,6 @@
 #include <new>
 #include <atomic>
+#include <cstring>
 #include <AudioDriverKit/AudioDriverKit.h>
 #include <DriverKit/IOLib.h>
 #include <DriverKit/IODispatchQueue.h>
@@ -8,10 +9,13 @@
 #include "VirtualAudioDevice.h"
 
 #define LAB_LOG(fmt, ...) os_log(OS_LOG_DEFAULT, "[ADKLab] " fmt, ##__VA_ARGS__)
+#define ADK_CONFIG_LOG(fmt, ...) os_log(OS_LOG_DEFAULT, "[ADKConfig] " fmt, ##__VA_ARGS__)
 #include "../Core/VirtualAudioDeviceController.hpp"
+#include "../Lab/ADKConfigChange.hpp"
 #include "../Lab/PacketDumpBlob.hpp"
 #include "../Lab/StickyCounterSink.hpp"
 #include "../Lab/VerifyingSlotProvider.hpp"
+#include "../Runtime/VirtualDeviceRegistry.hpp"
 
 using namespace ASFW::Driver;
 
@@ -44,8 +48,9 @@ using namespace ASFW::Driver;
 
 namespace {
 
-constexpr uint32_t kSampleRate = 48000; // the ZTS period math below is 48 kHz-only
-constexpr uint32_t kMaxOutputChannels = 32; // bound for the layout array
+constexpr uint32_t kInitialSampleRate = ASFW::Lab::kADKConfigRateB;
+constexpr uint32_t kAlternateSampleRate = ASFW::Lab::kADKConfigRateA;
+constexpr uint32_t kMaxLabChannels = 32; // bound for profile + HAL layouts
 constexpr uint32_t kBytesPerSample = sizeof(float);
 
 // C4 rig: declared per-direction latency/safety-offset under test. Set to
@@ -60,9 +65,117 @@ constexpr uint32_t kLabOutputSafetyOffsetFrames = 64;
 constexpr uint32_t kLabInputSafetyOffsetFrames = 128;
 constexpr uint32_t kLabOutputLatencyFrames = 128;
 constexpr uint32_t kLabInputLatencyFrames = 128;
-constexpr uint64_t kZtsPeriodNsNumer = 32000000ull; // 512/48000 s = 32e6/3 ns
-constexpr uint64_t kZtsPeriodNsDenom = 3ull;
 constexpr uint32_t kMaxPreparePerCall = 512; // runaway guard for the pump
+
+struct LabHALDeviceShape final {
+    uint32_t inputChannels{0};
+    uint32_t outputChannels{0};
+};
+
+struct LabDeviceConfiguration final {
+    uint32_t sampleRate{0};
+    uint32_t opticalInput{static_cast<uint32_t>(ASFW::Lab::ADKConfigOpticalMode::None)};
+    uint32_t opticalOutput{static_cast<uint32_t>(ASFW::Lab::ADKConfigOpticalMode::None)};
+};
+
+const ASFW::Runtime::VirtualDeviceDefinition* FindLabDeviceDefinition(
+    OSString* deviceUID) noexcept
+{
+    if (deviceUID == nullptr || deviceUID->getCStringNoCopy() == nullptr) {
+        return nullptr;
+    }
+
+    using ASFW::Runtime::VirtualDeviceKind;
+    VirtualDeviceKind kind{};
+    const char* uid = deviceUID->getCStringNoCopy();
+    if (std::strcmp(uid, "VirtualADKAudioLab.Duet") == 0) {
+        kind = VirtualDeviceKind::Duet;
+    } else if (std::strcmp(uid, "VirtualADKAudioLab.Phase88") == 0) {
+        kind = VirtualDeviceKind::Phase88;
+    } else if (std::strcmp(uid, "VirtualADKAudioLab.FW1814") == 0) {
+        kind = VirtualDeviceKind::FW1814;
+    } else if (std::strcmp(uid, "VirtualADKAudioLab.Saffire") == 0) {
+        kind = VirtualDeviceKind::SaffirePro24DSP;
+    } else {
+        return nullptr;
+    }
+
+    return ASFW::Runtime::findVirtualDevice(kind);
+}
+
+uint32_t EncodeOpticalMode(
+    const std::optional<ASFW::Device::OpticalMode>& mode) noexcept
+{
+    if (!mode.has_value()) {
+        return static_cast<uint32_t>(ASFW::Lab::ADKConfigOpticalMode::None);
+    }
+    return *mode == ASFW::Device::OpticalMode::Adat
+        ? static_cast<uint32_t>(ASFW::Lab::ADKConfigOpticalMode::Adat)
+        : static_cast<uint32_t>(ASFW::Lab::ADKConfigOpticalMode::Spdif);
+}
+
+bool DecodeOpticalMode(uint32_t raw,
+                       std::optional<ASFW::Device::OpticalMode>& outMode) noexcept
+{
+    switch (static_cast<ASFW::Lab::ADKConfigOpticalMode>(raw)) {
+    case ASFW::Lab::ADKConfigOpticalMode::None:
+        outMode.reset();
+        return true;
+    case ASFW::Lab::ADKConfigOpticalMode::Adat:
+        outMode = ASFW::Device::OpticalMode::Adat;
+        return true;
+    case ASFW::Lab::ADKConfigOpticalMode::Spdif:
+        outMode = ASFW::Device::OpticalMode::Spdif;
+        return true;
+    }
+    return false;
+}
+
+LabDeviceConfiguration EncodeLabConfiguration(
+    const ASFW::Device::DeviceConfiguration& configuration) noexcept
+{
+    return LabDeviceConfiguration{
+        .sampleRate = configuration.sampleRate,
+        .opticalInput = EncodeOpticalMode(configuration.opticalInput),
+        .opticalOutput = EncodeOpticalMode(configuration.opticalOutput),
+    };
+}
+
+bool ResolveLabHALDeviceShape(
+    const ASFW::Runtime::VirtualDeviceDefinition* definition,
+    const LabDeviceConfiguration& configuration,
+    LabHALDeviceShape& outShape) noexcept
+{
+    if (definition == nullptr) {
+        return false;
+    }
+
+    ASFW::Device::DeviceConfiguration modelConfiguration{};
+    modelConfiguration.sampleRate = configuration.sampleRate;
+    if (!DecodeOpticalMode(configuration.opticalInput,
+                           modelConfiguration.opticalInput) ||
+        !DecodeOpticalMode(configuration.opticalOutput,
+                           modelConfiguration.opticalOutput)) {
+        return false;
+    }
+
+    auto resolved = definition->resolve(modelConfiguration);
+    if (!resolved.has_value()) {
+        return false;
+    }
+
+    outShape = LabHALDeviceShape{};
+    for (const auto& stream : resolved->streams.streams) {
+        if (stream.direction == ASFW::Device::StreamDirection::Capture) {
+            outShape.inputChannels += stream.channels;
+        } else {
+            outShape.outputChannels += stream.channels;
+        }
+    }
+    return outShape.inputChannels != 0 && outShape.outputChannels != 0 &&
+           outShape.inputChannels <= kMaxLabChannels &&
+           outShape.outputChannels <= kMaxLabChannels;
+}
 
 struct LabTimebase final {
     uint32_t numer{1};
@@ -75,8 +188,14 @@ struct LabTimebase final {
 
 // Nominal nanoseconds elapsed after n ZTS periods (exact thirds, no
 // accumulated rounding: computed from n, not incrementally).
-inline uint64_t NsForPeriodIndex(uint64_t n) noexcept {
-    return (n * kZtsPeriodNsNumer) / kZtsPeriodNsDenom;
+inline uint64_t NsForPeriodIndex(uint64_t n,
+                                 uint32_t sampleRate,
+                                 uint32_t periodFrames) noexcept {
+    if (sampleRate == 0) {
+        return 0;
+    }
+    return (n * static_cast<uint64_t>(periodFrames) * 1000000000ull) /
+           static_cast<uint64_t>(sampleRate);
 }
 
 } // namespace
@@ -95,6 +214,30 @@ struct VirtualAudioDevice_IVars
     VirtualAudioDeviceController* controller{nullptr};
     ASFW::Lab::VerifyingSlotProvider* verifier{nullptr};
     ASFW::Lab::StickyCounterSink* diagSink{nullptr};
+
+    // Configuration-change experiment state. The lock protects only this
+    // control-plane state and the bounded diagnostic ring; it is never used
+    // from SetIOOperationHandler or any timer/packet hot path.
+    IOLock* configLock{nullptr};
+    uint32_t labSlot{0};
+    const ASFW::Runtime::VirtualDeviceDefinition* deviceDefinition{nullptr};
+    LabDeviceConfiguration currentConfiguration{};
+    LabDeviceConfiguration pendingConfiguration{};
+    LabHALDeviceShape currentShape{};
+    LabHALDeviceShape pendingShape{};
+    // The first configuration is chosen as each model's maximum advertised
+    // geometry. Structural lab changes may shrink and later restore this
+    // geometry while retaining the original mappings; streaming reallocation
+    // is deliberately outside this experiment.
+    LabHALDeviceShape allocatedShape{};
+    std::atomic<uint32_t> currentSampleRate{kInitialSampleRate};
+    uint64_t pendingAction{0};
+    uint64_t nextAction{1};
+    bool configurationPending{false};
+    uint64_t nextConfigSequence{1};
+    uint32_t configWriteIndex{0};
+    uint32_t configEventCount{0};
+    ASFW::Lab::ADKConfigEvent configEvents[ASFW::Lab::kADKConfigLogMaxEvents]{};
 
     // Cached IO-path state, per the SetIOOperationHandler contract (RT
     // thread, cached/captured info only): all four are set in init() before
@@ -170,6 +313,97 @@ struct VirtualAudioDevice_IVars
     std::atomic<uint64_t> readAfterStop{0};       // O2: BeginRead after StopIO
 };
 
+static const char* ConfigPhaseName(ASFW::Lab::ADKConfigPhase phase) noexcept
+{
+    using ASFW::Lab::ADKConfigPhase;
+    switch (phase) {
+        case ADKConfigPhase::HostRequest: return "HostRequest";
+        case ADKConfigPhase::RequestCalled: return "RequestCalled";
+        case ADKConfigPhase::RequestReturned: return "RequestReturned";
+        case ADKConfigPhase::RequestRejected: return "RequestRejected";
+        case ADKConfigPhase::StopIOEnter: return "StopIOEnter";
+        case ADKConfigPhase::StopIOReturn: return "StopIOReturn";
+        case ADKConfigPhase::PerformEnter: return "PerformEnter";
+        case ADKConfigPhase::PerformMutation: return "PerformMutation";
+        case ADKConfigPhase::PerformSuper: return "PerformSuper";
+        case ADKConfigPhase::PerformReturn: return "PerformReturn";
+        case ADKConfigPhase::AbortEnter: return "AbortEnter";
+        case ADKConfigPhase::AbortSuper: return "AbortSuper";
+        case ADKConfigPhase::AbortReturn: return "AbortReturn";
+        case ADKConfigPhase::StartIOEnter: return "StartIOEnter";
+        case ADKConfigPhase::StartIOReturn: return "StartIOReturn";
+        case ADKConfigPhase::HandleSampleRateEnter: return "HandleSampleRateEnter";
+        case ADKConfigPhase::HandleSampleRateReturn: return "HandleSampleRateReturn";
+        case ADKConfigPhase::DeviceRateMutation: return "DeviceRateMutation";
+        case ADKConfigPhase::OutputStreamMutation: return "OutputStreamMutation";
+        case ADKConfigPhase::InputStreamMutation: return "InputStreamMutation";
+        default: return "Unknown";
+    }
+}
+
+static void AppendConfigEventLocked(
+    VirtualAudioDevice* device,
+    VirtualAudioDevice_IVars* ivars,
+    ASFW::Lab::ADKConfigPhase phase,
+    uint64_t action,
+    kern_return_t result,
+    uint32_t oldSampleRate,
+    uint32_t newSampleRate,
+    uint32_t oldChannels = 0,
+    uint32_t newChannels = 0) noexcept
+{
+    auto& event = ivars->configEvents[ivars->configWriteIndex];
+    event = ASFW::Lab::ADKConfigEvent{};
+    event.sequence = ivars->nextConfigSequence++;
+    event.hostTimeTicks = mach_absolute_time();
+    event.deviceSlot = ivars->labSlot;
+    event.deviceObjectID = static_cast<uint32_t>(device->GetObjectID());
+    event.action = action;
+    event.phase = static_cast<uint32_t>(phase);
+    event.result = static_cast<int32_t>(result);
+    event.oldSampleRate = oldSampleRate;
+    event.newSampleRate = newSampleRate;
+    event.configurationPending = ivars->configurationPending ? 1u : 0u;
+    event.streamChannelCounts =
+        ASFW::Lab::PackADKConfigChannelCounts(oldChannels, newChannels);
+
+    ivars->configWriteIndex =
+        (ivars->configWriteIndex + 1u) % ASFW::Lab::kADKConfigLogMaxEvents;
+    if (ivars->configEventCount < ASFW::Lab::kADKConfigLogMaxEvents) {
+        ++ivars->configEventCount;
+    }
+}
+
+static void RecordConfigEvent(
+    VirtualAudioDevice* device,
+    VirtualAudioDevice_IVars* ivars,
+    ASFW::Lab::ADKConfigPhase phase,
+    uint64_t action,
+    kern_return_t result,
+    uint32_t oldSampleRate,
+    uint32_t newSampleRate,
+    uint32_t oldChannels = 0,
+    uint32_t newChannels = 0) noexcept
+{
+    if (device == nullptr || ivars == nullptr || ivars->configLock == nullptr) {
+        return;
+    }
+
+    IOLockLock(ivars->configLock);
+    AppendConfigEventLocked(device, ivars, phase, action, result,
+                            oldSampleRate, newSampleRate,
+                            oldChannels, newChannels);
+    const uint32_t pending = ivars->configurationPending ? 1u : 0u;
+    const uint32_t slot = ivars->labSlot;
+    IOLockUnlock(ivars->configLock);
+
+    ADK_CONFIG_LOG("slot=%{public}u object=0x%{public}x phase=%{public}s action=%{public}llu result=0x%{public}08x old_rate=%{public}u new_rate=%{public}u old_channels=%{public}u new_channels=%{public}u pending=%{public}u",
+                   slot, static_cast<uint32_t>(device->GetObjectID()),
+                   ConfigPhaseName(phase), action,
+                   static_cast<uint32_t>(result), oldSampleRate, newSampleRate,
+                   oldChannels, newChannels, pending);
+}
+
 bool VirtualAudioDevice::init(IOUserAudioDriver* in_driver,
                                bool in_supports_prewarming,
                                OSString* in_device_uid,
@@ -196,6 +430,14 @@ bool VirtualAudioDevice::init(IOUserAudioDriver* in_driver,
         LAB_LOG("init - failed to allocate ivars");
         return false;
     }
+    ivars->configLock = IOLockAlloc();
+    if (ivars->configLock == nullptr) {
+        LAB_LOG("init - failed to allocate configuration log lock");
+        return false;
+    }
+    ivars->currentSampleRate.store(kInitialSampleRate, std::memory_order_relaxed);
+    ivars->nextAction = 1;
+    ivars->nextConfigSequence = 1;
     LAB_LOG("init - ivars allocated successfully");
 
     ivars->driver = OSSharedPtr(in_driver, OSRetain);
@@ -249,14 +491,14 @@ bool VirtualAudioDevice::init(IOUserAudioDriver* in_driver,
     // format/channel layout must follow it.
     ASFW::Driver::OutputDeviceCaps caps{};
     if (!ivars->controller->GetOutputDeviceCaps(caps) ||
-        caps.pcmChannels == 0 || caps.pcmChannels > kMaxOutputChannels) {
+        caps.pcmChannels == 0 || caps.pcmChannels > kMaxLabChannels) {
         LAB_LOG("init - GetOutputDeviceCaps failed (pcmChannels = %{public}u)",
                 caps.pcmChannels);
         return false;
     }
-    if (caps.sampleRate != kSampleRate) {
-        // NsForPeriodIndex/kZtsPeriodNs* are exact-thirds 48 kHz math; refuse
-        // a profile rate the lab clock chain cannot honor.
+    if (caps.sampleRate != kInitialSampleRate) {
+        // The initial lab profile remains 48 kHz. The configuration experiment
+        // can then request the alternate advertised format after startup.
         LAB_LOG("init - profile sample rate %{public}u unsupported by lab clock chain",
                 caps.sampleRate);
         return false;
@@ -264,24 +506,66 @@ bool VirtualAudioDevice::init(IOUserAudioDriver* in_driver,
     LAB_LOG("init - device caps from profile: %{public}u ch @ %{public}u Hz",
             caps.pcmChannels, caps.sampleRate);
 
+    // HAL topology comes from the lab's device model, which is also what the
+    // CLI reports. The Saffire DICE profile above remains only the dormant
+    // packet fixture; it must not leak its 8-channel TX shape into every
+    // published CoreAudio device.
+    ivars->deviceDefinition = FindLabDeviceDefinition(in_device_uid);
+    if (ivars->deviceDefinition == nullptr) {
+        LAB_LOG("init - failed to find model definition for %{public}s",
+                in_device_uid ? in_device_uid->getCStringNoCopy() : "NULL");
+        return false;
+    }
+    ivars->currentConfiguration = EncodeLabConfiguration(
+        ivars->deviceDefinition->defaultConfiguration());
+
+    LabHALDeviceShape halShape{};
+    if (!ResolveLabHALDeviceShape(ivars->deviceDefinition,
+                                  ivars->currentConfiguration, halShape)) {
+        LAB_LOG("init - failed to resolve HAL shape for %{public}s",
+                in_device_uid ? in_device_uid->getCStringNoCopy() : "NULL");
+        return false;
+    }
+    ivars->currentShape = halShape;
+    ivars->allocatedShape = halShape;
+    ivars->currentSampleRate.store(ivars->currentConfiguration.sampleRate,
+                                   std::memory_order_relaxed);
+    LAB_LOG("init - HAL model shape: %{public}u input / %{public}u output",
+            halShape.inputChannels, halShape.outputChannels);
+
     // The lab device reports as a FireWire-transport clock device — that is
     // the contract ASFW will live under (AudioDriverKitTypes.h '1394').
     LAB_LOG("init - setting transport type to FireWire");
     SetTransportType(IOUserAudioTransportType::FireWire);
 
-    // Discrete channel layout sized by the profile caps (CoreAudio discrete
+    // Discrete channel layouts sized by the model/HAL caps (CoreAudio discrete
     // labels are contiguous from Discrete_0).
     LAB_LOG("init - setting preferred output channel layout");
-    IOUserAudioChannelLabel outputChannelLayout[kMaxOutputChannels] = {};
-    for (uint32_t ch = 0; ch < caps.pcmChannels; ++ch) {
+    IOUserAudioChannelLabel outputChannelLayout[kMaxLabChannels] = {};
+    for (uint32_t ch = 0; ch < halShape.outputChannels; ++ch) {
         outputChannelLayout[ch] = static_cast<IOUserAudioChannelLabel>(
             static_cast<uint32_t>(IOUserAudioChannelLabel::Discrete_0) + ch);
     }
-    kern_return_t kr = SetPreferredOutputChannelLayout(outputChannelLayout, caps.pcmChannels);
+    kern_return_t kr = SetPreferredOutputChannelLayout(
+        outputChannelLayout, halShape.outputChannels);
     if (kr != kIOReturnSuccess) {
         LAB_LOG("init - SetPreferredOutputChannelLayout failed (kr = 0x%{public}08x)", kr);
     } else {
         LAB_LOG("init - SetPreferredOutputChannelLayout succeeded");
+    }
+
+    LAB_LOG("init - setting preferred input channel layout");
+    IOUserAudioChannelLabel inputChannelLayout[kMaxLabChannels] = {};
+    for (uint32_t ch = 0; ch < halShape.inputChannels; ++ch) {
+        inputChannelLayout[ch] = static_cast<IOUserAudioChannelLabel>(
+            static_cast<uint32_t>(IOUserAudioChannelLabel::Discrete_0) + ch);
+    }
+    kr = SetPreferredInputChannelLayout(inputChannelLayout,
+                                        halShape.inputChannels);
+    if (kr != kIOReturnSuccess) {
+        LAB_LOG("init - SetPreferredInputChannelLayout failed (kr = 0x%{public}08x)", kr);
+    } else {
+        LAB_LOG("init - SetPreferredInputChannelLayout succeeded");
     }
 
     // Set capabilities for default output
@@ -335,37 +619,70 @@ bool VirtualAudioDevice::init(IOUserAudioDriver* in_driver,
         LAB_LOG("init - SetInputLatency set to %{public}u", kLabInputLatencyFrames);
     }
 
-    // Float32 output stream shaped by the profile caps.
-    double sampleRate = caps.sampleRate;
-    LAB_LOG("init - setting available sample rate to %{public}.1f", sampleRate);
-    SetAvailableSampleRates(&sampleRate, 1);
+    // Float32 streams shaped by the model/HAL caps. The second format is
+    // advertised only to make the ADK configuration transaction observable;
+    // the lab does not claim that its packet timing rig is playback-ready at
+    // every advertised rate yet.
+    double sampleRates[2] = {
+        static_cast<double>(kAlternateSampleRate),
+        static_cast<double>(kInitialSampleRate),
+    };
+    LAB_LOG("init - setting available sample rates to %{public}.1f and %{public}.1f",
+            sampleRates[0], sampleRates[1]);
+    kr = SetAvailableSampleRates(sampleRates, 2);
+    if (kr != kIOReturnSuccess) {
+        LAB_LOG("init - SetAvailableSampleRates failed (kr = 0x%{public}08x)", kr);
+        return false;
+    }
+    const double sampleRate = static_cast<double>(
+        ivars->currentConfiguration.sampleRate);
     LAB_LOG("init - setting current sample rate to %{public}.1f", sampleRate);
-    SetSampleRate(sampleRate);
+    kr = SetSampleRate(sampleRate);
+    if (kr != kIOReturnSuccess) {
+        LAB_LOG("init - SetSampleRate failed (kr = 0x%{public}08x)", kr);
+        return false;
+    }
 
-    const uint32_t outputBytesPerFrame = caps.pcmChannels * kBytesPerSample;
-    IOUserAudioStreamBasicDescription format = {
+    const uint32_t outputBytesPerFrame =
+        halShape.outputChannels * kBytesPerSample;
+    IOUserAudioStreamBasicDescription outputFormat = {
         .mSampleRate = sampleRate,
         .mFormatID = IOUserAudioFormatID::LinearPCM,
         .mFormatFlags = static_cast<IOUserAudioFormatFlags>(IOUserAudioFormatFlags::FormatFlagIsFloat | IOUserAudioFormatFlags::FormatFlagsNativeEndian),
         .mBytesPerPacket = outputBytesPerFrame,
         .mFramesPerPacket = 1,
         .mBytesPerFrame = outputBytesPerFrame,
-        .mChannelsPerFrame = caps.pcmChannels,
+        .mChannelsPerFrame = halShape.outputChannels,
         .mBitsPerChannel = 32
     };
+    IOUserAudioStreamBasicDescription alternateOutputFormat = outputFormat;
+    alternateOutputFormat.mSampleRate =
+        static_cast<double>(kAlternateSampleRate);
+    IOUserAudioStreamBasicDescription availableOutputFormats[2] = {
+        alternateOutputFormat,
+        outputFormat,
+    };
 
-    LAB_LOG("init - stream format basic description:");
-    LAB_LOG("  mSampleRate: %{public}.1f", format.mSampleRate);
-    LAB_LOG("  mFormatID: 0x%{public}x (lpcm = 0x6c70636d)", static_cast<uint32_t>(format.mFormatID));
-    LAB_LOG("  mFormatFlags: 0x%{public}x (Float/Packed/Native)", static_cast<uint32_t>(format.mFormatFlags));
-    LAB_LOG("  mBytesPerPacket: %{public}u", format.mBytesPerPacket);
-    LAB_LOG("  mFramesPerPacket: %{public}u", format.mFramesPerPacket);
-    LAB_LOG("  mBytesPerFrame: %{public}u", format.mBytesPerFrame);
-    LAB_LOG("  mChannelsPerFrame: %{public}u", format.mChannelsPerFrame);
-    LAB_LOG("  mBitsPerChannel: %{public}u", format.mBitsPerChannel);
+    const uint32_t inputBytesPerFrame =
+        halShape.inputChannels * kBytesPerSample;
+    IOUserAudioStreamBasicDescription inputFormat = outputFormat;
+    inputFormat.mBytesPerPacket = inputBytesPerFrame;
+    inputFormat.mBytesPerFrame = inputBytesPerFrame;
+    inputFormat.mChannelsPerFrame = halShape.inputChannels;
+    IOUserAudioStreamBasicDescription alternateInputFormat = inputFormat;
+    alternateInputFormat.mSampleRate = static_cast<double>(kAlternateSampleRate);
+    IOUserAudioStreamBasicDescription availableInputFormats[2] = {
+        alternateInputFormat,
+        inputFormat,
+    };
 
-    ivars->outputBytesPerFrame = format.mBytesPerFrame;
-    ivars->outputChannels = format.mChannelsPerFrame;
+    LAB_LOG("init - stream formats: output=%{public}u ch/%{public}u Bpf input=%{public}u ch/%{public}u Bpf rate=%{public}.1f",
+            outputFormat.mChannelsPerFrame, outputFormat.mBytesPerFrame,
+            inputFormat.mChannelsPerFrame, inputFormat.mBytesPerFrame,
+            outputFormat.mSampleRate);
+
+    ivars->outputBytesPerFrame = outputFormat.mBytesPerFrame;
+    ivars->outputChannels = outputFormat.mChannelsPerFrame;
 
     // CoreAudio HAL wraps stream writes at zeroTimestampPeriod, so the ring
     // buffer size must match the period exactly to avoid a wrap mismatch where
@@ -373,9 +690,10 @@ bool VirtualAudioDevice::init(IOUserAudioDriver* in_driver,
     ivars->ringFrames = in_zero_timestamp_period;
 
     LAB_LOG("init - creating output ring buffer (%{public}u bytes, ringFrames = %{public}u, zeroTimestampPeriod = %{public}u)",
-            ivars->ringFrames * format.mBytesPerFrame, ivars->ringFrames, in_zero_timestamp_period);
+            ivars->ringFrames * outputFormat.mBytesPerFrame,
+            ivars->ringFrames, in_zero_timestamp_period);
     OSSharedPtr<IOBufferMemoryDescriptor> buffer;
-    uint32_t bufferSize = ivars->ringFrames * format.mBytesPerFrame;
+    uint32_t bufferSize = ivars->ringFrames * outputFormat.mBytesPerFrame;
     kr = IOBufferMemoryDescriptor::Create(kIOMemoryDirectionInOut, bufferSize, 0, buffer.attach());
     if (kr != kIOReturnSuccess) {
         LAB_LOG("init - Failed to create output IOBufferMemoryDescriptor (kr = 0x%{public}08x)", kr);
@@ -407,8 +725,17 @@ bool VirtualAudioDevice::init(IOUserAudioDriver* in_driver,
     LAB_LOG("init - output stream object created successfully");
 
     LAB_LOG("init - configuring stream formats");
-    ivars->outputStream->SetAvailableStreamFormats(&format, 1);
-    ivars->outputStream->SetCurrentStreamFormat(&format);
+    kr = ivars->outputStream->SetAvailableStreamFormats(
+        availableOutputFormats, 2);
+    if (kr != kIOReturnSuccess) {
+        LAB_LOG("init - output SetAvailableStreamFormats failed (kr = 0x%{public}08x)", kr);
+        return false;
+    }
+    kr = ivars->outputStream->SetCurrentStreamFormat(&outputFormat);
+    if (kr != kIOReturnSuccess) {
+        LAB_LOG("init - output SetCurrentStreamFormat failed (kr = 0x%{public}08x)", kr);
+        return false;
+    }
 
     LAB_LOG("init - adding stream to device");
     kr = AddStream(ivars->outputStream.get());
@@ -418,18 +745,19 @@ bool VirtualAudioDevice::init(IOUserAudioDriver* in_driver,
     }
     LAB_LOG("init - stream added successfully to device");
 
-    // C4 rig: mirror the output stream for input, same format/ring sizing.
-    // Content doesn't matter for the C4 question (BeginRead/WriteEnd
+    // C4 rig: publish the model's actual input width. Content remains zeroed;
+    // it doesn't matter for the C4 question (BeginRead/WriteEnd
     // scheduling relationship) so the ring is left zeroed; only the
     // simulated hardware fill cursor (capturedFrames, advanced in
     // ZtsTimerOccurred_Impl) is load-bearing.
-    ivars->inputBytesPerFrame = format.mBytesPerFrame;
-    ivars->inputChannels = format.mChannelsPerFrame;
+    ivars->inputBytesPerFrame = inputFormat.mBytesPerFrame;
+    ivars->inputChannels = inputFormat.mChannelsPerFrame;
 
     LAB_LOG("init - creating input ring buffer (%{public}u bytes, ringFrames = %{public}u)",
-            ivars->ringFrames * format.mBytesPerFrame, ivars->ringFrames);
+            ivars->ringFrames * inputFormat.mBytesPerFrame,
+            ivars->ringFrames);
     OSSharedPtr<IOBufferMemoryDescriptor> inputBuffer;
-    uint32_t inputBufferSize = ivars->ringFrames * format.mBytesPerFrame;
+    uint32_t inputBufferSize = ivars->ringFrames * inputFormat.mBytesPerFrame;
     kr = IOBufferMemoryDescriptor::Create(kIOMemoryDirectionInOut, inputBufferSize, 0, inputBuffer.attach());
     if (kr != kIOReturnSuccess) {
         LAB_LOG("init - Failed to create input IOBufferMemoryDescriptor (kr = 0x%{public}08x)", kr);
@@ -451,8 +779,17 @@ bool VirtualAudioDevice::init(IOUserAudioDriver* in_driver,
         LAB_LOG("init - Failed to create input IOUserAudioStream");
         return false;
     }
-    ivars->inputStream->SetAvailableStreamFormats(&format, 1);
-    ivars->inputStream->SetCurrentStreamFormat(&format);
+    kr = ivars->inputStream->SetAvailableStreamFormats(
+        availableInputFormats, 2);
+    if (kr != kIOReturnSuccess) {
+        LAB_LOG("init - input SetAvailableStreamFormats failed (kr = 0x%{public}08x)", kr);
+        return false;
+    }
+    kr = ivars->inputStream->SetCurrentStreamFormat(&inputFormat);
+    if (kr != kIOReturnSuccess) {
+        LAB_LOG("init - input SetCurrentStreamFormat failed (kr = 0x%{public}08x)", kr);
+        return false;
+    }
 
     kr = AddStream(ivars->inputStream.get());
     if (kr != kIOReturnSuccess) {
@@ -653,6 +990,10 @@ void VirtualAudioDevice::free()
         if (ivars->controller) {
             delete ivars->controller;
         }
+        if (ivars->configLock) {
+            IOLockFree(ivars->configLock);
+            ivars->configLock = nullptr;
+        }
         ivars->driver.reset();
         ivars->workQueue.reset();
         ivars->outputStream.reset();
@@ -724,7 +1065,10 @@ void VirtualAudioDevice::ZtsTimerOccurred_Impl(OSAction* action, uint64_t time)
     ivars->periodIndex += 1;
     const uint64_t deadline =
         ivars->startHostTime +
-        ivars->timebase.NsToTicks(NsForPeriodIndex(ivars->periodIndex));
+        ivars->timebase.NsToTicks(NsForPeriodIndex(
+            ivars->periodIndex,
+            ivars->currentSampleRate.load(std::memory_order_relaxed),
+            GetZeroTimestampPeriod()));
     const uint64_t leeway = ivars->timebase.NsToTicks(500000); // 0.5 ms
     ivars->ztsTimer->WakeAtTime(kIOTimerClockMachAbsoluteTime, deadline, leeway);
 }
@@ -732,6 +1076,14 @@ void VirtualAudioDevice::ZtsTimerOccurred_Impl(OSAction* action, uint64_t time)
 kern_return_t VirtualAudioDevice::StartIO(IOUserAudioStartStopFlags in_flags)
 {
     LAB_LOG("StartIO - entering. flags = 0x%{public}x", in_flags);
+    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::StartIOEnter,
+                      0, kIOReturnSuccess,
+                      ivars != nullptr
+                          ? ivars->currentSampleRate.load(std::memory_order_relaxed)
+                          : 0,
+                      ivars != nullptr
+                          ? ivars->currentSampleRate.load(std::memory_order_relaxed)
+                          : 0);
 
     __block kern_return_t kr = kIOReturnSuccess;
     ivars->workQueue->DispatchSync(^(){
@@ -817,9 +1169,12 @@ kern_return_t VirtualAudioDevice::StartIO(IOUserAudioStartStopFlags in_flags)
         // Arm the wrap timer only once IO actually started; the t=0 anchor
         // above already seeds the clock chain.
         ivars->periodIndex = 1;
-        const uint64_t deadline =
-            ivars->startHostTime +
-            ivars->timebase.NsToTicks(NsForPeriodIndex(1));
+    const uint64_t deadline =
+        ivars->startHostTime +
+        ivars->timebase.NsToTicks(NsForPeriodIndex(
+            1,
+            ivars->currentSampleRate.load(std::memory_order_relaxed),
+            GetZeroTimestampPeriod()));
         const uint64_t leeway = ivars->timebase.NsToTicks(500000);
 
         LAB_LOG("StartIO - arming ZTS timer for first deadline = %{public}llu ticks (leeway = %{public}llu)", deadline, leeway);
@@ -832,12 +1187,28 @@ kern_return_t VirtualAudioDevice::StartIO(IOUserAudioStartStopFlags in_flags)
     });
 
     LAB_LOG("StartIO - exiting. result = 0x%{public}08x", kr);
+    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::StartIOReturn,
+                      0, kr,
+                      ivars != nullptr
+                          ? ivars->currentSampleRate.load(std::memory_order_relaxed)
+                          : 0,
+                      ivars != nullptr
+                          ? ivars->currentSampleRate.load(std::memory_order_relaxed)
+                          : 0);
     return kr;
 }
 
 kern_return_t VirtualAudioDevice::StopIO(IOUserAudioStartStopFlags in_flags)
 {
     LAB_LOG("StopIO - entering. flags = 0x%{public}x", in_flags);
+    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::StopIOEnter,
+                      0, kIOReturnSuccess,
+                      ivars != nullptr
+                          ? ivars->currentSampleRate.load(std::memory_order_relaxed)
+                          : 0,
+                      ivars != nullptr
+                          ? ivars->currentSampleRate.load(std::memory_order_relaxed)
+                          : 0);
 
     __block kern_return_t kr = kIOReturnSuccess;
     ivars->workQueue->DispatchSync(^(){
@@ -973,6 +1344,14 @@ kern_return_t VirtualAudioDevice::StopIO(IOUserAudioStartStopFlags in_flags)
         }
     });
 
+    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::StopIOReturn,
+                      0, kr,
+                      ivars != nullptr
+                          ? ivars->currentSampleRate.load(std::memory_order_relaxed)
+                          : 0,
+                      ivars != nullptr
+                          ? ivars->currentSampleRate.load(std::memory_order_relaxed)
+                          : 0);
     return kr;
 }
 
@@ -1042,19 +1421,560 @@ kern_return_t VirtualAudioDevice::CopyPacketDump(uint32_t in_count,
     return result;
 }
 
-kern_return_t VirtualAudioDevice::PerformDeviceConfigurationChange(uint64_t change_action,
-                                                                   OSObject* in_change_info)
+void VirtualAudioDevice::SetLabSlot(uint32_t in_slot)
 {
-    return super::PerformDeviceConfigurationChange(change_action, in_change_info);
+    if (ivars == nullptr) {
+        return;
+    }
+    ivars->labSlot = in_slot;
+    ADK_CONFIG_LOG("slot=%{public}u object=0x%{public}x phase=SetLabSlot",
+                   ivars->labSlot, static_cast<uint32_t>(GetObjectID()));
 }
 
-kern_return_t VirtualAudioDevice::AbortDeviceConfigurationChange(uint64_t change_action,
-                                                                 OSObject* in_change_info)
+static bool IsExperimentSampleRate(uint32_t sampleRate) noexcept
 {
-    return super::AbortDeviceConfigurationChange(change_action, in_change_info);
+    return sampleRate == ASFW::Lab::kADKConfigRateA ||
+           sampleRate == ASFW::Lab::kADKConfigRateB;
+}
+
+static IOUserAudioStreamBasicDescription MakeFloat32Format(
+    uint32_t sampleRate, uint32_t channels) noexcept
+{
+    const uint32_t bytesPerFrame = channels * kBytesPerSample;
+    return IOUserAudioStreamBasicDescription{
+        .mSampleRate = static_cast<double>(sampleRate),
+        .mFormatID = IOUserAudioFormatID::LinearPCM,
+        .mFormatFlags = static_cast<IOUserAudioFormatFlags>(
+            IOUserAudioFormatFlags::FormatFlagIsFloat |
+            IOUserAudioFormatFlags::FormatFlagsNativeEndian),
+        .mBytesPerPacket = bytesPerFrame,
+        .mFramesPerPacket = 1,
+        .mBytesPerFrame = bytesPerFrame,
+        .mChannelsPerFrame = channels,
+        .mBitsPerChannel = 32,
+    };
+}
+
+static kern_return_t ApplyPreferredChannelLayouts(
+    VirtualAudioDevice* device, const LabHALDeviceShape& shape) noexcept
+{
+    IOUserAudioChannelLabel outputLayout[kMaxLabChannels] = {};
+    IOUserAudioChannelLabel inputLayout[kMaxLabChannels] = {};
+    for (uint32_t channel = 0; channel < shape.outputChannels; ++channel) {
+        outputLayout[channel] = static_cast<IOUserAudioChannelLabel>(
+            static_cast<uint32_t>(IOUserAudioChannelLabel::Discrete_0) + channel);
+    }
+    for (uint32_t channel = 0; channel < shape.inputChannels; ++channel) {
+        inputLayout[channel] = static_cast<IOUserAudioChannelLabel>(
+            static_cast<uint32_t>(IOUserAudioChannelLabel::Discrete_0) + channel);
+    }
+
+    kern_return_t kr = device->SetPreferredOutputChannelLayout(
+        outputLayout, shape.outputChannels);
+    if (kr != kIOReturnSuccess) {
+        return kr;
+    }
+    return device->SetPreferredInputChannelLayout(inputLayout, shape.inputChannels);
+}
+
+static kern_return_t ApplyExperimentConfiguration(
+    VirtualAudioDevice* device,
+    VirtualAudioDevice_IVars* ivars,
+    const LabDeviceConfiguration& configuration,
+    const LabHALDeviceShape& shape,
+    uint64_t action) noexcept
+{
+    if (device == nullptr || ivars == nullptr ||
+        !IsExperimentSampleRate(configuration.sampleRate) ||
+        shape.inputChannels == 0 || shape.outputChannels == 0 ||
+        shape.inputChannels > ivars->allocatedShape.inputChannels ||
+        shape.outputChannels > ivars->allocatedShape.outputChannels) {
+        return kIOReturnBadArgument;
+    }
+
+    const uint32_t deviceRateBefore =
+        static_cast<uint32_t>(device->GetSampleRate());
+    kern_return_t kr = device->SetSampleRate(
+        static_cast<double>(configuration.sampleRate));
+    const uint32_t deviceRateAfter =
+        static_cast<uint32_t>(device->GetSampleRate());
+    RecordConfigEvent(device, ivars,
+                      ASFW::Lab::ADKConfigPhase::DeviceRateMutation,
+                      action, kr, deviceRateBefore, deviceRateAfter);
+    if (kr != kIOReturnSuccess) {
+        return kr;
+    }
+
+    // SetSampleRate updates the clock device, but it does not select a
+    // matching format on either stream. AudioDriverKit requires this explicit
+    // propagation so the HAL observes a coherent device-rate/stream-rate
+    // transition (IOUserAudioStream::DeviceSampleRateChanged).
+    if (deviceRateBefore != configuration.sampleRate) {
+        if (ivars->outputStream) {
+            kr = ivars->outputStream->DeviceSampleRateChanged(
+                static_cast<double>(configuration.sampleRate));
+            ADK_CONFIG_LOG("slot=%{public}u phase=OutputDeviceSampleRateChanged rate=%{public}u result=0x%{public}08x",
+                           ivars->labSlot, configuration.sampleRate,
+                           static_cast<uint32_t>(kr));
+            if (kr != kIOReturnSuccess) {
+                return kr;
+            }
+        }
+        if (ivars->inputStream) {
+            kr = ivars->inputStream->DeviceSampleRateChanged(
+                static_cast<double>(configuration.sampleRate));
+            ADK_CONFIG_LOG("slot=%{public}u phase=InputDeviceSampleRateChanged rate=%{public}u result=0x%{public}08x",
+                           ivars->labSlot, configuration.sampleRate,
+                           static_cast<uint32_t>(kr));
+            if (kr != kIOReturnSuccess) {
+                return kr;
+            }
+        }
+    }
+
+    // This experiment only runs while I/O is stopped. The initial descriptors
+    // are allocated for each profile's largest geometry and intentionally stay
+    // mapped for the device lifetime, so a late RT callback cannot observe a
+    // freed mapping. Buffer replacement belongs to the later streaming phase.
+    kr = ApplyPreferredChannelLayouts(device, shape);
+    if (kr != kIOReturnSuccess) {
+        return kr;
+    }
+
+    const auto outputFormat = MakeFloat32Format(configuration.sampleRate,
+                                                 shape.outputChannels);
+    auto alternateOutputFormat = outputFormat;
+    alternateOutputFormat.mSampleRate = static_cast<double>(
+        configuration.sampleRate == kInitialSampleRate
+            ? kAlternateSampleRate : kInitialSampleRate);
+    const IOUserAudioStreamBasicDescription outputFormats[2] = {
+        alternateOutputFormat, outputFormat,
+    };
+
+    const auto inputFormat = MakeFloat32Format(configuration.sampleRate,
+                                                shape.inputChannels);
+    auto alternateInputFormat = inputFormat;
+    alternateInputFormat.mSampleRate = alternateOutputFormat.mSampleRate;
+    const IOUserAudioStreamBasicDescription inputFormats[2] = {
+        alternateInputFormat, inputFormat,
+    };
+
+    if (ivars->outputStream) {
+        const auto before = ivars->outputStream->GetCurrentStreamFormat();
+        kr = ivars->outputStream->SetAvailableStreamFormats(outputFormats, 2);
+        if (kr == kIOReturnSuccess) {
+            kr = ivars->outputStream->SetCurrentStreamFormat(&outputFormat);
+        }
+        const auto after = ivars->outputStream->GetCurrentStreamFormat();
+        RecordConfigEvent(device, ivars,
+                          ASFW::Lab::ADKConfigPhase::OutputStreamMutation,
+                          action, kr,
+                          static_cast<uint32_t>(before.mSampleRate),
+                          static_cast<uint32_t>(after.mSampleRate),
+                          before.mChannelsPerFrame,
+                          after.mChannelsPerFrame);
+        if (kr != kIOReturnSuccess) {
+            return kr;
+        }
+    }
+
+    if (ivars->inputStream) {
+        const auto before = ivars->inputStream->GetCurrentStreamFormat();
+        kr = ivars->inputStream->SetAvailableStreamFormats(inputFormats, 2);
+        if (kr == kIOReturnSuccess) {
+            kr = ivars->inputStream->SetCurrentStreamFormat(&inputFormat);
+        }
+        const auto after = ivars->inputStream->GetCurrentStreamFormat();
+        RecordConfigEvent(device, ivars,
+                          ASFW::Lab::ADKConfigPhase::InputStreamMutation,
+                          action, kr,
+                          static_cast<uint32_t>(before.mSampleRate),
+                          static_cast<uint32_t>(after.mSampleRate),
+                          before.mChannelsPerFrame,
+                          after.mChannelsPerFrame);
+        if (kr != kIOReturnSuccess) {
+            return kr;
+        }
+    }
+
+    ivars->outputBytesPerFrame = outputFormat.mBytesPerFrame;
+    ivars->outputChannels = outputFormat.mChannelsPerFrame;
+    ivars->inputBytesPerFrame = inputFormat.mBytesPerFrame;
+    ivars->inputChannels = inputFormat.mChannelsPerFrame;
+    ivars->currentSampleRate.store(configuration.sampleRate,
+                                   std::memory_order_relaxed);
+    return kIOReturnSuccess;
+}
+
+kern_return_t VirtualAudioDevice::RequestSampleRateChange(uint32_t in_sample_rate)
+{
+    if (ivars == nullptr || ivars->configLock == nullptr) {
+        return kIOReturnNotReady;
+    }
+
+    LabDeviceConfiguration current{};
+    IOLockLock(ivars->configLock);
+    current = ivars->currentConfiguration;
+    IOLockUnlock(ivars->configLock);
+    return RequestConfigurationChange(in_sample_rate, current.opticalInput,
+                                      current.opticalOutput);
+}
+
+kern_return_t VirtualAudioDevice::RequestConfigurationChange(
+    uint32_t in_sample_rate, uint32_t in_optical_input,
+    uint32_t in_optical_output)
+{
+    if (ivars == nullptr || ivars->configLock == nullptr ||
+        ivars->deviceDefinition == nullptr) {
+        return kIOReturnNotReady;
+    }
+
+    const LabDeviceConfiguration requested{
+        .sampleRate = in_sample_rate,
+        .opticalInput = in_optical_input,
+        .opticalOutput = in_optical_output,
+    };
+    LabHALDeviceShape requestedShape{};
+    const bool valid = IsExperimentSampleRate(in_sample_rate) &&
+        ResolveLabHALDeviceShape(ivars->deviceDefinition, requested,
+                                 requestedShape);
+
+    uint64_t action = 0;
+    LabDeviceConfiguration current{};
+    LabHALDeviceShape currentShape{};
+    bool rejected = false;
+    kern_return_t rejectionResult = kIOReturnSuccess;
+
+    IOLockLock(ivars->configLock);
+    current = ivars->currentConfiguration;
+    currentShape = ivars->currentShape;
+    if (!valid || requestedShape.inputChannels > ivars->allocatedShape.inputChannels ||
+        requestedShape.outputChannels > ivars->allocatedShape.outputChannels) {
+        rejected = true;
+        rejectionResult = kIOReturnBadArgument;
+    } else if (ivars->configurationPending ||
+               ivars->ioRunning.load(std::memory_order_relaxed)) {
+        rejected = true;
+        rejectionResult = kIOReturnBusy;
+    } else if (requested.sampleRate == current.sampleRate &&
+               requested.opticalInput == current.opticalInput &&
+               requested.opticalOutput == current.opticalOutput) {
+        rejected = true;
+        rejectionResult = kIOReturnSuccess;
+    } else {
+        action = (static_cast<uint64_t>(ivars->labSlot + 1u) << 56) |
+                 (ivars->nextAction++ & 0x00FFFFFFFFFFFFFFull);
+        ivars->pendingAction = action;
+        ivars->pendingConfiguration = requested;
+        ivars->pendingShape = requestedShape;
+        ivars->configurationPending = true;
+        AppendConfigEventLocked(
+            this, ivars, ASFW::Lab::ADKConfigPhase::HostRequest, action,
+            kIOReturnSuccess, current.sampleRate, requested.sampleRate,
+            currentShape.outputChannels, requestedShape.outputChannels);
+    }
+    IOLockUnlock(ivars->configLock);
+
+    if (rejected) {
+        ADK_CONFIG_LOG("slot=%{public}u object=0x%{public}x phase=RequestRejected rate=%{public}u optical_in=%{public}u optical_out=%{public}u result=0x%{public}08x",
+                       ivars->labSlot, static_cast<uint32_t>(GetObjectID()),
+                       in_sample_rate, in_optical_input, in_optical_output,
+                       static_cast<uint32_t>(rejectionResult));
+        RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::RequestRejected,
+                          0, rejectionResult, current.sampleRate,
+                          requested.sampleRate, currentShape.outputChannels,
+                          requestedShape.outputChannels);
+        return rejectionResult;
+    }
+
+    ADK_CONFIG_LOG("slot=%{public}u object=0x%{public}x phase=HostRequest action=%{public}llu rate=%{public}u->%{public}u shape=%{public}u/%{public}u->%{public}u/%{public}u optical=%{public}u/%{public}u->%{public}u/%{public}u",
+                   ivars->labSlot, static_cast<uint32_t>(GetObjectID()), action,
+                   current.sampleRate, requested.sampleRate,
+                   currentShape.inputChannels, currentShape.outputChannels,
+                   requestedShape.inputChannels, requestedShape.outputChannels,
+                   current.opticalInput, current.opticalOutput,
+                   requested.opticalInput, requested.opticalOutput);
+    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::RequestCalled,
+                      action, kIOReturnSuccess, current.sampleRate,
+                      requested.sampleRate, currentShape.outputChannels,
+                      requestedShape.outputChannels);
+    const kern_return_t kr = RequestDeviceConfigurationChange(action, nullptr);
+    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::RequestReturned,
+                      action, kr, current.sampleRate, requested.sampleRate,
+                      currentShape.outputChannels, requestedShape.outputChannels);
+
+    if (kr != kIOReturnSuccess) {
+        IOLockLock(ivars->configLock);
+        if (ivars->configurationPending && ivars->pendingAction == action) {
+            ivars->configurationPending = false;
+            ivars->pendingAction = 0;
+            ivars->pendingConfiguration = LabDeviceConfiguration{};
+            ivars->pendingShape = LabHALDeviceShape{};
+        }
+        IOLockUnlock(ivars->configLock);
+    }
+    return kr;
+}
+
+kern_return_t VirtualAudioDevice::PerformDeviceConfigurationChange(
+    uint64_t change_action, OSObject* in_change_info)
+{
+    if (ivars == nullptr || ivars->configLock == nullptr) {
+        return super::PerformDeviceConfigurationChange(change_action, in_change_info);
+    }
+
+    LabDeviceConfiguration current{};
+    LabDeviceConfiguration requested{};
+    LabHALDeviceShape currentShape{};
+    LabHALDeviceShape requestedShape{};
+    bool ownsAction = false;
+    IOLockLock(ivars->configLock);
+    ownsAction = ivars->configurationPending &&
+                 ivars->pendingAction == change_action;
+    current = ivars->currentConfiguration;
+    requested = ivars->pendingConfiguration;
+    currentShape = ivars->currentShape;
+    requestedShape = ivars->pendingShape;
+    IOLockUnlock(ivars->configLock);
+
+    if (!ownsAction) {
+        const kern_return_t kr =
+            super::PerformDeviceConfigurationChange(change_action, in_change_info);
+        RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::PerformReturn,
+                          change_action, kr, current.sampleRate,
+                          requested.sampleRate, currentShape.outputChannels,
+                          requestedShape.outputChannels);
+        return kr;
+    }
+
+    ADK_CONFIG_LOG("slot=%{public}u object=0x%{public}x phase=PerformEnter action=%{public}llu shape=%{public}u/%{public}u->%{public}u/%{public}u",
+                   ivars->labSlot, static_cast<uint32_t>(GetObjectID()), change_action,
+                   currentShape.inputChannels, currentShape.outputChannels,
+                   requestedShape.inputChannels, requestedShape.outputChannels);
+    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::PerformEnter,
+                      change_action, kIOReturnSuccess, current.sampleRate,
+                      requested.sampleRate, currentShape.outputChannels,
+                      requestedShape.outputChannels);
+    const kern_return_t mutation = ApplyExperimentConfiguration(
+        this, ivars, requested, requestedShape, change_action);
+    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::PerformMutation,
+                      change_action, mutation, current.sampleRate,
+                      requested.sampleRate, currentShape.outputChannels,
+                      requestedShape.outputChannels);
+
+    const kern_return_t superResult =
+        super::PerformDeviceConfigurationChange(change_action, in_change_info);
+    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::PerformSuper,
+                      change_action, superResult, current.sampleRate,
+                      requested.sampleRate, currentShape.outputChannels,
+                      requestedShape.outputChannels);
+    const kern_return_t result =
+        (mutation != kIOReturnSuccess) ? mutation : superResult;
+
+    IOLockLock(ivars->configLock);
+    if (ivars->configurationPending && ivars->pendingAction == change_action) {
+        if (mutation == kIOReturnSuccess) {
+            ivars->currentConfiguration = requested;
+            ivars->currentShape = requestedShape;
+        }
+        ivars->configurationPending = false;
+        ivars->pendingAction = 0;
+        ivars->pendingConfiguration = LabDeviceConfiguration{};
+        ivars->pendingShape = LabHALDeviceShape{};
+    }
+    IOLockUnlock(ivars->configLock);
+
+    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::PerformReturn,
+                      change_action, result, current.sampleRate,
+                      ivars->currentSampleRate.load(std::memory_order_relaxed),
+                      currentShape.outputChannels,
+                      requestedShape.outputChannels);
+    return result;
+}
+
+kern_return_t VirtualAudioDevice::AbortDeviceConfigurationChange(
+    uint64_t change_action, OSObject* in_change_info)
+{
+    if (ivars == nullptr || ivars->configLock == nullptr) {
+        return super::AbortDeviceConfigurationChange(change_action, in_change_info);
+    }
+
+    LabDeviceConfiguration current{};
+    LabDeviceConfiguration requested{};
+    LabHALDeviceShape currentShape{};
+    LabHALDeviceShape requestedShape{};
+    IOLockLock(ivars->configLock);
+    current = ivars->currentConfiguration;
+    requested = ivars->pendingConfiguration;
+    currentShape = ivars->currentShape;
+    requestedShape = ivars->pendingShape;
+    IOLockUnlock(ivars->configLock);
+    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::AbortEnter,
+                      change_action, kIOReturnSuccess, current.sampleRate,
+                      requested.sampleRate, currentShape.outputChannels,
+                      requestedShape.outputChannels);
+    const kern_return_t superResult =
+        super::AbortDeviceConfigurationChange(change_action, in_change_info);
+    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::AbortSuper,
+                      change_action, superResult, current.sampleRate,
+                      requested.sampleRate, currentShape.outputChannels,
+                      requestedShape.outputChannels);
+
+    IOLockLock(ivars->configLock);
+    if (ivars->configurationPending && ivars->pendingAction == change_action) {
+        ivars->configurationPending = false;
+        ivars->pendingAction = 0;
+        ivars->pendingConfiguration = LabDeviceConfiguration{};
+        ivars->pendingShape = LabHALDeviceShape{};
+    }
+    IOLockUnlock(ivars->configLock);
+
+    RecordConfigEvent(this, ivars, ASFW::Lab::ADKConfigPhase::AbortReturn,
+                      change_action, superResult, current.sampleRate,
+                      current.sampleRate, currentShape.outputChannels,
+                      currentShape.outputChannels);
+    return superResult;
 }
 
 kern_return_t VirtualAudioDevice::HandleChangeSampleRate(double in_sample_rate)
 {
-    return SetSampleRate(in_sample_rate);
+    if (ivars == nullptr || ivars->configLock == nullptr ||
+        ivars->deviceDefinition == nullptr) {
+        return kIOReturnNotReady;
+    }
+
+    LabDeviceConfiguration requested{};
+    LabHALDeviceShape requestedShape{};
+    LabDeviceConfiguration current{};
+    LabHALDeviceShape currentShape{};
+    IOLockLock(ivars->configLock);
+    current = ivars->currentConfiguration;
+    currentShape = ivars->currentShape;
+    IOLockUnlock(ivars->configLock);
+    requested = current;
+    requested.sampleRate = static_cast<uint32_t>(in_sample_rate);
+    const bool valid = IsExperimentSampleRate(requested.sampleRate) &&
+        ResolveLabHALDeviceShape(ivars->deviceDefinition, requested,
+                                 requestedShape);
+
+    RecordConfigEvent(this, ivars,
+                      ASFW::Lab::ADKConfigPhase::HandleSampleRateEnter,
+                      0, valid ? kIOReturnSuccess : kIOReturnBadArgument,
+                      current.sampleRate, requested.sampleRate,
+                      currentShape.outputChannels, requestedShape.outputChannels);
+    const kern_return_t kr = valid
+        ? ApplyExperimentConfiguration(this, ivars, requested, requestedShape, 0)
+        : kIOReturnBadArgument;
+    if (kr == kIOReturnSuccess) {
+        IOLockLock(ivars->configLock);
+        ivars->currentConfiguration = requested;
+        ivars->currentShape = requestedShape;
+        IOLockUnlock(ivars->configLock);
+    }
+    RecordConfigEvent(this, ivars,
+                      ASFW::Lab::ADKConfigPhase::HandleSampleRateReturn,
+                      0, kr, current.sampleRate,
+                      ivars->currentSampleRate.load(std::memory_order_relaxed),
+                      currentShape.outputChannels, requestedShape.outputChannels);
+    return kr;
+}
+
+kern_return_t VirtualAudioDevice::CopyADKConfigState(OSData** out_data)
+{
+    if (out_data == nullptr) {
+        return kIOReturnBadArgument;
+    }
+    *out_data = nullptr;
+    if (ivars == nullptr || ivars->configLock == nullptr) {
+        return kIOReturnNotReady;
+    }
+
+    ASFW::Lab::ADKConfigState state{};
+    IOLockLock(ivars->configLock);
+    state.deviceSlot = ivars->labSlot;
+    state.deviceObjectID = static_cast<uint32_t>(GetObjectID());
+    state.currentSampleRate =
+        ivars->currentSampleRate.load(std::memory_order_relaxed);
+    state.pendingSampleRate = ivars->pendingConfiguration.sampleRate;
+    state.configurationPending = ivars->configurationPending ? 1u : 0u;
+    state.currentOpticalInput = ivars->currentConfiguration.opticalInput;
+    state.currentOpticalOutput = ivars->currentConfiguration.opticalOutput;
+    state.pendingOpticalInput = ivars->pendingConfiguration.opticalInput;
+    state.pendingOpticalOutput = ivars->pendingConfiguration.opticalOutput;
+    state.currentInputChannels = ivars->currentShape.inputChannels;
+    state.currentOutputChannels = ivars->currentShape.outputChannels;
+    state.pendingAction = ivars->pendingAction;
+    state.nextSequence = ivars->nextConfigSequence;
+    IOLockUnlock(ivars->configLock);
+
+    *out_data = OSData::withBytes(&state, sizeof(state));
+    return *out_data != nullptr ? kIOReturnSuccess : kIOReturnNoMemory;
+}
+
+kern_return_t VirtualAudioDevice::CopyADKConfigLog(uint32_t in_max_events,
+                                                   OSData** out_data)
+{
+    if (out_data == nullptr) {
+        return kIOReturnBadArgument;
+    }
+    *out_data = nullptr;
+    if (ivars == nullptr || ivars->configLock == nullptr) {
+        return kIOReturnNotReady;
+    }
+
+    const uint32_t requested =
+        (in_max_events == 0) ? ASFW::Lab::kADKConfigLogDefaultEvents
+        : (in_max_events > ASFW::Lab::kADKConfigLogMaxEvents)
+            ? ASFW::Lab::kADKConfigLogMaxEvents
+            : in_max_events;
+    const size_t capacity = ASFW::Lab::ADKConfigLogBlobSize(requested);
+    uint8_t* buffer = IONewZero(uint8_t, capacity);
+    if (buffer == nullptr) {
+        return kIOReturnNoMemory;
+    }
+
+    ASFW::Lab::ADKConfigLogHeader header{};
+    uint32_t copied = 0;
+    IOLockLock(ivars->configLock);
+    const uint32_t available = ivars->configEventCount;
+    copied = available < requested ? available : requested;
+    header.eventCount = copied;
+    header.eventStride = sizeof(ASFW::Lab::ADKConfigEvent);
+    header.hostTimeTicks = mach_absolute_time();
+    header.deviceSlot = ivars->labSlot;
+    header.deviceObjectID = static_cast<uint32_t>(GetObjectID());
+    header.currentSampleRate =
+        ivars->currentSampleRate.load(std::memory_order_relaxed);
+    header.pendingSampleRate = ivars->pendingConfiguration.sampleRate;
+    header.configurationPending = ivars->configurationPending ? 1u : 0u;
+    if (copied != 0) {
+        const uint32_t oldestIndex =
+            (ivars->configEventCount == ASFW::Lab::kADKConfigLogMaxEvents)
+                ? ivars->configWriteIndex
+                : 0u;
+        const uint32_t skip = available - copied;
+        const uint32_t firstIndex =
+            (oldestIndex + skip) % ASFW::Lab::kADKConfigLogMaxEvents;
+        const auto* first = &ivars->configEvents[firstIndex];
+        header.oldestSequence = first->sequence;
+        const uint32_t lastIndex =
+            (firstIndex + copied - 1u) % ASFW::Lab::kADKConfigLogMaxEvents;
+        header.newestSequence = ivars->configEvents[lastIndex].sequence;
+
+        uint8_t* cursor = buffer + sizeof(header);
+        for (uint32_t i = 0; i < copied; ++i) {
+            const uint32_t index =
+                (firstIndex + i) % ASFW::Lab::kADKConfigLogMaxEvents;
+            std::memcpy(cursor + i * sizeof(ASFW::Lab::ADKConfigEvent),
+                        &ivars->configEvents[index],
+                        sizeof(ASFW::Lab::ADKConfigEvent));
+        }
+    }
+    std::memcpy(buffer, &header, sizeof(header));
+    IOLockUnlock(ivars->configLock);
+
+    const size_t blobSize = ASFW::Lab::ADKConfigLogBlobSize(copied);
+    *out_data = OSData::withBytes(buffer, static_cast<uint32_t>(blobSize));
+    IODelete(buffer, uint8_t, capacity);
+    return *out_data != nullptr ? kIOReturnSuccess : kIOReturnNoMemory;
 }

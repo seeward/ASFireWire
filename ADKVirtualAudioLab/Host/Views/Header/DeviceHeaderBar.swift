@@ -3,6 +3,13 @@ import SwiftUI
 struct DeviceHeaderBar: View {
     let snap: LabDeviceSnapshot
     @ObservedObject var state: VirtualLabState
+    @State private var selectedKind: ASFWVirtualDeviceKind
+
+    init(snap: LabDeviceSnapshot, state: VirtualLabState) {
+        self.snap = snap
+        _state = ObservedObject(wrappedValue: state)
+        _selectedKind = State(initialValue: snap.deviceKind)
+    }
 
     var body: some View {
         HStack(alignment: .center, spacing: 16) {
@@ -34,10 +41,7 @@ struct DeviceHeaderBar: View {
 
             Spacer()
 
-            Picker("Device Model", selection: Binding(
-                get: { snap.deviceKind },
-                set: { state.selectDevice($0) }
-            )) {
+            Picker("Device Model", selection: $selectedKind) {
                 Text("Apogee Duet").tag(ASFW_VIRTUAL_DEVICE_DUET)
                 Text("TerraTec PHASE 88").tag(ASFW_VIRTUAL_DEVICE_PHASE88)
                 Text("M-Audio FW1814").tag(ASFW_VIRTUAL_DEVICE_FW1814)
@@ -45,6 +49,13 @@ struct DeviceHeaderBar: View {
             }
             .pickerStyle(.segmented)
             .frame(width: 480)
+            .onChange(of: selectedKind) { _, kind in
+                guard kind != snap.deviceKind else { return }
+                state.selectDevice(kind)
+            }
+            .onChange(of: snap.deviceKind) { _, kind in
+                selectedKind = kind
+            }
         }
         .padding(14)
         .background(

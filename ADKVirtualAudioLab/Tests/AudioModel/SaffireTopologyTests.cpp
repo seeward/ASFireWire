@@ -126,6 +126,8 @@ void RunSaffireTopologyTests(TestContext& ctx) {
         };
         auto adatRes = Devices::SaffirePro24DSP::resolve(adatConfig);
         REQUIRE(ctx, adatRes.has_value());
+        CHECK(ctx, adatRes->streams.streams[0].channels == 16);
+        CHECK(ctx, adatRes->streams.streams[1].channels == 8);
         auto adatState = Devices::SaffirePro24DSP::makeInitialState(*adatRes);
         // 2 DAW routes + 16 capture routes = 18 active bundles
         CHECK(ctx, adatState.routers.at(NodeId{3}).activeBundles.size() == 18);
@@ -138,6 +140,8 @@ void RunSaffireTopologyTests(TestContext& ctx) {
         };
         auto spdifRes = Devices::SaffirePro24DSP::resolve(spdifConfig);
         REQUIRE(ctx, spdifRes.has_value());
+        CHECK(ctx, spdifRes->streams.streams[0].channels == 10);
+        CHECK(ctx, spdifRes->streams.streams[1].channels == 8);
         auto spdifState = Devices::SaffirePro24DSP::makeInitialState(*spdifRes);
         // 2 DAW routes + 10 capture routes = 12 active bundles
         CHECK(ctx, spdifState.routers.at(NodeId{3}).activeBundles.size() == 12);
