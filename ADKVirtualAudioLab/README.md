@@ -9,6 +9,11 @@ never *"ASFW is fixed"*. ASFW-specific seams (the two-IOService nub/driver split
 audio↔isoch queue boundary, DICE clock lock, real cycle timer) are explicitly out of scope
 and must be validated on the bench.
 
+Architecture documents:
+
+- [ASFW Unified Audio Architecture](AUAA.md)
+- [Device Configuration Coordinator](CONFIGURATION_COORDINATOR.md)
+
 ---
 
 ## Targets (`project.yml`)

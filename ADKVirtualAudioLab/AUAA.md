@@ -239,9 +239,18 @@ A device with fixed routing should not contain a configurable router merely to m
                                         │
                              + profile / quirks
                                         │
+       UI / Core Audio intent ──────────┼────────── hardware observation
+                                        ▼
+             ┌─────────────────────────────────────────────────────┐
+             │              Configuration Coordinator              │
+             │ confirmed + desired + one pending transition       │
+             └──────────────────────────┬──────────────────────────┘
+                                        │
+                 capabilities + coordinated configuration
+                                        │
              ┌──────────────────────────▼──────────────────────────┐
              │               Configuration Resolver                │
-             │ capabilities + requested/current configuration     │
+             │ candidate validation or confirmed projection       │
              └───────────────┬──────────────────────┬──────────────┘
                              │                      │
                              │                      │
@@ -1170,13 +1179,19 @@ AudioDriverKit provides an operating-system-level structural configuration trans
 The expected sequence is:
 
 ```text
-request configuration change
+configuration intent or hardware observation
+        ↓
+coordinator stages one transition
+        ↓
+request or enter the appropriate ADK configuration window
         ↓
 HAL stops I/O
         ↓
 PerformDeviceConfigurationChange
         ↓
-configure hardware
+apply or accept observed hardware configuration
+        ↓
+confirm hardware state
         ↓
 resolve new stream geometry
         ↓
@@ -1184,7 +1199,7 @@ resolve new semantic topology
         ↓
 replace streams / controls / bindings
         ↓
-publish new UI/runtime snapshot
+atomically commit runtime state and notify UI
         ↓
 resume I/O
 ```
@@ -1195,7 +1210,100 @@ The core invariant is:
 
 ASFW must not publish half-applied configuration.
 
-## 21.1 Current hardware-free ADK experiment
+## 21.1 Configuration Coordinator
+
+Structural configuration is a fallible, bidirectional control-plane operation.
+The `ConfigurationCoordinator` is the non-realtime state machine that owns that
+operation for one audio device. AudioDriverKit supplies the operating-system
+transaction window; it does not own ASFW's hardware policy or decide which
+state is authoritative.
+
+The coordinator accepts configuration input from three origins:
+
+- ASFW UI, CLI, or another control client expressing an intent;
+- Core Audio through an AudioDriverKit configuration callback; and
+- hardware observations, including unsolicited clock/rate/mode changes,
+  reconnect, and post-reset rediscovery.
+
+It conceptually owns:
+
+```text
+confirmed configuration
+desired configuration
+pending transition {
+    generation/token
+    origin
+    requested configuration
+    prior confirmed configuration
+    phase
+}
+```
+
+This is conceptual ownership, not the in-memory representation. The
+implementation uses a closed `std::variant` of states such as idle, awaiting
+ADK perform, awaiting hardware, awaiting ADK projection, recovering, and
+unavailable. Events, effects, and hardware outcomes are variants as well.
+Scalar phase/certainty enums are derived only for logs and wire snapshots; they
+must not drive the state machine alongside optional fields that could form
+impossible combinations.
+
+There is at most one active structural transition per device. New requests are
+validated, rejected, or deliberately coalesced; they must not independently
+mutate hardware, ADK objects, and UI state. Every asynchronous completion is
+matched against both the transition token and the relevant device/bus
+generation so stale completions cannot commit state after reset or reconnect.
+
+The source-of-truth rule is:
+
+> **Desired UI state and Core Audio property values are requests. A
+> configuration becomes committed only when it represents hardware-confirmed
+> state and its semantic, stream, ADK, runtime, and UI projections agree.**
+
+For readable hardware, confirmation means readback or an authoritative hardware
+event. For write-only state, it means successful completion of the native
+operation, followed by explicit invalidation on disconnect, bus reset, or any
+event that makes the cached value unreliable.
+
+The coordinator is responsible for:
+
+1. normalizing requests from all origins into one configuration intent;
+2. resolving and validating a candidate against capabilities and the confirmed
+   state without publishing it;
+3. serializing the transition and assigning its generation/token;
+4. entering or requesting the appropriate ADK configuration window;
+5. invoking the family/device backend and awaiting confirmation;
+6. resolving topology, stream geometry, bindings, and state migration from the
+   confirmed result;
+7. updating the ADK projection only in the permitted transaction context;
+8. atomically publishing one new committed runtime snapshot;
+9. notifying UI/tooling from that committed snapshot; and
+10. handling rejection, timeout, ADK abort, disconnect, reset, and unsolicited
+    hardware changes without publishing a fictional intermediate state.
+
+The resolver therefore remains useful on both sides of the hardware operation:
+before the operation, to reject an impossible candidate and derive a hardware
+operation plan; afterward, to resolve and verify the hardware-confirmed result
+that may be committed. A valid candidate is not itself current state.
+
+Failure handling depends on what is known. A failure before hardware mutation
+preserves the prior committed snapshot. If hardware may have changed but its
+result is ambiguous, the coordinator enters recovery and attempts readback or
+rediscovery. It must not blindly claim rollback succeeded. If truth cannot be
+re-established, the device/configuration is marked unavailable or unknown until
+recovery completes.
+
+The coordinator does **not** encode native protocols, calculate topology, own
+the realtime stream path, or render UI. Those remain responsibilities of the
+hardware backend, resolver, realtime projection, and UI projection
+respectively. The state-machine core should depend on narrow ports for those
+effects so delayed success, rejection, timeout, stale completion, reset, and
+unsolicited-change behavior can be tested without hardware or DriverKit.
+
+The concrete ownership model, states, ports, cross-service ADK handshake,
+failure certainty, test matrix, and staged integration plan are specified in
+[Device Configuration Coordinator](CONFIGURATION_COORDINATOR.md).
+
+## 21.2 Current hardware-free ADK experiment
 
 `ADKVirtualAudioLab` now publishes four simultaneous Core Audio devices from
 the same resolved model used by the CLI: Duet (2 in / 2 out), PHASE 88
@@ -1203,18 +1311,36 @@ the same resolved model used by the CLI: Duet (2 in / 2 out), PHASE 88
 deliberately a projection test: the dormant packet fixture does not define the
 HAL channel geometry.
 
-The diagnostic user client can request 44.1 or 48 kHz for each device. The
-device records `RequestDeviceConfigurationChange`,
+The diagnostic user client can request 44.1 or 48 kHz and optical-mode changes
+for each device. The device records `RequestDeviceConfigurationChange`,
 `PerformDeviceConfigurationChange`, and `AbortDeviceConfigurationChange`, plus
 separate device-rate, output-stream-format, and input-stream-format mutations.
 Mutation happens only inside the perform callback. A bounded event ring makes
 the transient transaction available to the host and CLI after the callback,
 while `[ADKConfig]` and `[ADKConfigHost]` provide driver and host-side traces.
 
-This experiment validates ADK lifecycle, state ownership, HAL projection, and
-observability. It does **not** validate playback, capture, packet timing, or a
-sample-rate-dependent topology change yet. See `BENCH.md` for the executable
-procedure and CLI oracle.
+The lab has established the following ADK/Core Audio behavior:
+
+- a user-client request for rate or optical mode enters the ADK configuration
+  transaction and publishes the resulting rate and stream-format changes;
+- the FireWire 1814's optical ADAT/S/PDIF geometry is reflected by Audio MIDI
+  Setup/Core Audio;
+- the Saffire Pro 24 DSP's resolved S/PDIF input geometry is 10 capture
+  channels while its DAW playback stream remains 8 channels; and
+- a rate change initiated outside the lab UI (for example, Audio MIDI Setup or
+  a DAW) invokes `HandleChangeSampleRate`. The host observes Core Audio's
+  nominal-rate and stream-format properties and refreshes its UI from the
+  resulting committed state. `adk hal-rate` exercises this path without using
+  the diagnostic user client.
+
+The lab deliberately does **not** claim that every profile's geometry change
+has been proven: the Saffire result still needs targeted runtime investigation.
+More importantly, it does not validate playback, capture, packet timing, or
+the real FireWire hardware/backend transaction. A production configuration
+coordinator must make the hardware-confirmed configuration the source of truth,
+serialize in-flight requests, and recover coherently from rejection, timeout,
+disconnect, and unsolicited hardware changes. See `BENCH.md` for the
+executable procedure and CLI oracle.
 
 ---
 
@@ -2264,13 +2390,34 @@ external → internal
 A transition test should eventually cover:
 
 1. old resolved configuration;
-2. requested new configuration;
-3. hardware operation plan;
-4. new resolved configuration;
-5. state migration/reset rules;
-6. stream replacement;
-7. ADK control/stream replacement;
-8. UI topology replacement.
+2. request origin and normalized intent;
+3. coordinator generation/token and phase changes;
+4. requested new configuration;
+5. hardware operation plan and confirmation;
+6. new resolved configuration;
+7. state migration/reset rules;
+8. stream replacement;
+9. ADK control/stream replacement;
+10. atomic runtime snapshot publication;
+11. UI topology replacement; and
+12. final agreement between hardware, resolver, ADK, runtime, and UI state.
+
+Coordinator tests must also cover:
+
+```text
+duplicate request for the already-confirmed configuration
+second request while another transition is active
+delayed hardware success
+hardware rejection
+hardware timeout before mutation
+ambiguous timeout after possible mutation
+ADK abort before and after hardware mutation
+disconnect or bus reset during every transition phase
+stale completion from a prior device/bus generation
+unsolicited hardware configuration change
+write-only cached state invalidation
+UI-origin and Core-Audio-origin requests converging on the same result
+```
 
 ---
 
@@ -2737,7 +2884,8 @@ This reflects the existing telemetry design pattern preserved in ASFW:
 
 # 48. Snapshot and Revision Model
 
-A future committed runtime snapshot may conceptually be:
+A future committed runtime snapshot, published only by the configuration
+coordinator after confirmation, may conceptually be:
 
 ```cpp
 struct AudioRuntimeSnapshot {
@@ -2985,12 +3133,14 @@ The architecture is successful if:
 2. New protocol backends do not require changes in ADK/UI code.
 3. New UI views do not require protocol-specific code.
 4. Packetizer logic does not branch on device model.
-5. Configuration changes publish coherent topology/stream/control snapshots.
-6. Device-specific quirks remain localized.
-7. Hardware-specific extensions do not pollute the semantic core.
-8. Every supported device has executable conformance tests.
-9. New hardware can falsify and improve the architecture without destabilizing previous devices.
-10. The architecture remains debuggable and inspectable.
+5. Every structural configuration origin passes through one coordinator per
+   device and commits only hardware-confirmed state.
+6. Configuration changes publish coherent topology/stream/control snapshots.
+7. Device-specific quirks remain localized.
+8. Hardware-specific extensions do not pollute the semantic core.
+9. Every supported device has executable conformance tests.
+10. New hardware can falsify and improve the architecture without destabilizing previous devices.
+11. The architecture remains debuggable and inspectable.
 
 ---
 
@@ -3022,6 +3172,8 @@ Runtime state belongs to one topology revision.
 Ports exist only when present in the current resolved configuration.
 
 The same committed configuration feeds ADK, UI, state, and streaming.
+
+Exactly one coordinator owns each device's structural configuration transition; requested or candidate state never becomes current until hardware confirmation and atomic projection commit.
 
 Device descriptions begin as declarative specifications; recurring rules graduate into generic validators.
 
@@ -3085,4 +3237,4 @@ That combination turns reverse-engineered knowledge into an executable specifica
 
 If the entire design must be reduced to one paragraph:
 
-> **ASFW is a hardware-driven, configuration-resolved audio architecture in which family-specific discovery and protocol bindings are normalized into a small semantic model of endpoints, ports, routers, mixers, processors, parameters, and meters. The current configuration is resolved together with wire-stream geometry into one committed revision, flattened into bounded allocation-free tables for realtime streaming and projected coherently into AudioDriverKit, SwiftUI, and runtime state. Device quirks and vendor-specific features remain below or beside the common model in typed extensions rather than contaminating it. Every supported device acts as a conformance test for the semantic language, starting as a declarative specification whose recurring rules graduate into core validators, backed by exhaustive configuration sweeps and property/invariant testing.**
+> **ASFW is a hardware-driven, configuration-resolved audio architecture in which family-specific discovery and protocol bindings are normalized into a small semantic model of endpoints, ports, routers, mixers, processors, parameters, and meters. One non-realtime coordinator per device serializes structural requests from UI, Core Audio, and hardware, and commits only hardware-confirmed state. The current configuration is resolved together with wire-stream geometry into one committed revision, flattened into bounded allocation-free tables for realtime streaming and projected coherently into AudioDriverKit, SwiftUI, and runtime state. Device quirks and vendor-specific features remain below or beside the common model in typed extensions rather than contaminating it. Every supported device acts as a conformance test for the semantic language, starting as a declarative specification whose recurring rules graduate into core validators, backed by exhaustive configuration sweeps and property/invariant testing.**
