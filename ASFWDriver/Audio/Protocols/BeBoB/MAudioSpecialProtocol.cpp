@@ -104,6 +104,114 @@ bool MAudioSpecialProtocol::GetRuntimeAudioStreamCaps(
     return outCaps.sampleRateHz != 0;
 }
 
+bool MAudioSpecialProtocol::SupportsConfiguration(
+    const Configuration::DeviceConfiguration& configuration) const noexcept {
+    // The profile deliberately limits the first production coordinator backend
+    // to the two base-rate formations. ProjectMix remains rate-only until it
+    // gets its own capability envelope.
+    return model_ == MAudioSpecialModel::FireWire1814 &&
+           (configuration.sampleRate == 44100 || configuration.sampleRate == 48000) &&
+           configuration.opticalInput.has_value() &&
+           configuration.opticalOutput.has_value();
+}
+
+AudioConfigurationApplyResult MAudioSpecialProtocol::CurrentConfiguration() const noexcept {
+    return {
+        .configuration = {
+            .sampleRate = currentRateHz_,
+            .opticalInput = captureFormat_ == MAudioDigitalFormat::ADAT
+                ? Configuration::OpticalMode::Adat : Configuration::OpticalMode::Spdif,
+            .opticalOutput = playbackFormat_ == MAudioDigitalFormat::ADAT
+                ? Configuration::OpticalMode::Adat : Configuration::OpticalMode::Spdif,
+        },
+        .runtimeCaps = CapsForCurrentFormation(),
+    };
+}
+
+void MAudioSpecialProtocol::ApplyConfiguration(
+    const Configuration::DeviceConfiguration& configuration,
+    ApplyCallback callback) {
+    if (!callback) {
+        return;
+    }
+    if (!SupportsConfiguration(configuration)) {
+        callback(kIOReturnUnsupported, {});
+        return;
+    }
+    if (!fcpTransport_) {
+        callback(kIOReturnNotReady, {});
+        return;
+    }
+
+    const MAudioDigitalFormat capture =
+        *configuration.opticalInput == Configuration::OpticalMode::Adat
+            ? MAudioDigitalFormat::ADAT : MAudioDigitalFormat::SPDIF;
+    const MAudioDigitalFormat playback =
+        *configuration.opticalOutput == Configuration::OpticalMode::Adat
+            ? MAudioDigitalFormat::ADAT : MAudioDigitalFormat::SPDIF;
+    const auto frame = BuildMAudioClockCommand(
+        MAudioClockSource::Internal,
+        capture == MAudioDigitalFormat::ADAT
+            ? MAudioClockDigitalFormat::ADAT : MAudioClockDigitalFormat::SPDIF,
+        playback == MAudioDigitalFormat::ADAT
+            ? MAudioClockDigitalFormat::ADAT : MAudioClockDigitalFormat::SPDIF,
+        /*lockSettings=*/false);
+    Protocols::AVC::FCPFrame command{};
+    command.length = frame.size();
+    std::memcpy(command.data.data(), frame.data(), frame.size());
+
+    // The special clock command owns the independent dig_in_fmt/dig_out_fmt
+    // selectors (bebob_maudio.c:166-216). Only after its accepted response do
+    // we update our write-only-register belief, then use the shared BeBoB
+    // OUTPUT -> 100 ms -> INPUT rate sequence (bebob_maudio.c:301-339).
+    ASFW_LOG(Audio,
+             "[MAudioConfig] apply requested rate=%u input=%u output=%u",
+             configuration.sampleRate,
+             static_cast<unsigned>(capture),
+             static_cast<unsigned>(playback));
+    const auto handle = fcpTransport_->SubmitCommand(
+        command,
+        [this, configuration, capture, playback,
+         callback = std::move(callback)](Protocols::AVC::FCPStatus status,
+                                         const Protocols::AVC::FCPFrame& response) mutable {
+            const uint8_t responseCode = response.length > 0 ? response.data[0] : 0xFFU;
+            if (status != Protocols::AVC::FCPStatus::kOk ||
+                (responseCode != 0x09U && responseCode != 0x0CU)) {
+                ASFW_LOG_ERROR(Audio,
+                               "[MAudioConfig] clock command rejected status=%u response=0x%02x",
+                               static_cast<unsigned>(status), responseCode);
+                callback(kIOReturnIOError, {});
+                return;
+            }
+
+            captureFormat_ = capture;
+            playbackFormat_ = playback;
+            currentRateHz_ = configuration.sampleRate;
+            BeBoBProtocol::ApplyClockConfig(
+                {.sampleRateHz = configuration.sampleRate},
+                [this, configuration, callback = std::move(callback)](
+                    IOReturn applyStatus, ClockApplyResult) mutable {
+                    if (applyStatus != kIOReturnSuccess) {
+                        ASFW_LOG_ERROR(Audio,
+                                       "[MAudioConfig] signal-format apply failed rate=%u kr=0x%x",
+                                       configuration.sampleRate, applyStatus);
+                        callback(applyStatus, {});
+                        return;
+                    }
+                    auto result = CurrentConfiguration();
+                    ASFW_LOG(Audio,
+                             "[MAudioConfig] apply confirmed-belief rate=%u in=%u out=%u hostIn=%u hostOut=%u",
+                             result.configuration.sampleRate,
+                             result.configuration.opticalInput == Configuration::OpticalMode::Adat,
+                             result.configuration.opticalOutput == Configuration::OpticalMode::Adat,
+                             result.runtimeCaps.hostInputPcmChannels,
+                             result.runtimeCaps.hostOutputPcmChannels);
+                    callback(kIOReturnSuccess, result);
+                });
+        });
+    (void)handle;
+}
+
 void MAudioSpecialProtocol::InitializeClock(std::function<void(IOReturn)> completion) {
     if (!fcpTransport_) {
         completion(kIOReturnNotReady);

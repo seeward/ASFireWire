@@ -26,6 +26,8 @@ namespace {
 
 using ASFW::Audio::BeBoB::MAudioSpecialModel;
 using ASFW::Audio::BeBoB::MAudioSpecialProtocol;
+using ASFW::Configuration::DeviceConfiguration;
+using ASFW::Configuration::OpticalMode;
 using ASFW::Protocols::AVC::FCPFrame;
 using ASFW::Testing::AvcReply;
 using ASFW::Testing::AvcTestRig;
@@ -171,6 +173,63 @@ TEST(MAudioSpecialInitTests, AssertsMixerRoutingSoStreamsReachTheOutputs) {
     EXPECT_EQ(quadletAt(0x98), 0x00020001U) << "headphone pair source";
     // Analog output pairs take the mixer output rather than the aux bus.
     EXPECT_EQ(quadletAt(0x9c), 0x00000000U) << "analog output pair source";
+}
+
+TEST(MAudioSpecialInitTests, AppliesIndependentOpticalGeometryThroughTheClockAndFormatSequence) {
+    AvcTestRig rig;
+    ASSERT_TRUE(rig.IsReady());
+
+    MAudioSpecialProtocol protocol(
+        rig.Bus(), rig.Bus(), rig.Route(), nullptr, nullptr, &rig.Timers(),
+        MAudioSpecialModel::FireWire1814);
+    protocol.UpdateRuntimeContext(rig.Route(), rig.Transport());
+
+    EXPECT_TRUE(protocol.SupportsConfiguration({
+        .sampleRate = 48000,
+        .opticalInput = OpticalMode::Adat,
+        .opticalOutput = OpticalMode::Spdif,
+    }));
+    EXPECT_FALSE(protocol.SupportsConfiguration({
+        .sampleRate = 96000,
+        .opticalInput = OpticalMode::Adat,
+        .opticalOutput = OpticalMode::Spdif,
+    }));
+
+    bool completed = false;
+    IOReturn completionStatus = kIOReturnBusy;
+    ASFW::Audio::AudioConfigurationApplyResult result{};
+    protocol.ApplyConfiguration({
+        .sampleRate = 48000,
+        .opticalInput = OpticalMode::Adat,
+        .opticalOutput = OpticalMode::Spdif,
+    }, [&](IOReturn status, ASFW::Audio::AudioConfigurationApplyResult value) {
+        completed = true;
+        completionStatus = status;
+        result = value;
+    });
+
+    // The vendor frame selects dig_in_fmt=ADAT and dig_out_fmt=SPDIF before
+    // the generic BeBoB rate pair. The output/input signal formats are separated
+    // by the M-Audio 100 ms interlock, so there are exactly three FCP commands.
+    EXPECT_EQ(rig.Drain(), 2U);
+    ASSERT_EQ(rig.Target().CommandCount(), 2U);
+    constexpr std::array<uint8_t, 16> clockFrame{
+        0x00, 0xFF, 0x00, 0x04, 0x00, 0x04, 0x03, 0x01,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    ExpectFrame(rig.Target().Commands()[0], clockFrame);
+
+    rig.Timers().Advance(Milliseconds(100));
+    EXPECT_EQ(rig.Drain(), 1U); // input signal format
+    rig.Timers().Advance(Milliseconds(1000)); // base BeBoB format settle
+
+    EXPECT_TRUE(completed);
+    EXPECT_EQ(completionStatus, kIOReturnSuccess);
+    EXPECT_EQ(rig.Target().CommandCount(), 3U);
+    EXPECT_EQ(result.configuration.sampleRate, 48000U);
+    EXPECT_EQ(result.configuration.opticalInput, OpticalMode::Adat);
+    EXPECT_EQ(result.configuration.opticalOutput, OpticalMode::Spdif);
+    EXPECT_EQ(result.runtimeCaps.hostInputPcmChannels, 16U);
+    EXPECT_EQ(result.runtimeCaps.hostOutputPcmChannels, 6U);
 }
 
 } // namespace

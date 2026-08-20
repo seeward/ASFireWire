@@ -26,6 +26,7 @@
 
 #include "BeBoBProtocol.hpp"
 #include "MAudioSpecialFormation.hpp"
+#include "../Configuration/IAudioConfigurationControl.hpp"
 
 #include <cstdint>
 #include <vector>
@@ -45,7 +46,8 @@ enum class MAudioSpecialModel : uint8_t {
     ProjectMix,
 };
 
-class MAudioSpecialProtocol final : public BeBoBProtocol {
+class MAudioSpecialProtocol final : public BeBoBProtocol,
+                                   public IAudioConfigurationControl {
 public:
     MAudioSpecialProtocol(Protocols::Ports::FireWireBusOps& busOps,
                           Protocols::Ports::FireWireBusInfo& busInfo,
@@ -57,6 +59,18 @@ public:
 
     const char* GetName() const override { return DeviceName(); }
     bool GetRuntimeAudioStreamCaps(AudioStreamRuntimeCaps& outCaps) const override;
+    IAudioConfigurationControl* AsAudioConfigurationControl() noexcept override {
+        return this;
+    }
+    const IAudioConfigurationControl* AsAudioConfigurationControl() const noexcept override {
+        return this;
+    }
+    [[nodiscard]] bool SupportsConfiguration(
+        const Configuration::DeviceConfiguration& configuration) const noexcept override;
+    void ApplyConfiguration(const Configuration::DeviceConfiguration& configuration,
+                            ApplyCallback callback) override;
+    [[nodiscard]] AudioConfigurationApplyResult
+    CurrentConfiguration() const noexcept override;
 
     /// Tell the device which clock to run on and which digital formats are
     /// selected, then wait out its settle. Must complete before streaming.

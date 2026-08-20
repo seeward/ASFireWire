@@ -24,6 +24,7 @@ namespace ASFW::IRM {
 
 namespace ASFW::Audio {
 class IDuplexDeviceControl;
+class IAudioConfigurationControl;
 }
 
 namespace ASFW::Audio {
@@ -136,6 +137,17 @@ public:
     }
 
     virtual const IDuplexDeviceControl* AsDuplexDeviceControl() const noexcept {
+        return nullptr;
+    }
+
+    /// Optional semantic configuration port. Device-specific protocol code owns
+    /// the wire transaction; the coordinator owns ordering it with the ADK
+    /// configuration window and transport lifecycle.
+    virtual IAudioConfigurationControl* AsAudioConfigurationControl() noexcept {
+        return nullptr;
+    }
+
+    virtual const IAudioConfigurationControl* AsAudioConfigurationControl() const noexcept {
         return nullptr;
     }
 
