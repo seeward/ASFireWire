@@ -94,6 +94,7 @@ targets:
       - path: Host/Services/GenericAudioPresenter.swift
       - path: Host/Services/ADKConfigClient.swift
       - path: Host/Services/CoreAudioLabSnapshot.swift
+      - path: Host/Services/CoreAudioLabObserver.swift
       - path: Lab/VirtualDeviceBridge.cpp
       - path: Lab/VirtualDeviceBridge.hpp
       - path: Core/AudioModel

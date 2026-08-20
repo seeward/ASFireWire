@@ -1,3 +1,4 @@
+import CoreAudio
 import Foundation
 
 enum ADKLiveCommands {
@@ -48,6 +49,14 @@ enum ADKLiveCommands {
                 return 64
             }
             return setRate(slot: slot, rate: rate)
+        case "hal-rate":
+            guard arguments.count == 4,
+                  let slot = Int(arguments[2]),
+                  let rate = UInt32(arguments[3]) else {
+                printUsage()
+                return 64
+            }
+            return setHALRate(slot: slot, rate: rate)
         case "config":
             guard arguments.count == 6,
                   let slot = Int(arguments[2]),
@@ -176,6 +185,75 @@ enum ADKLiveCommands {
             return result.converged && result.hasRequiredPhases ? 0 : 1
         } catch {
             print("FAIL slot \(slot) configuration: \(error.localizedDescription)")
+            return 1
+        }
+    }
+
+    /// Sets CoreAudio's nominal-rate property directly, bypassing the lab
+    /// diagnostic user client. This exercises the same device callback path as
+    /// Audio MIDI Setup and a DAW: IOUserAudioDevice::HandleChangeSampleRate.
+    private static func setHALRate(slot: Int, rate: UInt32) -> Int32 {
+        guard definitions.indices.contains(slot), rate == 44_100 || rate == 48_000,
+              let profile = expectedProfiles().first(where: { $0.slot == slot }),
+              let device = CoreAudioLabSnapshot.capture().first(where: {
+                  $0.uid == profile.uid
+              }) else {
+            printUsage()
+            return 64
+        }
+        guard !device.isRunning else {
+            print("FAIL slot \(slot) \(profile.name): device is running; refusing HAL rate change")
+            return 1
+        }
+
+        let client = ADKConfigClient()
+        do {
+            let before = try client.state(slot: slot)
+            var coreAudioNotificationObserved = false
+            let observer = CoreAudioLabObserver {
+                coreAudioNotificationObserved = true
+            }
+            observer.start()
+            defer { observer.stop() }
+
+            var requestedRate = Double(rate)
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyNominalSampleRate,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain)
+            let status = AudioObjectSetPropertyData(
+                device.id, &address, 0, nil,
+                UInt32(MemoryLayout<Double>.size), &requestedRate)
+            guard status == noErr else {
+                print(String(format: "FAIL slot %d HAL rate %u: AudioObjectSetPropertyData=0x%08x",
+                             slot, rate, UInt32(bitPattern: status)))
+                return 1
+            }
+
+            let result = try waitForRate(
+                client: client, profile: profile, rate: rate,
+                firstSequence: before.nextSequence)
+            let phases = Set(result.events.filter {
+                $0.sequence >= before.nextSequence
+            }.map(\.phase))
+            let deadline = Date().addingTimeInterval(1.0)
+            while !coreAudioNotificationObserved && Date() < deadline {
+                RunLoop.main.run(
+                    mode: .default,
+                    before: Date().addingTimeInterval(0.02))
+            }
+            let handleChangeObserved = phases.contains(16) && phases.contains(17)
+            let passed = result.converged && coreAudioNotificationObserved
+            print("\(passed ? "PASS" : "FAIL") external HAL slot \(slot) \(profile.name): " +
+                  "dext=\(result.state.currentSampleRate) hal=\(UInt32(result.hal?.nominalSampleRate ?? 0)) " +
+                  "CoreAudioListener=\(coreAudioNotificationObserved ? "observed" : "missing") " +
+                  "HandleChangeSampleRate=\(handleChangeObserved ? "observed" : "not-called")")
+            for event in result.events where event.sequence >= before.nextSequence {
+                print("  \(eventLine(profile: profile, event: event))")
+            }
+            return passed ? 0 : 1
+        } catch {
+            print("FAIL slot \(slot) HAL rate \(rate): \(error.localizedDescription)")
             return 1
         }
     }
@@ -383,6 +461,7 @@ enum ADKLiveCommands {
         print("  ADKLabCLI adk status")
         print("  ADKLabCLI adk events [slot 0...3]")
         print("  ADKLabCLI adk rate <slot 0...3> <44100|48000>")
+        print("  ADKLabCLI adk hal-rate <slot 0...3> <44100|48000>")
         print("  ADKLabCLI adk config <slot> <44100|48000> <none|adat|spdif> <none|adat|spdif>")
         print("  ADKLabCLI adk smoke")
     }

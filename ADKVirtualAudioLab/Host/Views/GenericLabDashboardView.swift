@@ -4,6 +4,7 @@ import SwiftUI
 
 struct GenericLabDashboardView: View {
     @StateObject private var state = VirtualLabState()
+    @State private var coreAudioObserver: CoreAudioLabObserver?
 
     var body: some View {
         ScrollView {
@@ -42,7 +43,17 @@ struct GenericLabDashboardView: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .task {
+            let labState = state
+            let observer = CoreAudioLabObserver {
+                labState.synchronizeSelectedRateFromCoreAudio()
+            }
+            observer.start()
+            coreAudioObserver = observer
             state.refresh()
+        }
+        .onDisappear {
+            coreAudioObserver?.stop()
+            coreAudioObserver = nil
         }
     }
 }

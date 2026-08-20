@@ -454,6 +454,32 @@ final class VirtualLabState: ObservableObject {
         }
     }
 
+    /// Mirrors an external CoreAudio rate change (for example from Audio MIDI
+    /// Setup or Logic) into the selected generic-model view. This updates only
+    /// the local topology projection: the dext has already accepted the host
+    /// request and is the source of the CoreAudio notification.
+    func synchronizeSelectedRateFromCoreAudio() {
+        guard let snap = snapshot,
+              let uid = adkUID(for: snap.deviceKind),
+              let device = CoreAudioLabSnapshot.capture().first(where: {
+                  $0.uid == uid
+              }) else {
+            return
+        }
+        let observedRate = UInt32(device.nominalSampleRate.rounded())
+        guard (observedRate == 44_100 || observedRate == 48_000),
+              observedRate != snap.currentSampleRate else {
+            return
+        }
+        guard asfw_lab_set_configuration(
+            observedRate, snap.opticalInput, snap.opticalOutput) else {
+            return
+        }
+        ADKConfigTrace.emit(
+            "generic model synchronized from CoreAudio: slot=\(adkSlot(for: snap.deviceKind) ?? -1) rate=\(observedRate)")
+        refresh()
+    }
+
     private func requestADKConfiguration(deviceKind: ASFWVirtualDeviceKind,
                                          rate: UInt32,
                                          opticalInput: ASFWOpticalMode,
@@ -488,6 +514,16 @@ final class VirtualLabState: ObservableObject {
         case ASFW_VIRTUAL_DEVICE_PHASE88: return 1
         case ASFW_VIRTUAL_DEVICE_FW1814: return 2
         case ASFW_VIRTUAL_DEVICE_SAFFIRE_PRO24_DSP: return 3
+        default: return nil
+        }
+    }
+
+    private func adkUID(for kind: ASFWVirtualDeviceKind) -> String? {
+        switch kind {
+        case ASFW_VIRTUAL_DEVICE_DUET: return "VirtualADKAudioLab.Duet"
+        case ASFW_VIRTUAL_DEVICE_PHASE88: return "VirtualADKAudioLab.Phase88"
+        case ASFW_VIRTUAL_DEVICE_FW1814: return "VirtualADKAudioLab.FW1814"
+        case ASFW_VIRTUAL_DEVICE_SAFFIRE_PRO24_DSP: return "VirtualADKAudioLab.Saffire"
         default: return nil
         }
     }

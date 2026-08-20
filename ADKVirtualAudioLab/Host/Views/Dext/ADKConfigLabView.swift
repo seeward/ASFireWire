@@ -66,6 +66,30 @@ final class ADKConfigLabModel: ObservableObject {
     private var lastLoggedObjectID: [Int: UInt32] = [:]
     private let worker = ADKConfigLabWorker()
     private let names = adkConfigDeviceNames
+    private var coreAudioObserver: CoreAudioLabObserver?
+    private var externalRefreshTask: Task<Void, Never>?
+
+    deinit {
+        externalRefreshTask?.cancel()
+        coreAudioObserver?.stop()
+    }
+
+    func startObservingCoreAudio() {
+        guard coreAudioObserver == nil else { return }
+        coreAudioObserver = CoreAudioLabObserver { [weak self] in
+            Task { @MainActor in
+                self?.coreAudioStateChanged()
+            }
+        }
+        coreAudioObserver?.start()
+    }
+
+    func stopObservingCoreAudio() {
+        externalRefreshTask?.cancel()
+        externalRefreshTask = nil
+        coreAudioObserver?.stop()
+        coreAudioObserver = nil
+    }
 
     func refresh() async {
         let result = await worker.capture(names: names)
@@ -149,6 +173,19 @@ final class ADKConfigLabModel: ObservableObject {
         guard !Task.isCancelled else { return }
         await refresh()
     }
+
+    private func coreAudioStateChanged() {
+        // The CoreAudio listener may receive one rate notification plus a
+        // virtual-format notification per stream. Coalesce those into one
+        // diagnostic-client snapshot after HAL has committed its state.
+        externalRefreshTask?.cancel()
+        status = "CoreAudio changed outside this UI; synchronizing…"
+        externalRefreshTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(75))
+            guard !Task.isCancelled else { return }
+            await self?.refresh()
+        }
+    }
 }
 
 struct ADKConfigLabView: View {
@@ -194,7 +231,11 @@ struct ADKConfigLabView: View {
         .padding(12)
         .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
         .task {
+            model.startObservingCoreAudio()
             await model.refresh()
+        }
+        .onDisappear {
+            model.stopObservingCoreAudio()
         }
     }
 
