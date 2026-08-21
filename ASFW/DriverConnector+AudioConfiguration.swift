@@ -2,6 +2,14 @@ import Foundation
 import IOKit
 
 extension ASFWDriverConnector {
+    func getAudioConfigurationEndpointIDs() -> [AudioEndpointID] {
+        guard isConnected,
+              let data = callStruct(.getAudioConfigurationEndpoints, initialCap: 72) else {
+            return []
+        }
+        return AudioConfigurationWireDecoder.decodeEndpointIDs(data)
+    }
+
     func getAudioConfiguration(endpointID: AudioEndpointID) -> AudioConfigurationSnapshot? {
         guard isConnected, connection != 0, endpointID.rawValue != 0 else { return nil }
         var scalarInput = endpointID.rawValue
@@ -54,6 +62,20 @@ extension ASFWDriverConnector {
 private enum AudioConfigurationWireDecoder {
     private static let wireSize = 160
     private static let capabilitySize = 16
+    private static let endpointListSize = 72
+    private static let maximumEndpointCount = 8
+
+    static func decodeEndpointIDs(_ data: Data) -> [AudioEndpointID] {
+        guard data.count == endpointListSize,
+              let version = data.u32(at: 0), version == 1,
+              let count = data.u32(at: 4), count <= maximumEndpointCount else {
+            return []
+        }
+        return (0..<Int(count)).compactMap { index in
+            guard let raw = data.u64(at: 8 + index * 8), raw != 0 else { return nil }
+            return AudioEndpointID(rawValue: raw)
+        }
+    }
 
     static func decode(_ data: Data) -> AudioConfigurationSnapshot? {
         guard data.count == wireSize,

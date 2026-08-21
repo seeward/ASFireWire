@@ -13,6 +13,7 @@
 #include <DriverKit/IOLib.h>
 
 #include <atomic>
+#include <array>
 #include <functional>
 #include <optional>
 #include <unordered_set>
@@ -80,6 +81,9 @@ public:
     [[nodiscard]] IOReturn CopyDeviceConfigurationSnapshot(
         EndpointId endpointId,
         Configuration::DeviceConfigurationSnapshot& outSnapshot) noexcept;
+    [[nodiscard]] uint32_t CopyConfigurationEndpointIds(
+        std::array<EndpointId,
+                   Configuration::kMaxConfigurationSnapshotCapabilities>& out) noexcept;
     void BeginTeardown() noexcept;
 
     [[nodiscard]] ASFWAudioNub* GetNub(EndpointId endpointId) const noexcept {

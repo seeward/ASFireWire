@@ -32,4 +32,13 @@ struct AudioConfigurationSnapshotWire final {
 };
 static_assert(sizeof(AudioConfigurationSnapshotWire) == 160);
 
+// This is deliberately a separate discovery contract from telemetry. An audio
+// endpoint can accept configuration changes without a streaming telemetry view.
+struct AudioConfigurationEndpointListWire final {
+    uint32_t version{kAudioConfigurationWireVersion};
+    uint32_t endpointCount{0};
+    std::array<uint64_t, kAudioConfigurationMaxCapabilities> endpointIds{};
+};
+static_assert(sizeof(AudioConfigurationEndpointListWire) == 72);
+
 } // namespace ASFW::UserClient::Wire

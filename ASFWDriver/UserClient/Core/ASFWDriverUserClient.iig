@@ -83,6 +83,7 @@ public:
         // control request (endpoint, rate, input optical, output optical).
         kMethodGetAudioConfiguration = 1015,
         kMethodRequestAudioConfiguration = 1016,
+        kMethodGetAudioConfigurationEndpoints = 1017,
         // TODO(ASFW-IRM): Remove temporary IRM test method after dedicated validation tooling exists.
         kMethodTestIRMAllocation       = 26,
         kMethodTestIRMRelease          = 27,

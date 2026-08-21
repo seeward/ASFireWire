@@ -56,17 +56,12 @@ final class MAudio1814ConfigurationViewModel: ObservableObject {
     }
 
     private func refresh() {
-        guard let telemetry = connector.getAudioTelemetry() else {
-            snapshot = nil
-            statusText = "Connect a FireWire 1814 to configure it."
-            return
-        }
-        let matching = telemetry.endpoints.compactMap {
-            connector.getAudioConfiguration(endpointID: $0.endpointId)
+        let matching = connector.getAudioConfigurationEndpointIDs().lazy.compactMap {
+            self.connector.getAudioConfiguration(endpointID: $0)
         }.first
         guard let matching else {
             snapshot = nil
-            statusText = "No configurable FireWire 1814 endpoint is published."
+            statusText = "Connect a FireWire 1814 to configure it."
             return
         }
         let changed = matching != snapshot

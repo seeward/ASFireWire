@@ -97,6 +97,26 @@ uint32_t AudioRuntimeRegistry::CopyAudioTelemetrySnapshots(
     return out.endpointCount;
 }
 
+uint32_t AudioRuntimeRegistry::CopyConfigurationEndpointIds(
+    std::array<Devices::AudioEndpointId,
+               Configuration::kMaxConfigurationSnapshotCapabilities>& out) noexcept {
+    out.fill({});
+    if (!lock_) return 0;
+
+    uint32_t count = 0;
+    IOLockLock(lock_);
+    for (const auto& [endpointId, entry] : endpoints_) {
+        if (!entry.runtime || !entry.profile ||
+            entry.profile->configurationCapabilityCount == 0) {
+            continue;
+        }
+        out[count++] = endpointId;
+        if (count == out.size()) break;
+    }
+    IOLockUnlock(lock_);
+    return count;
+}
+
 void AudioRuntimeRegistry::Remove(Devices::AudioEndpointId endpointId) noexcept {
     Entry removed{};
     if (!lock_ || !endpointId) return;

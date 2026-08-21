@@ -57,6 +57,7 @@ enum {
     kMethodSubmitSignalFormatProbe = 64,
     kMethodGetAudioConfiguration = 1015,
     kMethodRequestAudioConfiguration = 1016,
+    kMethodGetAudioConfigurationEndpoints = 1017,
     kMethodSetIsochVerbosity = 40,
     // 41 retired (was the dev TX-verifier toggle)
     kMethodSetAudioAutoStart = 42,
@@ -329,6 +330,8 @@ kern_return_t HandleGetAudioConfiguration(
     ASFWDriver& driver, IOUserClientMethodArguments* arguments);
 kern_return_t HandleRequestAudioConfiguration(
     ASFWDriver& driver, IOUserClientMethodArguments* arguments);
+kern_return_t HandleGetAudioConfigurationEndpoints(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments);
 
 MethodDispatchResult DispatchDriverControlMethods(ASFWDriver& driver,
                                                   IOUserClientMethodArguments* arguments,
@@ -360,6 +363,8 @@ MethodDispatchResult DispatchDriverControlMethods(ASFWDriver& driver,
         return HandleGetAudioConfiguration(driver, arguments);
     case kMethodRequestAudioConfiguration:
         return HandleRequestAudioConfiguration(driver, arguments);
+    case kMethodGetAudioConfigurationEndpoints:
+        return HandleGetAudioConfigurationEndpoints(driver, arguments);
     case kMethodGetLogConfig:
         return HandleGetLogConfig(driver, arguments);
     default:
@@ -458,6 +463,29 @@ kern_return_t HandleGetAudioConfiguration(
            }, wire.committed);
     for (uint8_t i = 0; i < snapshot.capabilityCount; ++i) {
         encode(snapshot.capabilities[i], wire.capabilities[i]);
+    }
+    auto* data = OSData::withBytes(&wire, sizeof(wire));
+    if (!data) return kIOReturnNoMemory;
+    arguments->structureOutput = data;
+    arguments->structureOutputDescriptor = nullptr;
+    return kIOReturnSuccess;
+}
+
+kern_return_t HandleGetAudioConfigurationEndpoints(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments) {
+    if (!arguments || arguments->scalarInputCount != 0) return kIOReturnBadArgument;
+    auto* context = static_cast<ServiceContext*>(driver.GetServiceContext());
+    if (!context || !context->audioCoordinator) return kIOReturnNotReady;
+
+    std::array<ASFW::Audio::Devices::AudioEndpointId,
+               ASFW::Configuration::kMaxConfigurationSnapshotCapabilities> endpointIds{};
+    const uint32_t endpointCount =
+        context->audioCoordinator->CopyConfigurationEndpointIds(endpointIds);
+
+    ASFW::UserClient::Wire::AudioConfigurationEndpointListWire wire{};
+    wire.endpointCount = endpointCount;
+    for (uint32_t i = 0; i < endpointCount; ++i) {
+        wire.endpointIds[i] = endpointIds[i].value;
     }
     auto* data = OSData::withBytes(&wire, sizeof(wire));
     if (!data) return kIOReturnNoMemory;

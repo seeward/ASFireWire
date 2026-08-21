@@ -8,6 +8,7 @@
 
 #include "../Devices/ResolvedAudioEndpointProfile.hpp"
 #include "../Runtime/AudioTelemetrySnapshot.hpp"
+#include "../Shared/Configuration/DeviceConfigurationSnapshot.hpp"
 
 #include <DriverKit/IOLib.h>
 
@@ -42,6 +43,12 @@ public:
 
     [[nodiscard]] uint32_t CopyAudioTelemetrySnapshots(
         Runtime::AudioTelemetrySnapshot& out) noexcept;
+    // Lists only endpoints that advertise semantic configuration capabilities.
+    // This is intentionally independent from streaming telemetry: an endpoint
+    // can be configurable before any stream binding or telemetry is active.
+    [[nodiscard]] uint32_t CopyConfigurationEndpointIds(
+        std::array<Devices::AudioEndpointId,
+                   Configuration::kMaxConfigurationSnapshotCapabilities>& out) noexcept;
 
     void Remove(Devices::AudioEndpointId endpointId) noexcept;
     void Clear() noexcept;

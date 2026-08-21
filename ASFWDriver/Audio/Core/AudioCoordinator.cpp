@@ -384,6 +384,12 @@ IOReturn AudioCoordinator::CopyDeviceConfigurationSnapshot(
     return foundCommitted ? kIOReturnSuccess : kIOReturnError;
 }
 
+uint32_t AudioCoordinator::CopyConfigurationEndpointIds(
+    std::array<EndpointId,
+               Configuration::kMaxConfigurationSnapshotCapabilities>& out) noexcept {
+    return runtime_.CopyConfigurationEndpointIds(out);
+}
+
 void AudioCoordinator::HandleCycleInconsistent() noexcept {
     EndpointId endpointId{};
     if (lock_) {

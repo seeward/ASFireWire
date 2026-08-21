@@ -235,10 +235,7 @@ struct ModernContentView: View {
 
     private func pollMAudio1814Availability() async {
         while !Task.isCancelled {
-            let endpoints = debugVM.connector.getAudioTelemetry()?.endpoints ?? []
-            hasMAudio1814 = endpoints.contains {
-                debugVM.connector.getAudioConfiguration(endpointID: $0.endpointId) != nil
-            }
+            hasMAudio1814 = !debugVM.connector.getAudioConfigurationEndpointIDs().isEmpty
             try? await Task.sleep(for: .seconds(1))
         }
     }
