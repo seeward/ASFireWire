@@ -10,7 +10,7 @@
 
 namespace ASFW::UserClient::Wire {
 
-inline constexpr uint32_t kAudioMeterWireVersion = 1;
+inline constexpr uint32_t kAudioMeterWireVersion = 2;
 
 struct AudioMeterSnapshotWire final {
     uint32_t version{kAudioMeterWireVersion};
@@ -20,9 +20,13 @@ struct AudioMeterSnapshotWire final {
     uint32_t detectedSampleRateHz{0};
     uint8_t enabled{0};
     uint8_t clockLocked{0};
-    uint8_t _reserved[2]{};
+    uint8_t externalSync{0};
+    uint8_t hardwareSwitch{0};
+    uint32_t rotaryCount{0};
+    std::array<int16_t, ASFW::Audio::kMaxAudioMeterRotaries> rotaries{};
+    uint16_t _reserved{0};
     std::array<int16_t, ASFW::Audio::kMaxAudioMeterValues> values{};
 };
-static_assert(sizeof(AudioMeterSnapshotWire) == 112);
+static_assert(sizeof(AudioMeterSnapshotWire) == 120);
 
 } // namespace ASFW::UserClient::Wire

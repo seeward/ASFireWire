@@ -501,11 +501,6 @@ constexpr uint64_t kMethodDiagGetLogCatalog       = 1014;
            (static_cast<uint64_t>(OpticalModeToWire(capability.configuration.opticalOutput)) << 56U);
 }
 
-[[nodiscard]] uint64_t PackI32Pair(int32_t low, int32_t high) noexcept {
-    return static_cast<uint64_t>(static_cast<uint32_t>(low)) |
-           (static_cast<uint64_t>(static_cast<uint32_t>(high)) << 32U);
-}
-
 [[nodiscard]] uint64_t PackI16Quad(std::span<const int16_t> values, size_t offset) noexcept {
     uint64_t packed = 0;
     for (size_t index = 0; index < 4 && offset + index < values.size(); ++index) {
@@ -778,16 +773,19 @@ kern_return_t HandleGetAudioControlSurfaceAsync(
         CompleteAudioControlPlaneAction(&userClient, arguments->completion, status, data, 1);
         return kIOReturnSuccess;
     }
+    // Header only. An async completion carries at most
+    // kIOUserClientAsyncArgumentsCountMax (16) scalars, which is nowhere near a
+    // whole control surface — the 1814's is 78 values — and packing values here
+    // would overrun `data`. This selector is therefore a *change notification*:
+    // the client compares `revision` and pulls the full surface with
+    // kMethodGetAudioControlSurface, whose struct output has room for it.
+    static_assert(4 <= kIOUserClientAsyncArgumentsCountMax,
+                  "async control-surface header must fit the async argument array");
     data[1] = endpoint.value;
     data[2] = static_cast<uint64_t>(snapshot.revision) |
               (static_cast<uint64_t>(snapshot.kind) << 32U);
     data[3] = snapshot.valueCount;
-    for (uint32_t index = 0; index < snapshot.valueCount; index += 2) {
-        const int32_t high = index + 1 < snapshot.valueCount ? snapshot.values[index + 1].value : 0;
-        data[4 + index / 2] = PackI32Pair(snapshot.values[index].value, high);
-    }
-    CompleteAudioControlPlaneAction(&userClient, arguments->completion, kIOReturnSuccess, data,
-                                    4 + (snapshot.valueCount + 1) / 2);
+    CompleteAudioControlPlaneAction(&userClient, arguments->completion, kIOReturnSuccess, data, 4);
     return kIOReturnSuccess;
 }
 
@@ -817,13 +815,24 @@ kern_return_t HandleGetAudioMeterSnapshotAsync(
               (static_cast<uint64_t>(snapshot.detectedSampleRateHz) << 32U);
     data[3] = static_cast<uint64_t>(snapshot.valueCount) |
               (static_cast<uint64_t>(snapshot.enabled ? 1U : 0U) << 32U) |
-              (static_cast<uint64_t>(snapshot.clockLocked ? 1U : 0U) << 33U);
+              (static_cast<uint64_t>(snapshot.clockLocked ? 1U : 0U) << 33U) |
+              (static_cast<uint64_t>(snapshot.externalSync ? 1U : 0U) << 34U) |
+              (static_cast<uint64_t>(snapshot.hardwareSwitch ? 1U : 0U) << 35U) |
+              (static_cast<uint64_t>(snapshot.rotaryCount & 0xFFU) << 36U);
+    // Peaks pack four to a scalar, then one scalar carries the encoders. The
+    // whole reply must stay inside kIOUserClientAsyncArgumentsCountMax.
+    static_assert(4 + (ASFW::Audio::kMaxAudioMeterValues + 3) / 4 + 1 <=
+                      kIOUserClientAsyncArgumentsCountMax,
+                  "async meter reply no longer fits the async argument array");
+    uint32_t used = 4;
     for (uint32_t index = 0; index < snapshot.valueCount; index += 4) {
-        data[4 + index / 4] = PackI16Quad(
+        data[used++] = PackI16Quad(
             std::span<const int16_t>{snapshot.values.data(), snapshot.valueCount}, index);
     }
+    data[used++] = PackI16Quad(
+        std::span<const int16_t>{snapshot.rotaries.data(), snapshot.rotaries.size()}, 0);
     CompleteAudioControlPlaneAction(&userClient, arguments->completion, kIOReturnSuccess, data,
-                                    4 + (snapshot.valueCount + 3) / 4);
+                                    used);
     return kIOReturnSuccess;
 }
 
@@ -899,6 +908,12 @@ kern_return_t HandleGetAudioMeterSnapshot(
     wire.detectedSampleRateHz = snapshot.detectedSampleRateHz;
     wire.enabled = snapshot.enabled ? 1U : 0U;
     wire.clockLocked = snapshot.clockLocked ? 1U : 0U;
+    wire.externalSync = snapshot.externalSync ? 1U : 0U;
+    wire.hardwareSwitch = snapshot.hardwareSwitch ? 1U : 0U;
+    wire.rotaryCount = snapshot.rotaryCount;
+    for (uint32_t i = 0; i < snapshot.rotaryCount && i < wire.rotaries.size(); ++i) {
+        wire.rotaries[i] = snapshot.rotaries[i];
+    }
     for (uint32_t i = 0; i < snapshot.valueCount; ++i) wire.values[i] = snapshot.values[i];
     auto* data = OSData::withBytes(&wire, sizeof(wire));
     if (!data) return kIOReturnNoMemory;

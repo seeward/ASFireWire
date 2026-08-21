@@ -14,7 +14,8 @@ struct AudioTopologyDashboard: View {
     @Binding var selectedOutputOptical: AudioOpticalMode
     let supportedRates: [UInt32]
     let applyConfiguration: () -> Void
-    let setLevel: (MAudio1814ControlID, Double) -> Void
+    let setLevel: ([MAudio1814ControlID], Double) -> Void
+    let setWidth: ([MAudio1814ControlID], Double) -> Void
     let setSend: (AudioTopologySend, Bool) -> Void
     let setRoute: (MAudio1814ControlID, Int32) -> Void
     let setMeteringEnabled: (Bool) -> Void
@@ -33,7 +34,7 @@ struct AudioTopologyDashboard: View {
                     apply: applyConfiguration)
                 AudioTopologyConsoleRack(
                     topology: topology, meters: meters,
-                    setLevel: setLevel, setSend: setSend)
+                    setLevel: setLevel, setWidth: setWidth, setSend: setSend)
                 AudioTopologyPatchbay(topology: topology, setRoute: setRoute)
                 AudioTopologyTelemetry(meters: meters, setEnabled: setMeteringEnabled)
                 Text(statusText)
@@ -132,12 +133,47 @@ private struct AudioTopologyTelemetry: View {
                             .font(.caption.monospaced().bold())
                             .foregroundStyle(.secondary)
                     }
+                    Label(meters.isExternallySynced ? "External sync" : "Internal clock",
+                          systemImage: meters.isExternallySynced ? "link" : "clock")
+                        .foregroundStyle(meters.isExternallySynced ? .cyan : .secondary)
+                    Label("Switch \(meters.hardwareSwitch ? "on" : "off")",
+                          systemImage: meters.hardwareSwitch ? "capsule.fill" : "capsule")
+                        .foregroundStyle(meters.hardwareSwitch ? .green : .secondary)
                 } else {
                     Text("Waiting for the confirmed meter snapshot…")
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
+            if let meters, !meters.rotaries.isEmpty {
+                AudioTopologyEncoderRow(meters: meters)
+            }
+        }
+    }
+}
+
+/// The front-panel encoders are relative: the device sends detents and the
+/// driver integrates them, so these are a running total since metering was
+/// enabled rather than a readback of a knob position.
+private struct AudioTopologyEncoderRow: View {
+    let meters: AudioMeterSnapshot
+
+    private static let names = ["HEADPHONE 1/2", "HEADPHONE 3/4", "ASSIGNABLE"]
+
+    var body: some View {
+        HStack(spacing: 16) {
+            ForEach(Array(meters.rotaries.enumerated()), id: \.offset) { index, value in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(index < Self.names.count ? Self.names[index] : "ENCODER \(index + 1)")
+                        .font(.system(size: 9).monospaced())
+                        .foregroundStyle(.secondary)
+                    ProgressView(value: Double(Int(value) + 32_768) / 32_768)
+                        .progressViewStyle(.linear)
+                        .tint(.yellow)
+                        .frame(width: 110)
+                }
+            }
+            Spacer()
         }
     }
 }

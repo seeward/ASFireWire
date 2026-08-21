@@ -3,8 +3,7 @@ import SwiftUI
 struct AudioTopologyOutputStrip: View {
     let master: AudioTopologyOutputMaster
     let meters: AudioMeterSnapshot?
-    let setLevel: (MAudio1814ControlID, Double) -> Void
-    @State private var dragStartValue: Double?
+    let setLevel: ([MAudio1814ControlID], Double) -> Void
 
     var body: some View {
         VStack(spacing: 8) {
@@ -13,7 +12,7 @@ struct AudioTopologyOutputStrip: View {
                 .background(Color.orange.opacity(0.18)).clipShape(RoundedRectangle(cornerRadius: 4))
             Spacer(minLength: 8)
             HStack(spacing: 4) {
-                AudioTopologyFader(value: master.level, onChanged: { setLevel(master.levelControl, $0) })
+                AudioTopologyFader(value: master.level, onChanged: { setLevel(master.levelControls, $0) })
                     .frame(height: 180)
                 AudioTopologyMeter(pair: master.meterPair, snapshot: meters, name: master.name)
                     .frame(height: 180)
@@ -22,7 +21,7 @@ struct AudioTopologyOutputStrip: View {
                 .font(.caption.monospaced().bold()).foregroundStyle(.orange)
         }
         .padding(8)
-        .frame(width: 92, height: 330)
+        .frame(width: 100, height: 420)
         .background(AudioTopologyStripBackground(stroke: .orange))
     }
 }

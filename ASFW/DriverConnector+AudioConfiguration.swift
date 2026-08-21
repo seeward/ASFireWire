@@ -45,9 +45,21 @@ extension ASFWDriverConnector {
             }
             let requestID = self.nextAudioControlRequestID
             self.nextAudioControlRequestID &+= 1
-            self.audioControlSnapshotCompletions[requestID] = { status, values in
-                completion(status == KERN_SUCCESS
-                    ? AudioAsyncSnapshotDecoder.controls(values) : nil)
+            self.audioControlSnapshotCompletions[requestID] = { [weak self] status, values in
+                // The async reply carries only a header: an async completion has
+                // 16 scalar slots and the 1814's surface is 78 values. Treat it
+                // as "the surface is ready at revision N" and read the whole
+                // thing over the struct selector, still off the main queue.
+                guard status == KERN_SUCCESS,
+                      AudioAsyncSnapshotDecoder.controlsHeader(values) != nil,
+                      let self else {
+                    completion(nil)
+                    return
+                }
+                self.connectionQueue.async {
+                    let snapshot = self.getAudioControlSurface(endpointID: endpointID)
+                    DispatchQueue.main.async { completion(snapshot) }
+                }
             }
             var reference = DriverKitAsyncCompletionDecoder.reference(
                 marker: Self.audioControlSnapshotAsyncReference
@@ -188,7 +200,7 @@ extension ASFWDriverConnector {
     func getAudioControlSurface(endpointID: AudioEndpointID) -> AudioControlSurfaceSnapshot? {
         guard isConnected, connection != 0, endpointID.rawValue != 0 else { return nil }
         var scalarInput = endpointID.rawValue
-        var output = Data(count: 152)
+        var output = Data(count: 664)
         var outputLength = output.count
         let result = output.withUnsafeMutableBytes { outputBytes in
             IOConnectCallMethod(
@@ -283,12 +295,12 @@ private enum AudioConfigurationWireDecoder {
 }
 
 private enum AudioControlSurfaceWireDecoder {
-    private static let wireSize = 152
-    private static let maximumValueCount = 16
+    private static let wireSize = 664
+    private static let maximumValueCount = 80
 
     static func decode(_ data: Data) -> AudioControlSurfaceSnapshot? {
         guard data.count == wireSize,
-              let version = data.u32(at: 0), version == 1,
+              let version = data.u32(at: 0), version == 2,
               let kind = data.u32(at: 4), kind == 0x4D41_3134,
               let endpointRaw = data.u64(at: 8), endpointRaw != 0,
               let revision = data.u32(at: 16),
@@ -325,24 +337,23 @@ private enum AudioAsyncSnapshotDecoder {
             committed: committed, capabilities: capabilities)
     }
 
-    static func controls(_ values: [UInt64]) -> AudioControlSurfaceSnapshot? {
-        guard values.count >= 4, values[1] != 0 else { return nil }
+    struct ControlsHeader {
+        let endpointID: AudioEndpointID
+        let kind: UInt32
+        let revision: UInt32
+        let valueCount: Int
+    }
+
+    /// The async control-surface reply is a header only — see
+    /// `HandleGetAudioControlSurfaceAsync`. Values come from the struct selector.
+    static func controlsHeader(_ values: [UInt64]) -> ControlsHeader? {
+        guard values.count == 4, values[1] != 0 else { return nil }
         let header = values[2]
-        let revision = UInt32(truncatingIfNeeded: header)
-        let kind = UInt32(truncatingIfNeeded: header >> 32)
-        let count = Int(values[3])
-        let pairCount = (count + 1) / 2
-        guard count <= 16, values.count == 4 + pairCount else { return nil }
-        var controls: [AudioControlSurfaceValue] = []
-        controls.reserveCapacity(count)
-        for index in 0..<count {
-            let pair = values[4 + index / 2]
-            let raw = UInt32(truncatingIfNeeded: pair >> ((index % 2) * 32))
-            controls.append(.init(id: UInt32(index + 1), value: Int32(bitPattern: raw)))
-        }
-        return AudioControlSurfaceSnapshot(
-            endpointID: AudioEndpointID(rawValue: values[1]), kind: kind,
-            revision: revision, values: controls)
+        return ControlsHeader(
+            endpointID: AudioEndpointID(rawValue: values[1]),
+            kind: UInt32(truncatingIfNeeded: header >> 32),
+            revision: UInt32(truncatingIfNeeded: header),
+            valueCount: Int(values[3]))
     }
 
     static func meters(_ values: [UInt64]) -> AudioMeterSnapshot? {
@@ -354,8 +365,14 @@ private enum AudioAsyncSnapshotDecoder {
         let count = Int(UInt32(truncatingIfNeeded: flagsAndCount))
         let enabled = ((flagsAndCount >> 32) & 1) != 0
         let locked = ((flagsAndCount >> 33) & 1) != 0
+        let external = ((flagsAndCount >> 34) & 1) != 0
+        let hardwareSwitch = ((flagsAndCount >> 35) & 1) != 0
+        let rotaryCount = Int((flagsAndCount >> 36) & 0xFF)
         let quadletCount = (count + 3) / 4
-        guard count <= 40, values.count == 4 + quadletCount else { return nil }
+        // One trailing scalar carries the encoders, packed four to a scalar.
+        guard count <= 40, rotaryCount <= 3, values.count == 4 + quadletCount + 1 else {
+            return nil
+        }
         var peaks: [Int16] = []
         peaks.reserveCapacity(count)
         for index in 0..<count {
@@ -363,10 +380,15 @@ private enum AudioAsyncSnapshotDecoder {
             let raw = UInt16(truncatingIfNeeded: packed >> ((index % 4) * 16))
             peaks.append(Int16(bitPattern: raw))
         }
+        let packedRotaries = values[4 + quadletCount]
+        let rotaries = (0..<rotaryCount).map { index -> Int16 in
+            Int16(bitPattern: UInt16(truncatingIfNeeded: packedRotaries >> (index * 16)))
+        }
         return AudioMeterSnapshot(
             endpointID: AudioEndpointID(rawValue: values[1]), revision: revision,
             detectedSampleRateHz: rate, isEnabled: enabled, isClockLocked: locked,
-            values: peaks)
+            isExternallySynced: external, hardwareSwitch: hardwareSwitch,
+            rotaries: rotaries, values: peaks)
     }
 
     private static func capability(_ packed: UInt64) -> AudioConfigurationCapability? {

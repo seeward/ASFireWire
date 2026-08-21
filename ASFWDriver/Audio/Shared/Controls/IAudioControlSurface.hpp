@@ -25,7 +25,11 @@ struct AudioControlValue final {
     int32_t value{0};
 };
 
-inline constexpr size_t kMaxAudioControlSurfaceValues = 16;
+// The FireWire 1814's parameter window alone names 78 controls (18 ranges over
+// 160 bytes). Sized to hold a whole device surface in one snapshot so the UI
+// never has to page — 80 values is 664 wire bytes, well inside the 4096-byte
+// inline callStruct limit.
+inline constexpr size_t kMaxAudioControlSurfaceValues = 80;
 
 // A copied snapshot is always driver-side belief. Some legacy devices, notably
 // the M-Audio special firmware, intentionally have no safe readback path.

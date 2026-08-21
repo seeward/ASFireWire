@@ -147,29 +147,26 @@ bool MAudioSpecialProtocol::CopyAudioControlSurfaceSnapshot(
     outSnapshot = {};
     if (model_ != MAudioSpecialModel::FireWire1814 || !parameterLock_) return false;
 
-    static constexpr std::array kControls = {
-        MAudio1814ControlId::AnalogOutput12Level,
-        MAudio1814ControlId::AnalogOutput34Level,
-        MAudio1814ControlId::Headphone12Level,
-        MAudio1814ControlId::Headphone34Level,
-        MAudio1814ControlId::AnalogOutput12Source,
-        MAudio1814ControlId::AnalogOutput34Source,
-        MAudio1814ControlId::Headphone12Source,
-        MAudio1814ControlId::Headphone34Source,
-        MAudio1814ControlId::PhysicalMixerSendMask,
-        MAudio1814ControlId::StreamMixerSendMask,
-    };
+    // Enumerated from the range table rather than a hand-kept list, so a group
+    // added there cannot be silently missing from the surface. The whole window
+    // is one snapshot: kMaxAudioControlSurfaceValues is sized to hold it.
+    static_assert(kMAudio1814ControlCount <= kMaxAudioControlSurfaceValues,
+                  "the 1814 control surface no longer fits one snapshot");
 
     IOLockLock(parameterLock_);
     outSnapshot.kind = AudioControlSurfaceKind::MAudio1814Mixer;
     outSnapshot.revision = parameterRevision_;
-    outSnapshot.valueCount = static_cast<uint32_t>(kControls.size());
-    for (size_t i = 0; i < kControls.size(); ++i) {
-        outSnapshot.values[i] = {
-            .id = static_cast<uint32_t>(kControls[i]),
-            .value = parameterImage_.ControlValue(kControls[i]),
-        };
+    size_t emitted = 0;
+    for (const auto& group : kMAudio1814ControlGroups) {
+        for (uint32_t index = 0; index < group.count; ++index) {
+            const uint32_t id = MakeMAudio1814ControlId(group.group, index);
+            outSnapshot.values[emitted++] = {
+                .id = id,
+                .value = parameterImage_.ControlValue(id),
+            };
+        }
     }
+    outSnapshot.valueCount = static_cast<uint32_t>(emitted);
     IOLockUnlock(parameterLock_);
     return true;
 }
@@ -185,6 +182,12 @@ bool MAudioSpecialProtocol::CopyAudioMeterSnapshot(
     outSnapshot.detectedSampleRateHz = meterState_.detectedSampleRateHz;
     outSnapshot.enabled = meterEnabled_;
     outSnapshot.clockLocked = meterState_.clockLocked;
+    outSnapshot.externalSync = meterState_.externalSync;
+    outSnapshot.hardwareSwitch = meterState_.hardwareSwitch;
+    outSnapshot.rotaryCount = static_cast<uint32_t>(meterState_.rotaries.size());
+    for (size_t i = 0; i < meterState_.rotaries.size(); ++i) {
+        outSnapshot.rotaries[i] = meterState_.rotaries[i];
+    }
     for (size_t i = 0; i < meterState_.peaks.size(); ++i) {
         outSnapshot.values[i] = meterState_.peaks[i];
     }
@@ -215,6 +218,10 @@ IOReturn MAudioSpecialProtocol::SetAudioMeteringEnabled(bool enabled) noexcept {
     }
     if (!enabled) {
         meterState_.clockLocked = false;
+        meterState_.externalSync = false;
+        // The encoders integrate detents; a gap in polling loses turns, so the
+        // next enable starts a fresh run rather than continuing a stale total.
+        meterState_.hasPreviousEvents = false;
         ++meterRevision_;
     }
     IOLockUnlock(meterLock_);
@@ -294,6 +301,8 @@ void MAudioSpecialProtocol::CompleteMeterRead(
     bool clockStateChanged = false;
     uint32_t detectedRateHz = 0;
     bool clockLocked = false;
+    bool externalSync = false;
+    MAudio1814RotaryDelta rotaryDeltas{};
     uint64_t nextDelayNs = kRetryNs;
 
     IOLockLock(meterLock_);
@@ -305,17 +314,22 @@ void MAudioSpecialProtocol::CompleteMeterRead(
     const bool sameRoute = route_.generation == issuedRoute.generation &&
                            route_.nodeId == issuedRoute.nodeId;
     if (active && sameRoute && status == Async::AsyncStatus::kSuccess) {
-        MAudioSpecialMeterState decodedState{};
-        if (DecodeMAudioSpecialMeter(payload, currentRateHz_, decodedState)) {
+        // Decoded in place: the rotary and switch fields are integrated from
+        // edge events, so the previous block's event bytes must survive.
+        const uint32_t previousRateHz = meterState_.detectedSampleRateHz;
+        const bool previousLocked = meterState_.clockLocked;
+        const bool previousExternal = meterState_.externalSync;
+        if (DecodeMAudioSpecialMeter(payload, meterState_, &rotaryDeltas)) {
             clockStateChanged = meterRevision_ == 0 ||
-                meterState_.detectedSampleRateHz != decodedState.detectedSampleRateHz ||
-                meterState_.clockLocked != decodedState.clockLocked;
-            meterState_ = decodedState;
+                previousRateHz != meterState_.detectedSampleRateHz ||
+                previousLocked != meterState_.clockLocked ||
+                previousExternal != meterState_.externalSync;
             ++meterRevision_;
             accepted = true;
             decoded = true;
-            detectedRateHz = decodedState.detectedSampleRateHz;
-            clockLocked = decodedState.clockLocked;
+            detectedRateHz = meterState_.detectedSampleRateHz;
+            clockLocked = meterState_.clockLocked;
+            externalSync = meterState_.externalSync;
             nextDelayNs = kPollNs;
         }
     }
@@ -323,10 +337,19 @@ void MAudioSpecialProtocol::CompleteMeterRead(
     IOLockUnlock(meterLock_);
 
     if (accepted) {
+        // Outside the meter lock: these take the parameter lock and may start an
+        // async write.
+        if (rotaryDeltas.Any()) {
+            ApplyRotaryDetents(rotaryDeltas);
+        }
+        // Also drain unconditionally. A knob write that failed re-armed its
+        // quadlet and has nobody else to retry it; the poll is the one thing
+        // that keeps running. No-op when nothing is pending.
+        FlushPendingParameterWrites();
         if (clockStateChanged) {
             ASFW_LOG(Audio,
-                     "[MAudioMeter] clock rate=%u locked=%u node=0x%04x gen=%u",
-                     detectedRateHz, clockLocked ? 1U : 0U,
+                     "[MAudioMeter] clock rate=%u locked=%u external=%u node=0x%04x gen=%u",
+                     detectedRateHz, clockLocked ? 1U : 0U, externalSync ? 1U : 0U,
                      static_cast<unsigned>(issuedRoute.nodeId),
                      static_cast<unsigned>(issuedRoute.generation.value));
         }
@@ -347,7 +370,6 @@ void MAudioSpecialProtocol::ApplyAudioControlValue(
         return;
     }
 
-    const auto control = static_cast<MAudio1814ControlId>(controlId);
     size_t changedIndex = 0;
     uint32_t changedValue = 0;
     IOLockLock(parameterLock_);
@@ -357,12 +379,12 @@ void MAudioSpecialProtocol::ApplyAudioControlValue(
         return;
     }
     MAudioSpecialParameterImage proposed = parameterImage_;
-    if (!proposed.Apply(control, value, changedIndex)) {
+    if (!proposed.Apply(controlId, value, changedIndex)) {
         IOLockUnlock(parameterLock_);
         callback(kIOReturnBadArgument);
         return;
     }
-    changedValue = proposed.ValueAt(changedIndex);
+    changedValue = proposed.QuadletAt(changedIndex);
     parameterWriteInFlight_ = true;
     IOLockUnlock(parameterLock_);
 
@@ -381,16 +403,16 @@ void MAudioSpecialProtocol::ApplyAudioControlValue(
                 if (status == kIOReturnSuccess) {
                     // Apply exactly the acknowledged quadlet to the belief
                     // image. A failed write must not be reflected in UI state.
-                    const auto control = static_cast<MAudio1814ControlId>(controlId);
                     size_t confirmedIndex = 0;
-                    (void)parameterImage_.Apply(control, value, confirmedIndex);
+                    (void)parameterImage_.Apply(controlId, value, confirmedIndex);
                     if (confirmedIndex == changedIndex &&
-                        parameterImage_.ValueAt(confirmedIndex) == changedValue) {
+                        parameterImage_.QuadletAt(confirmedIndex) == changedValue) {
                         ++parameterRevision_;
                     }
                 }
                 IOLockUnlock(parameterLock_);
             }
+            FlushPendingParameterWrites();
             if (status == kIOReturnSuccess) {
                 ASFW_LOG(Audio,
                          "[MAudioControl] confirmed-belief id=%u value=%d offset=0x%02zx",
@@ -672,6 +694,95 @@ void MAudioSpecialProtocol::ReadClockHealth(HealthCallback callback) {
                                 .nominalRateHz = currentRateHz_});
 }
 
+void MAudioSpecialProtocol::ApplyRotaryDetents(
+    const MAudio1814RotaryDelta& deltas) noexcept {
+    if (!parameterLock_) return;
+
+    // Byte 1 drives headphone channels 1/2, byte 2 drives 3/4. Both channels of
+    // a pair share one quadlet, so a knob is one transaction however many
+    // channels it moves. The third knob is assignable in the vendor Panel and we
+    // have no reading of its assignment mask, so it is deliberately not applied.
+    struct Binding {
+        size_t rotaryIndex;
+        uint32_t firstChannel;
+    };
+    constexpr Binding kBindings[] = {
+        {static_cast<size_t>(MAudio1814Rotary::Headphone12), 0},
+        {static_cast<size_t>(MAudio1814Rotary::Headphone34), 2},
+    };
+
+    IOLockLock(parameterLock_);
+    for (const auto& binding : kBindings) {
+        const int32_t detents = deltas.detents[binding.rotaryIndex];
+        if (detents == 0) continue;
+
+        for (uint32_t offset = 0; offset < 2; ++offset) {
+            const uint32_t id = MakeMAudio1814ControlId(
+                MAudio1814ControlGroup::HeadphoneVolume, binding.firstChannel + offset);
+            int32_t level = parameterImage_.ControlValue(id) +
+                            detents * MAudioSpecialMeterState::kRotaryStep;
+            if (level > MAudioSpecialParameterImage::kLevelMax) {
+                level = MAudioSpecialParameterImage::kLevelMax;
+            } else if (level < MAudioSpecialParameterImage::kLevelMin) {
+                level = MAudioSpecialParameterImage::kLevelMin;
+            }
+            size_t changedIndex = 0;
+            // Applied to the image first and unconditionally: the knob has
+            // already physically moved, so dropping the detent because a write
+            // is in flight would silently desynchronise us from the user.
+            if (parameterImage_.Apply(id, level, changedIndex)) {
+                pendingParameterQuadlets_ |= (1ULL << changedIndex);
+            }
+        }
+        ++parameterRevision_;
+        ASFW_LOG(Audio, "[MAudioControl] knob %zu moved %d detent(s) -> headphone %u/%u",
+                 binding.rotaryIndex, detents, binding.firstChannel + 1,
+                 binding.firstChannel + 2);
+    }
+    IOLockUnlock(parameterLock_);
+
+    FlushPendingParameterWrites();
+}
+
+void MAudioSpecialProtocol::FlushPendingParameterWrites() noexcept {
+    if (!parameterLock_) return;
+
+    size_t index = 0;
+    uint32_t value = 0;
+    IOLockLock(parameterLock_);
+    if (parameterWriteInFlight_ || pendingParameterQuadlets_ == 0) {
+        IOLockUnlock(parameterLock_);
+        return;
+    }
+    // Lowest set bit first; order within the window does not matter because each
+    // quadlet is independent.
+    while ((pendingParameterQuadlets_ & (1ULL << index)) == 0) ++index;
+    pendingParameterQuadlets_ &= ~(1ULL << index);
+    value = parameterImage_.QuadletAt(index);
+    parameterWriteInFlight_ = true;
+    IOLockUnlock(parameterLock_);
+
+    SendParameterQuadlet(index, value, [this, index](IOReturn status) {
+        if (parameterLock_) {
+            IOLockLock(parameterLock_);
+            parameterWriteInFlight_ = false;
+            if (status != kIOReturnSuccess) {
+                // Re-arm rather than drop: the image already carries the new
+                // value, so leaving it unwritten would make our belief a lie.
+                pendingParameterQuadlets_ |= (1ULL << index);
+            }
+            IOLockUnlock(parameterLock_);
+        }
+        if (status != kIOReturnSuccess) {
+            ASFW_LOG_ERROR(Audio,
+                           "[MAudioControl] knob write failed offset=0x%02zx kr=0x%08x",
+                           index * sizeof(uint32_t), status);
+            return; // Next meter poll retries; do not spin on a dead node.
+        }
+        FlushPendingParameterWrites();
+    });
+}
+
 void MAudioSpecialProtocol::SendParameterBlock(
     std::function<void(IOReturn)> completion) {
     // The device cannot read this window. The cache begins with the lab-derived
@@ -679,21 +790,17 @@ void MAudioSpecialProtocol::SendParameterBlock(
     // after an async acknowledgment. Reassert that belief at initialization;
     // never regenerate defaults here, or a later initialization would erase
     // a control change that the UI has already confirmed.
-    std::array<uint32_t, MAudioSpecialParameterImage::kQuadletCount> values{};
+    // The image is held in wire order, so this is a straight copy. Copy under
+    // the lock rather than handing the async write a span into the live image.
+    std::array<uint8_t, MAudioSpecialParameterImage::kImageBytes> payload{};
     if (parameterLock_) {
         IOLockLock(parameterLock_);
-        values = parameterImage_.Values();
+        const auto bytes = parameterImage_.Bytes();
+        std::memcpy(payload.data(), bytes.data(), payload.size());
+        // This write carries every quadlet, so anything a knob queued is now
+        // covered and must not be re-sent behind it.
+        pendingParameterQuadlets_ = 0;
         IOLockUnlock(parameterLock_);
-    }
-
-    std::array<uint8_t, MAudioSpecialParameterImage::kQuadletCount * 4> payload{};
-    for (size_t i = 0; i < values.size(); ++i) {
-        const uint32_t value = values[i];
-        // IEEE 1394 payloads are big-endian regardless of host order.
-        payload[(i * 4) + 0] = static_cast<uint8_t>(value >> 24);
-        payload[(i * 4) + 1] = static_cast<uint8_t>(value >> 16);
-        payload[(i * 4) + 2] = static_cast<uint8_t>(value >> 8);
-        payload[(i * 4) + 3] = static_cast<uint8_t>(value);
     }
 
     const auto operationalNode = Discovery::TryOperationalNodeId(route_.nodeId);
@@ -714,7 +821,7 @@ void MAudioSpecialProtocol::SendParameterBlock(
     ASFW_LOG(Audio,
              "[BeBoB] %{public}s: asserting parameter window +0x00..0x9c "
              "(%zu quadlets) node=0x%04x gen=%u",
-             DeviceName(), values.size(),
+             DeviceName(), MAudioSpecialParameterImage::kQuadletCount,
              static_cast<unsigned>(route_.nodeId),
              static_cast<unsigned>(route_.generation.value));
 

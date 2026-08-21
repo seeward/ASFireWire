@@ -224,20 +224,3 @@ final class MAudio1814ControlPlane: ObservableObject {
         schedulePump()
     }
 }
-
-private extension MAudio1814ControlID {
-    var label: String {
-        switch self {
-        case .analogOutput12Level: return "analog output 1/2 level"
-        case .analogOutput34Level: return "analog output 3/4 level"
-        case .headphone12Level: return "headphone 1/2 level"
-        case .headphone34Level: return "headphone 3/4 level"
-        case .analogOutput12Source: return "analog output 1/2 source"
-        case .analogOutput34Source: return "analog output 3/4 source"
-        case .headphone12Source: return "headphone 1/2 source"
-        case .headphone34Source: return "headphone 3/4 source"
-        case .physicalMixerSendMask: return "physical mixer sends"
-        case .streamMixerSendMask: return "stream mixer sends"
-        }
-    }
-}

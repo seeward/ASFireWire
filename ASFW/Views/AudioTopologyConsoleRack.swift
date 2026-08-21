@@ -3,7 +3,8 @@ import SwiftUI
 struct AudioTopologyConsoleRack: View {
     let topology: AudioTopologySnapshot
     let meters: AudioMeterSnapshot?
-    let setLevel: (MAudio1814ControlID, Double) -> Void
+    let setLevel: ([MAudio1814ControlID], Double) -> Void
+    let setWidth: ([MAudio1814ControlID], Double) -> Void
     let setSend: (AudioTopologySend, Bool) -> Void
 
     var body: some View {
@@ -12,7 +13,9 @@ struct AudioTopologyConsoleRack: View {
                 HStack(alignment: .top, spacing: 16) {
                     AudioTopologyStripBank(caption: "CONSOLE CHANNELS", tint: .cyan) {
                         ForEach(topology.channels) { channel in
-                            AudioTopologyChannelStrip(channel: channel, meters: meters, setSend: setSend)
+                            AudioTopologyChannelStrip(
+                                channel: channel, meters: meters, setSend: setSend,
+                                setLevel: setLevel, setWidth: setWidth)
                         }
                     }
                     Rectangle().fill(Color.white.opacity(0.08)).frame(width: 1).frame(maxHeight: .infinity)

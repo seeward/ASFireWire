@@ -34,7 +34,7 @@ extension ASFWDriverConnector {
     func getAudioMeterSnapshot(endpointID: AudioEndpointID) -> AudioMeterSnapshot? {
         guard isConnected, connection != 0, endpointID.rawValue != 0 else { return nil }
         var scalarInput = endpointID.rawValue
-        var output = Data(count: 112)
+        var output = Data(count: 120)
         var outputLength = output.count
         let result = output.withUnsafeMutableBytes { outputBytes in
             IOConnectCallMethod(
@@ -71,26 +71,33 @@ extension ASFWDriverConnector {
 }
 
 private enum AudioMeterWireDecoder {
-    private static let wireSize = 112
+    private static let wireSize = 120
     private static let maximumValueCount = 40
+    private static let maximumRotaryCount = 3
 
     static func decode(_ data: Data) -> AudioMeterSnapshot? {
         guard data.count == wireSize,
-              let version = data.u32(at: 0), version == 1,
+              let version = data.u32(at: 0), version == 2,
               let revision = data.u32(at: 4),
               let endpointRaw = data.u64(at: 8), endpointRaw != 0,
               let count = data.u32(at: 16), count <= maximumValueCount,
               let rate = data.u32(at: 20),
               let enabled = data.u8(at: 24), enabled <= 1,
-              let locked = data.u8(at: 25), locked <= 1 else {
+              let locked = data.u8(at: 25), locked <= 1,
+              let external = data.u8(at: 26), external <= 1,
+              let hardwareSwitch = data.u8(at: 27), hardwareSwitch <= 1,
+              let rotaryCount = data.u32(at: 28), rotaryCount <= maximumRotaryCount else {
             return nil
         }
-        let values = (0..<Int(count)).compactMap { data.i16(at: 28 + $0 * 2) }
+        let rotaries = (0..<Int(rotaryCount)).compactMap { data.i16(at: 32 + $0 * 2) }
+        guard rotaries.count == Int(rotaryCount) else { return nil }
+        let values = (0..<Int(count)).compactMap { data.i16(at: 40 + $0 * 2) }
         guard values.count == Int(count) else { return nil }
         return AudioMeterSnapshot(
             endpointID: AudioEndpointID(rawValue: endpointRaw), revision: revision,
             detectedSampleRateHz: rate, isEnabled: enabled != 0,
-            isClockLocked: locked != 0, values: values)
+            isClockLocked: locked != 0, isExternallySynced: external != 0,
+            hardwareSwitch: hardwareSwitch != 0, rotaries: rotaries, values: values)
     }
 }
 

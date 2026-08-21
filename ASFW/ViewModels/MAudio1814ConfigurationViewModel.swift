@@ -108,8 +108,22 @@ final class MAudio1814ConfigurationViewModel: ObservableObject {
             configuration: snapshot, controls: mixerSnapshot, meters: meterSnapshot)
     }
 
-    func setTopologyLevel(_ control: MAudio1814ControlID, percent: Double) {
-        applyMixerControl(control, value: MAudio1814TopologyProjector.rawLevel(percent: percent))
+    /// A console fader moves a whole stereo pair. The device's registers are
+    /// per-channel, so this submits one intent per channel; the control plane
+    /// keeps only the latest per control and paces the writes.
+    func setTopologyLevel(_ controls: [MAudio1814ControlID], percent: Double) {
+        let raw = MAudio1814TopologyProjector.rawLevel(percent: percent)
+        for control in controls {
+            applyMixerControl(control, value: raw)
+        }
+    }
+
+    /// Width drives the pair's two balance registers in opposition.
+    func setTopologyWidth(_ controls: [MAudio1814ControlID], percent: Double) {
+        for (index, control) in controls.enumerated() {
+            applyMixerControl(
+                control, value: MAudio1814TopologyProjector.rawWidth(percent: percent, channel: index))
+        }
     }
 
     func setTopologySend(_ send: AudioTopologySend, enabled: Bool) {

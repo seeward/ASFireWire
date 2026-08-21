@@ -134,6 +134,20 @@ private:
     void SendParameterBlock(std::function<void(IOReturn)> completion);
     void SendParameterQuadlet(size_t index, uint32_t value,
                               IAudioControlSurface::ApplyCallback completion);
+
+    /// Turns front-panel knob detents into headphone-volume writes.
+    ///
+    /// The 1814's knobs are relative encoders that attenuate nothing on their
+    /// own — the host is what applies them. The vendor kext binds byte 1 of the
+    /// meter block to headphone pair 1 and byte 2 to pair 2
+    /// (`ReceiveControlPacket` @ 0xe9ea), and that binding is fixed. Byte 3's
+    /// knob is user-assignable across five level groups through a mask we have
+    /// no reading of, so its detents are reported and not acted on.
+    void ApplyRotaryDetents(const MAudio1814RotaryDelta& deltas) noexcept;
+
+    /// Issues one pending knob-driven quadlet write, if the single-writer slot
+    /// is free. Re-entered from each write completion until the mask drains.
+    void FlushPendingParameterWrites() noexcept;
     void ScheduleMeterRead(uint64_t delayNs, uint64_t epoch) noexcept;
     void PollMeter(uint64_t epoch) noexcept;
     void CompleteMeterRead(uint64_t epoch, Discovery::DeviceRouteToken issuedRoute,
@@ -167,6 +181,12 @@ private:
     MAudioSpecialParameterImage parameterImage_{};
     uint32_t parameterRevision_{1};
     bool parameterWriteInFlight_{false};
+    /// Quadlets changed by a knob and not yet written. A detent is applied to
+    /// the image immediately so none is lost while a write is outstanding; this
+    /// mask is what remembers that the device has not caught up yet.
+    uint64_t pendingParameterQuadlets_{0};
+    static_assert(MAudioSpecialParameterImage::kQuadletCount <= 64,
+                  "pendingParameterQuadlets_ is a 64-bit mask over the window");
 
     IOLock* meterLock_{nullptr};
     MAudioSpecialMeterState meterState_{};

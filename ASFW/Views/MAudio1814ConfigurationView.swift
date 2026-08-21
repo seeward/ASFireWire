@@ -22,6 +22,7 @@ struct MAudio1814ConfigurationView: View {
                     supportedRates: viewModel.supportedRates,
                     applyConfiguration: viewModel.apply,
                     setLevel: viewModel.setTopologyLevel,
+                    setWidth: viewModel.setTopologyWidth,
                     setSend: viewModel.setTopologySend,
                     setRoute: viewModel.applyMixerControl,
                     setMeteringEnabled: viewModel.setMeteringEnabled)
