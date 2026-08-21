@@ -50,6 +50,18 @@ struct DriverConnectorSharedStatusFlags {
 }
 
 extension DriverConnectorSharedStatusReason {
+    /// Expensive controller/topology snapshots are invalidated only by state
+    /// transitions. Interrupt, async-activity, and watchdog pulses merely
+    /// update telemetry in shared memory and must never trigger more I/O.
+    var invalidatesControllerSnapshot: Bool {
+        switch self {
+        case .boot, .busReset, .manual, .disconnect:
+            return true
+        case .interrupt, .asyncActivity, .watchdog, .unknown:
+            return false
+        }
+    }
+
     var displayName: String {
         switch self {
         case .boot: return "Boot"

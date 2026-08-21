@@ -72,6 +72,16 @@ final class ASFWDriverConnector: ObservableObject {
         case getAudioConfiguration = 1015
         case requestAudioConfiguration = 1016
         case getAudioConfigurationEndpoints = 1017
+        case getAudioControlSurface = 1018
+        case requestAudioControlValue = 1019
+        case getAudioMeterSnapshot = 1020
+        case setAudioMeteringEnabled = 1021
+        case submitAudioControlValue = 1022
+        case getAudioConfigurationAsync = 1023
+        case getAudioControlSurfaceAsync = 1024
+        case getAudioMeterSnapshotAsync = 1025
+        case setAudioMeteringEnabledAsync = 1026
+        case requestAudioConfigurationAsync = 1027
     }
 
     // MARK: - Re-exported Models
@@ -125,11 +135,28 @@ final class ASFWDriverConnector: ObservableObject {
 
     var asyncPort: mach_port_t = mach_port_t(MACH_PORT_NULL)
     var asyncSource: DispatchSourceMachReceive?
+    static let statusAsyncReference: UInt64 = 0x4153_4657_5354_4154 // "ASFWSTAT"
+    static let audioControlAsyncReference: UInt64 = 0x4153_4657_4354_524c // "ASFWCTRL"
+    static let audioConfigurationSnapshotAsyncReference: UInt64 = 0x4153_4657_4346_4753 // "ASFWCFGS"
+    static let audioControlSnapshotAsyncReference: UInt64 = 0x4153_4657_4353_4e50 // "ASFWCSNP"
+    static let audioMeterSnapshotAsyncReference: UInt64 = 0x4153_4657_4d53_4e50 // "ASFWMSNP"
+    static let audioMeteringAsyncReference: UInt64 = 0x4153_4657_4d45_5452 // "ASFW M ETR"
+    static let audioConfigurationAsyncReference: UInt64 = 0x4153_4657_4346_4752 // "ASFWCFGR"
+    var nextAudioControlRequestID: UInt64 = 1
+    var audioControlCompletions: [UInt64: (kern_return_t) -> Void] = [:]
+    var audioConfigurationSnapshotCompletions: [UInt64: (kern_return_t, [UInt64]) -> Void] = [:]
+    var audioControlSnapshotCompletions: [UInt64: (kern_return_t, [UInt64]) -> Void] = [:]
+    var audioMeterSnapshotCompletions: [UInt64: (kern_return_t, [UInt64]) -> Void] = [:]
+    var audioMeteringCompletions: [UInt64: (kern_return_t) -> Void] = [:]
+    var audioConfigurationCompletions: [UInt64: (kern_return_t) -> Void] = [:]
 
     var sharedMemoryAddress: mach_vm_address_t = 0
     var sharedMemoryLength: mach_vm_size_t = 0
     var sharedMemoryPointer: UnsafeMutableRawPointer?
     var lastDeliveredSequence: UInt64 = 0
+    var pendingStatusDelivery: DriverStatus?
+    var statusDeliveryScheduled = false
+    var statusDeliveryGeneration: UInt64 = 0
     private let logStore = DriverConnectorLogStore(maxEntries: 100)
     let duetStateCacheStore = DriverConnectorDuetStateCacheStore()
 
@@ -194,6 +221,41 @@ final class ASFWDriverConnector: ObservableObject {
                               initialCap: Int = DriverConnectorTransport.maxInlineStructOutputBytes,
                               scalarOutput: inout UInt64) -> Data? {
         transport.callStructWithScalar(selector: selector.rawValue, input: input, initialCap: initialCap, scalarOutput: &scalarOutput)
+    }
+
+    /// Submits a semantic audio control write without blocking the caller or
+    /// the DriverKit UserClient queue. Completion runs on the main queue.
+    func submitAudioControlValue(
+        endpointID: AudioEndpointID,
+        controlID: MAudio1814ControlID,
+        value: Int32,
+        completion: @escaping (kern_return_t) -> Void
+    ) {
+        connectionQueue.async { [weak self] in
+            guard let self, self.connection != 0,
+                  self.asyncPort != mach_port_t(MACH_PORT_NULL),
+                  endpointID.rawValue != 0 else {
+                DispatchQueue.main.async { completion(kIOReturnNotReady) }
+                return
+            }
+
+            let requestID = self.nextAudioControlRequestID
+            self.nextAudioControlRequestID &+= 1
+            self.audioControlCompletions[requestID] = completion
+            var reference = DriverKitAsyncCompletionDecoder.reference(
+                marker: Self.audioControlAsyncReference
+            )
+            var inputs = [endpointID.rawValue, UInt64(controlID.rawValue),
+                          UInt64(UInt32(bitPattern: value)), requestID]
+            let kr = IOConnectCallAsyncScalarMethod(
+                self.connection, Method.submitAudioControlValue.rawValue,
+                self.asyncPort, &reference, UInt32(reference.count),
+                &inputs, UInt32(inputs.count), nil, nil)
+            if kr != KERN_SUCCESS {
+                let callback = self.audioControlCompletions.removeValue(forKey: requestID)
+                DispatchQueue.main.async { callback?(kr) }
+            }
+        }
     }
 
     // MARK: - Logging helpers

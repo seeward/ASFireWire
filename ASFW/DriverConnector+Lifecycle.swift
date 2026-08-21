@@ -115,6 +115,26 @@ extension ASFWDriverConnector {
     }
 
     func closeConnectionLocked(reason: String) {
+        let controlCompletions = audioControlCompletions.values
+        let configurationSnapshots = audioConfigurationSnapshotCompletions.values
+        let controlSnapshots = audioControlSnapshotCompletions.values
+        let meterSnapshots = audioMeterSnapshotCompletions.values
+        let meteringCompletions = audioMeteringCompletions.values
+        let configurationCompletions = audioConfigurationCompletions.values
+        audioControlCompletions.removeAll()
+        audioConfigurationSnapshotCompletions.removeAll()
+        audioControlSnapshotCompletions.removeAll()
+        audioMeterSnapshotCompletions.removeAll()
+        audioMeteringCompletions.removeAll()
+        audioConfigurationCompletions.removeAll()
+        DispatchQueue.main.async {
+            controlCompletions.forEach { $0(kIOReturnNotReady) }
+            configurationSnapshots.forEach { $0(kIOReturnNotReady, []) }
+            controlSnapshots.forEach { $0(kIOReturnNotReady, []) }
+            meterSnapshots.forEach { $0(kIOReturnNotReady, []) }
+            meteringCompletions.forEach { $0(kIOReturnNotReady) }
+            configurationCompletions.forEach { $0(kIOReturnNotReady) }
+        }
         if let source = asyncSource {
             source.cancel()
             asyncSource = nil
@@ -144,6 +164,9 @@ extension ASFWDriverConnector {
         }
 
         lastDeliveredSequence = 0
+        pendingStatusDelivery = nil
+        statusDeliveryScheduled = false
+        statusDeliveryGeneration &+= 1
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.isConnected = false
@@ -178,21 +201,15 @@ extension ASFWDriverConnector {
         guard asyncPort == mach_port_t(MACH_PORT_NULL) else { return true }
 
         var port: mach_port_t = mach_port_t(MACH_PORT_NULL)
-        var kr = mach_port_allocate(mach_task_self_, MACH_PORT_RIGHT_RECEIVE, &port)
+        var kr = IOCreateReceivePort(UInt32(kOSAsyncCompleteMessageID), &port)
         guard kr == KERN_SUCCESS else {
-            log("mach_port_allocate failed: \(kernResultString(kr))", level: .error)
+            log("IOCreateReceivePort failed: \(kernResultString(kr))", level: .error)
             return false
         }
 
-        kr = mach_port_insert_right(mach_task_self_, port, port, mach_msg_type_name_t(MACH_MSG_TYPE_MAKE_SEND))
-        guard kr == KERN_SUCCESS else {
-            mach_port_deallocate(mach_task_self_, port)
-            log("mach_port_insert_right failed: \(kernResultString(kr))", level: .error)
-            return false
-        }
-
-        let token = UInt64(UInt(bitPattern: Unmanaged.passUnretained(self).toOpaque()))
-        var asyncRef: [UInt64] = [token]
+        var asyncRef = DriverKitAsyncCompletionDecoder.reference(
+            marker: Self.statusAsyncReference
+        )
         kr = IOConnectCallAsyncScalarMethod(connection,
                                             Method.registerStatusListener.rawValue,
                                             port,
@@ -247,15 +264,49 @@ extension ASFWDriverConnector {
             }
 
             buffer.withUnsafeBytes { rawPtr in
-                let base = rawPtr.baseAddress!
-                let scalarCountOffset = MemoryLayout<mach_msg_header_t>.size + MemoryLayout<mach_msg_body_t>.size + MemoryLayout<mach_msg_port_descriptor_t>.size
-                let count = base.load(fromByteOffset: scalarCountOffset, as: UInt32.self).littleEndian
-                guard count >= 2 else { return }
-                let scalarsOffset = scalarCountOffset + MemoryLayout<UInt32>.size
-                let scalarsPtr = base.advanced(by: scalarsOffset).assumingMemoryBound(to: UInt64.self)
-                let sequence = scalarsPtr.pointee
-                let reasonRaw = scalarsPtr.advanced(by: 1).pointee
-                handleStatusNotification(sequence: sequence, reason: UInt32(truncatingIfNeeded: reasonRaw))
+                guard let completion = DriverKitAsyncCompletionDecoder.decode(rawPtr) else {
+                    log("[ControlPlane] dropped malformed async completion", level: .error)
+                    return
+                }
+                switch completion.reference {
+                case Self.statusAsyncReference:
+                    guard completion.status == KERN_SUCCESS, completion.arguments.count >= 2 else { return }
+                    handleStatusNotification(sequence: completion.arguments[0],
+                                             reason: UInt32(truncatingIfNeeded: completion.arguments[1]))
+                case Self.audioControlAsyncReference:
+                    guard completion.arguments.count >= 2 else { return }
+                    let requestID = completion.arguments[0]
+                    let callback = audioControlCompletions.removeValue(forKey: requestID)
+                    log("[ControlPlane] write completion request=\(requestID) control=\(completion.arguments[1]) kr=\(interpretIOReturn(completion.status))",
+                        level: completion.status == KERN_SUCCESS ? .success : .error)
+                    DispatchQueue.main.async { callback?(completion.status) }
+                case Self.audioConfigurationSnapshotAsyncReference:
+                    guard let requestID = completion.arguments.first else { return }
+                    let callback = audioConfigurationSnapshotCompletions.removeValue(forKey: requestID)
+                    DispatchQueue.main.async { callback?(completion.status, completion.arguments) }
+                case Self.audioControlSnapshotAsyncReference:
+                    guard let requestID = completion.arguments.first else { return }
+                    let callback = audioControlSnapshotCompletions.removeValue(forKey: requestID)
+                    DispatchQueue.main.async { callback?(completion.status, completion.arguments) }
+                case Self.audioMeterSnapshotAsyncReference:
+                    guard let requestID = completion.arguments.first else { return }
+                    let callback = audioMeterSnapshotCompletions.removeValue(forKey: requestID)
+                    DispatchQueue.main.async { callback?(completion.status, completion.arguments) }
+                case Self.audioMeteringAsyncReference:
+                    guard let requestID = completion.arguments.first else { return }
+                    let callback = audioMeteringCompletions.removeValue(forKey: requestID)
+                    log("[ControlPlane] metering completion request=\(requestID) kr=\(interpretIOReturn(completion.status))",
+                        level: completion.status == KERN_SUCCESS ? .success : .error)
+                    DispatchQueue.main.async { callback?(completion.status) }
+                case Self.audioConfigurationAsyncReference:
+                    guard let requestID = completion.arguments.first else { return }
+                    let callback = audioConfigurationCompletions.removeValue(forKey: requestID)
+                    log("[ControlPlane] configuration request completion request=\(requestID) kr=\(interpretIOReturn(completion.status))",
+                        level: completion.status == KERN_SUCCESS ? .success : .error)
+                    DispatchQueue.main.async { callback?(completion.status) }
+                default:
+                    log("Dropped async completion with unknown reference", level: .warning)
+                }
             }
         }
     }
@@ -266,11 +317,7 @@ extension ASFWDriverConnector {
         guard status.sequence != 0 else { return }
         guard status.sequence != lastDeliveredSequence else { return }
         lastDeliveredSequence = status.sequence
-
-        DispatchQueue.main.async { [weak self] in
-            self?.latestStatus = status
-        }
-        statusSubject.send(status)
+        enqueueStatusDelivery(status, immediate: status.reason.invalidatesControllerSnapshot)
     }
 
     func emitCurrentStatus() {
@@ -278,10 +325,44 @@ extension ASFWDriverConnector {
         guard let status = DriverStatus(rawPointer: UnsafeRawPointer(pointer), length: Int(sharedMemoryLength)) else { return }
         guard status.sequence != 0 else { return }
         lastDeliveredSequence = status.sequence
-        DispatchQueue.main.async { [weak self] in
-            self?.latestStatus = status
+        enqueueStatusDelivery(status, immediate: true)
+    }
+
+    /// Older installed dexts may still emit watchdog notifications at 1 kHz.
+    /// Drain those Mach messages promptly but collapse their UI publication to
+    /// the latest snapshot at 10 Hz. Lifecycle/topology invalidations bypass
+    /// the delay and cancel any stale deferred delivery.
+    func enqueueStatusDelivery(_ status: DriverStatus, immediate: Bool) {
+        if immediate {
+            pendingStatusDelivery = nil
+            statusDeliveryScheduled = false
+            statusDeliveryGeneration &+= 1
+            deliverStatus(status)
+            return
         }
-        statusSubject.send(status)
+
+        pendingStatusDelivery = status
+        guard !statusDeliveryScheduled else { return }
+        statusDeliveryScheduled = true
+        statusDeliveryGeneration &+= 1
+        let generation = statusDeliveryGeneration
+        connectionQueue.asyncAfter(deadline: .now() + .milliseconds(100)) { [weak self] in
+            guard let self,
+                  self.statusDeliveryScheduled,
+                  self.statusDeliveryGeneration == generation,
+                  let pending = self.pendingStatusDelivery else { return }
+            self.pendingStatusDelivery = nil
+            self.statusDeliveryScheduled = false
+            self.deliverStatus(pending)
+        }
+    }
+
+    func deliverStatus(_ status: DriverStatus) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.latestStatus = status
+            self.statusSubject.send(status)
+        }
     }
 
     private func startMonitoringLocked() {
