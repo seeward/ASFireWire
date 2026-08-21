@@ -99,6 +99,38 @@ BuildMAudioClockCommand(MAudioClockSource source,
     };
 }
 
+inline constexpr size_t kMAudioLedCommandBytes = 8;
+
+/// Builds the front-panel LED command.
+///
+/// The 1814's LED is not autonomous. The device reports its momentary switch in
+/// the meter block and the host decides what the lamp shows; nothing lights it
+/// otherwise. The ALSA runtime states the whole policy in three lines — when the
+/// polled switch bit changes, send the new state
+/// (runtime/bebob/src/maudio/special_model.rs:159-163).
+///
+/// Closed by construction like the clock command above: the company ID is
+/// pinned, and the only caller-supplied value is a boolean operand.
+///
+///   vendor kext com_m_audio_FW1814Device::AVCControlSetLEDStatus (0xdaaa)
+///     — 8-byte frame, OUI 03 00 01, state at operand 0, zero pad
+///   references/alsa-userspace-control-protocols-impl/protocols/bebob/src/maudio/special.rs:121-167
+///     — MaudioSpecialLedSwitch, same OUI. It pads with 0xff where the vendor
+///       pads with 0x00; we follow the vendor.
+[[nodiscard]] constexpr std::array<uint8_t, kMAudioLedCommandBytes>
+BuildMAudioLedCommand(bool illuminated) noexcept {
+    return {
+        0x00,  // AV/C CONTROL
+        0xFF,  // unit
+        0x00,  // VENDOR DEPENDENT
+        0x03,  // company ID high   — pinned; this is the safety boundary
+        0x00,  // company ID middle
+        0x01,  // company ID low
+        illuminated ? uint8_t{0x01} : uint8_t{0x00},
+        0x00,  // pad, as the vendor sends it
+    };
+}
+
 /// SetClockSourceInternal waits 300 ms between its vendor frame and the Audio
 /// selector command, then another 300 ms after the selector completes.
 inline constexpr uint32_t kMAudioClockToSelectorInterlockMs = 300;

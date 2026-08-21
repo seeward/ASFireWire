@@ -102,7 +102,16 @@ inline constexpr std::array<MAudio1814MeterSectionInfo, 8> kMAudio1814MeterSecti
 }};
 
 struct MAudioSpecialMeterState final {
+    /// What the decoder needs. Linux (`METER_SIZE_SPECIAL`) and the ALSA crate
+    /// (`METER_SIZE`) both read exactly this much.
     static constexpr size_t kBlockBytes = 84;
+    /// What the vendor actually reads:
+    /// `com_m_audio_FW1814Device::GetControlPacketSize` @ 0xc962 returns **88**.
+    /// Bytes 84..87 are read by the vendor and used by nothing we have found, and
+    /// no reference implementation reads them at all. We request the vendor's
+    /// size so the device sees the transaction it expects, and so the bytes are
+    /// available to look at.
+    static constexpr size_t kVendorBlockBytes = 88;
     static constexpr size_t kPeakCount = 38;
     static constexpr size_t kRotaryCount = 3;
 
@@ -151,7 +160,11 @@ struct MAudioSpecialMeterState final {
 [[nodiscard]] constexpr bool DecodeMAudioSpecialMeter(
     std::span<const uint8_t> payload, MAudioSpecialMeterState& inOut,
     MAudio1814RotaryDelta* outDeltas = nullptr) noexcept {
-    if (payload.size() != MAudioSpecialMeterState::kBlockBytes) return false;
+    // Accept either size: the decoder only ever reads the first 84 bytes.
+    if (payload.size() != MAudioSpecialMeterState::kBlockBytes &&
+        payload.size() != MAudioSpecialMeterState::kVendorBlockBytes) {
+        return false;
+    }
     if (outDeltas) *outDeltas = {};
 
     for (size_t i = 0; i < inOut.peaks.size(); ++i) {

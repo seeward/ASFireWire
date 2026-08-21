@@ -148,6 +148,14 @@ private:
     /// Issues one pending knob-driven quadlet write, if the single-writer slot
     /// is free. Re-entered from each write completion until the mask drains.
     void FlushPendingParameterWrites() noexcept;
+
+    /// Mirrors the front-panel switch onto the front-panel LED.
+    ///
+    /// The lamp is not autonomous either: the device reports the button and the
+    /// host decides what the LED shows. The ALSA runtime does exactly this and
+    /// nothing else with it — on a change of the polled switch bit, send the new
+    /// state (runtime/bebob/src/maudio/special_model.rs:159-163).
+    void SendLedState(bool illuminated) noexcept;
     void ScheduleMeterRead(uint64_t delayNs, uint64_t epoch) noexcept;
     void PollMeter(uint64_t epoch) noexcept;
     void CompleteMeterRead(uint64_t epoch, Discovery::DeviceRouteToken issuedRoute,
@@ -196,6 +204,10 @@ private:
     bool meterEnabled_{false};
     bool meterReadInFlight_{false};
     uint64_t meterReadEpoch_{0};
+    /// Last switch state we lit the LED for. Starts unset so the first confirmed
+    /// block establishes the lamp rather than assuming it powered up dark.
+    bool ledState_{false};
+    bool ledStateKnown_{false};
 };
 
 } // namespace ASFW::Audio::BeBoB

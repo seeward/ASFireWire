@@ -222,6 +222,9 @@ IOReturn MAudioSpecialProtocol::SetAudioMeteringEnabled(bool enabled) noexcept {
         // The encoders integrate detents; a gap in polling loses turns, so the
         // next enable starts a fresh run rather than continuing a stale total.
         meterState_.hasPreviousEvents = false;
+        // Re-establish the lamp on the next enable rather than trusting a
+        // belief formed before the gap.
+        ledStateKnown_ = false;
         ++meterRevision_;
     }
     IOLockUnlock(meterLock_);
@@ -294,7 +297,12 @@ void MAudioSpecialProtocol::PollMeter(uint64_t epoch) noexcept {
 void MAudioSpecialProtocol::CompleteMeterRead(
     uint64_t epoch, Discovery::DeviceRouteToken issuedRoute,
     Async::AsyncStatus status, std::span<const uint8_t> payload) noexcept {
-    constexpr uint64_t kPollNs = 50ULL * 1000ULL * 1000ULL;
+    // 50 Hz. The block is an 84-byte async read, so the bus cost is trivial, and
+    // anything slower aliases against the client's own poll: two independent
+    // timers at the same period means the client repeatedly sees the same
+    // revision and then skips one, which reads as stutter rather than as a slow
+    // meter. Sampling faster than the reader is what removes that.
+    constexpr uint64_t kPollNs = 20ULL * 1000ULL * 1000ULL;
     constexpr uint64_t kRetryNs = 1000ULL * 1000ULL * 1000ULL;
     bool accepted = false;
     bool decoded = false;
@@ -302,6 +310,8 @@ void MAudioSpecialProtocol::CompleteMeterRead(
     uint32_t detectedRateHz = 0;
     bool clockLocked = false;
     bool externalSync = false;
+    bool switchChanged = false;
+    bool switchState = false;
     MAudio1814RotaryDelta rotaryDeltas{};
     uint64_t nextDelayNs = kRetryNs;
 
@@ -320,6 +330,10 @@ void MAudioSpecialProtocol::CompleteMeterRead(
         const bool previousLocked = meterState_.clockLocked;
         const bool previousExternal = meterState_.externalSync;
         if (DecodeMAudioSpecialMeter(payload, meterState_, &rotaryDeltas)) {
+            switchState = meterState_.hardwareSwitch;
+            switchChanged = !ledStateKnown_ || ledState_ != switchState;
+            ledState_ = switchState;
+            ledStateKnown_ = true;
             clockStateChanged = meterRevision_ == 0 ||
                 previousRateHz != meterState_.detectedSampleRateHz ||
                 previousLocked != meterState_.clockLocked ||
@@ -341,6 +355,9 @@ void MAudioSpecialProtocol::CompleteMeterRead(
         // async write.
         if (rotaryDeltas.Any()) {
             ApplyRotaryDetents(rotaryDeltas);
+        }
+        if (switchChanged) {
+            SendLedState(switchState);
         }
         // Also drain unconditionally. A knob write that failed re-armed its
         // quadlet and has nobody else to retry it; the poll is the one thing
@@ -692,6 +709,28 @@ void MAudioSpecialProtocol::ReadClockHealth(HealthCallback callback) {
                                 .sourceLocked = inputConnected_ && outputConnected_,
                                 .clockReferenceHealthy = true,
                                 .nominalRateHz = currentRateHz_});
+}
+
+void MAudioSpecialProtocol::SendLedState(bool illuminated) noexcept {
+    if (!fcpTransport_) return;
+
+    const auto frame = BuildMAudioLedCommand(illuminated);
+    Protocols::AVC::FCPFrame command{};
+    command.length = frame.size();
+    std::memcpy(command.data.data(), frame.data(), frame.size());
+
+    ASFW_LOG(Audio, "[MAudioControl] front-panel LED -> %{public}s",
+             illuminated ? "on" : "off");
+    // Fire and forget. A refused or lost LED write is cosmetic, and the next
+    // press re-sends it; failing a meter poll over a lamp would be worse than
+    // the lamp being wrong.
+    (void)fcpTransport_->SubmitCommand(
+        command, [](Protocols::AVC::FCPStatus status, const Protocols::AVC::FCPFrame&) {
+            if (status != Protocols::AVC::FCPStatus::kOk) {
+                ASFW_LOG_ERROR(Audio, "[MAudioControl] LED write failed status=%u",
+                               static_cast<unsigned>(status));
+            }
+        });
 }
 
 void MAudioSpecialProtocol::ApplyRotaryDetents(

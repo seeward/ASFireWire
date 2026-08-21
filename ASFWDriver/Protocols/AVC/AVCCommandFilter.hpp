@@ -117,8 +117,7 @@ consteval FCPPermittedFrame Row(const char* name,
 /// format commands (0x2F with 0xC0/0xC1) — the four shapes AVC_DEVICE_HAZARDS.md
 /// H1 records as freeze-capable on this firmware.
 ///
-/// Rows arrive with their caller, not ahead of it. H1's remaining safe entry —
-/// the `03 00 01` LED command — is deliberately absent because nothing sends it.
+/// Rows arrive with their caller, not ahead of it.
 inline constexpr std::array kMAudioSpecialPermittedFrames{
     // STATUS, unit, INPUT PLUG SIGNAL FORMAT, plug id free, FMT pinned to
     // AM824 (0x90) because the device must echo it back, FDF is the answer.
@@ -180,6 +179,18 @@ inline constexpr std::array kMAudioSpecialPermittedFrames{
                  0x02, 0x00, 0x01, 0x00, 0x00, 0x00},
                 {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
                  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}),
+    // Front-panel LED. Vendor-dependent like the clock command and pinned the
+    // same way: bytes 3..5 are the company ID and are the entire boundary
+    // separating it from the BridgeCo extensions that freeze this firmware.
+    // Only operand 0 is free, and it is a boolean.
+    //
+    //   vendor kext AVCControlSetLEDStatus @ 0xdaaa — OUI 03 00 01, 8 bytes
+    //   references/alsa-userspace-control-protocols-impl/protocols/bebob/src/maudio/special.rs:121-167
+    //     MaudioSpecialLedSwitch, same OUI, sent by the ALSA runtime whenever
+    //     the polled switch bit changes
+    detail::Row("M-Audio LED",
+                {0x00, 0xFF, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00},
+                {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF}),
 };
 
 /// Resolves a filter id to its table. `Unrestricted` yields an empty span.
