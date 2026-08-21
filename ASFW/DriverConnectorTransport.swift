@@ -13,7 +13,8 @@ final class DriverConnectorTransport {
     /// 4096, diagnostics, self-ID 1024, driver version 280) and every request
     /// above it returned empty while the driver logged correct data — discovery
     /// 16384 (driver sent 394 bytes for one device), AV/C units 16384 (84 bytes),
-    /// audio telemetry 8192 (no endpoints during live playback).
+    /// and the former fixed-size 5,520-byte audio-telemetry snapshot. Audio
+    /// telemetry now serializes only its declared endpoint records.
     static let maxInlineStructOutputBytes = 4096
 
     typealias ConnectionProvider = () -> io_connect_t

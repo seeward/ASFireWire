@@ -22,6 +22,12 @@ constexpr uint32_t kAudioTelemetryMaxEndpoints = 8;
 constexpr uint16_t kAudioTelemetryHeaderBytes = 16;
 constexpr uint16_t kAudioTelemetryEndpointBytes = 688;
 
+[[nodiscard]] constexpr uint32_t AudioTelemetryWireByteSize(
+    uint32_t endpointCount) noexcept {
+    return kAudioTelemetryHeaderBytes +
+           endpointCount * static_cast<uint32_t>(kAudioTelemetryEndpointBytes);
+}
+
 enum AudioTelemetryFlags : uint32_t {
     kAudioTelemetryBindingReady = 1U << 0,
     kAudioTelemetryStreaming = 1U << 1,
@@ -158,8 +164,11 @@ static_assert(offsetof(AudioTelemetryEndpointSnapshot, rxEmptyCompletions) ==
 struct AudioTelemetrySnapshot final {
     uint16_t version{kAudioTelemetryWireVersion};
     uint16_t headerSize{kAudioTelemetryHeaderBytes};
-    uint32_t byteSize{kAudioTelemetryHeaderBytes +
-                      kAudioTelemetryMaxEndpoints * kAudioTelemetryEndpointBytes};
+    // Only endpointCount records are serialized. Sending the fixed eight-record
+    // backing array is 5,520 bytes and exceeds IOConnectCallStructMethod's
+    // 4 KiB inline reply limit, which makes a healthy one-endpoint stream look
+    // like an empty telemetry snapshot in the app.
+    uint32_t byteSize{AudioTelemetryWireByteSize(0)};
     uint32_t endpointCount{0};
     uint32_t endpointRecordSize{kAudioTelemetryEndpointBytes};
     std::array<AudioTelemetryEndpointSnapshot, kAudioTelemetryMaxEndpoints> endpoints{};

@@ -239,7 +239,12 @@ kern_return_t DiagnosticsHandler::GetAudioTelemetry(
 
     ASFW::Audio::Runtime::AudioTelemetrySnapshot snapshot{};
     (void)runtime->CopyAudioTelemetrySnapshots(snapshot);
-    OSData* data = OSData::withBytes(&snapshot, sizeof(snapshot));
+    const size_t byteSize = snapshot.byteSize;
+    if (byteSize < ASFW::Audio::Runtime::kAudioTelemetryHeaderBytes ||
+        byteSize > sizeof(snapshot)) {
+        return kIOReturnInternalError;
+    }
+    OSData* data = OSData::withBytes(&snapshot, byteSize);
     if (!data) {
         return kIOReturnNoMemory;
     }

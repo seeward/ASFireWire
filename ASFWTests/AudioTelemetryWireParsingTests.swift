@@ -13,7 +13,7 @@ struct AudioTelemetryWireParsingTests {
     private func fixture(version: UInt16 = 5) -> Data {
         let headerBytes = 16
         let endpointBytes = 688
-        var wire = Data(repeating: 0, count: headerBytes + 8 * endpointBytes)
+        var wire = Data(repeating: 0, count: headerBytes + 2 * endpointBytes)
         setLE(version, at: 0, in: &wire)
         setLE(UInt16(headerBytes), at: 2, in: &wire)
         setLE(UInt32(wire.count), at: 4, in: &wire)
@@ -53,9 +53,24 @@ struct AudioTelemetryWireParsingTests {
         #expect(snapshot.endpoints[1].inputChannels == 8)
     }
 
+    @Test func decodesAnEmptyInlineSnapshot() throws {
+        var wire = Data(repeating: 0, count: 16)
+        setLE(UInt16(5), at: 0, in: &wire)
+        setLE(UInt16(16), at: 2, in: &wire)
+        setLE(UInt32(wire.count), at: 4, in: &wire)
+        setLE(UInt32(0), at: 8, in: &wire)
+        setLE(UInt32(688), at: 12, in: &wire)
+
+        let snapshot = try #require(AudioTelemetryWireDecoder.decode(wire))
+        #expect(snapshot.endpoints.isEmpty)
+    }
+
     @Test func rejectsUnknownVersionTruncationAndInvalidStrongIdentity() {
         #expect(AudioTelemetryWireDecoder.decode(fixture(version: 4)) == nil)
         #expect(AudioTelemetryWireDecoder.decode(Data(fixture().dropLast())) == nil)
+        var trailing = fixture()
+        trailing.append(0)
+        #expect(AudioTelemetryWireDecoder.decode(trailing) == nil)
         var invalid = fixture()
         setLE(UInt64(0), at: 16 + 16, in: &invalid)
         #expect(AudioTelemetryWireDecoder.decode(invalid) == nil)

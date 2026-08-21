@@ -94,6 +94,7 @@ uint32_t AudioRuntimeRegistry::CopyAudioTelemetrySnapshots(
             ++out.endpointCount;
         }
     }
+    out.byteSize = Runtime::AudioTelemetryWireByteSize(out.endpointCount);
     return out.endpointCount;
 }
 

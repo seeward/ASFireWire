@@ -141,20 +141,24 @@ enum AudioTelemetryWireDecoder {
     private static let headerBytes = 16
     private static let endpointBytes = 688
     private static let maximumEndpoints = 8
-    private static let snapshotBytes = headerBytes + maximumEndpoints * endpointBytes
 
     static func decode(_ data: Data) -> AudioTelemetrySnapshot? {
-        guard data.count == snapshotBytes,
+        guard data.count >= headerBytes,
               let wireVersion: UInt16 = data.readInteger(at: 0),
               wireVersion == version,
               let encodedHeaderBytes: UInt16 = data.readInteger(at: 2),
               encodedHeaderBytes == UInt16(headerBytes),
-              let encodedByteSize: UInt32 = data.readInteger(at: 4),
-              encodedByteSize == UInt32(data.count),
               let endpointCount: UInt32 = data.readInteger(at: 8),
               let encodedEndpointBytes: UInt32 = data.readInteger(at: 12),
               encodedEndpointBytes == UInt32(endpointBytes),
               endpointCount <= maximumEndpoints else {
+            return nil
+        }
+
+        let expectedByteSize = headerBytes + Int(endpointCount) * endpointBytes
+        guard let encodedByteSize: UInt32 = data.readInteger(at: 4),
+              encodedByteSize == UInt32(expectedByteSize),
+              data.count == expectedByteSize else {
             return nil
         }
 
