@@ -149,6 +149,31 @@ private:
     /// is free. Re-entered from each write completion until the mask drains.
     void FlushPendingParameterWrites() noexcept;
 
+    /// TODO(1814 A/B switch): the momentary switch currently drives nothing but
+    /// the lamp below, so pressing it changes a light and nothing else. In the
+    /// vendor driver it is a monitor A/B for **headphone pair 1 only**:
+    ///
+    ///   - `MomentarySwitchPressed` @ 0x1e54c toggles a mode between 0 and 1,
+    ///     re-sends the routing, then updates the LED.
+    ///   - `SendMixerSettingsForCurrentMomentaryMode` @ 0x1e36a reads
+    ///     `MAMomentarySwitchRoutings[mode]` and hands it to
+    ///     `SubmitHeadphoneSourceChange` @ 0x1e2e2, which writes the headphone
+    ///     selector for pair index 0. Pair 2 is independent
+    ///     (`SetHeadphoneSecondSource` @ 0x1ddfe).
+    ///   - `SourceMaskToHeadphoneSelector` @ 0x1dda0 is the index of the lowest
+    ///     set bit, and `ResetToFactorySettings` @ 0x1df88 seeds the routings to
+    ///     `[1, 2, 3, 4]`. So the factory A/B is **Mixer 1 <-> Mixer 2**, with
+    ///     entry 3 (value 4 -> selector 2) reaching Aux if reassigned.
+    ///
+    /// It needs no new device surface: the target is register 0x98, which the
+    /// headphone-source control already writes. The two presets are host state,
+    /// like mute/solo/ctrl.
+    ///
+    /// **Do not implement the other branch** of
+    /// `SendMixerSettingsForCurrentMomentaryMode`. It is gated on a config flag
+    /// we do not model and manipulates a vendor `MAInputRoutingV2` property with
+    /// unexplained bit twiddling (`| 0x12`); it has no analogue in our topology.
+    ///
     /// Mirrors the front-panel switch onto the front-panel LED.
     ///
     /// The lamp is not autonomous either: the device reports the button and the
