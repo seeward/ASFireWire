@@ -23,8 +23,11 @@ final class DiagnosticsStore: ObservableObject {
         self.connector = connector
         self.client = ASFWDiagnosticsClient(connector: connector)
         
-        // Refresh diagnostics when driver connects
+        // A status pulse is not a diagnostics invalidation. In particular,
+        // async activity and the 1 kHz watchdog must never recursively issue
+        // the full diagnostics selector bundle.
         statusCancellable = connector.statusPublisher
+            .filter { $0.reason.invalidatesControllerSnapshot }
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.refresh()

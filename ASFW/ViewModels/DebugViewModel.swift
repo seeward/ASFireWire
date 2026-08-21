@@ -36,6 +36,7 @@ class DebugViewModel: ObservableObject {
                     self?.sharedStatus = nil
                 } else {
                     self?.fetchDriverVersion()
+                    self?.fetchLatestSnapshots()
                 }
             }
             .store(in: &cancellables)
@@ -95,7 +96,9 @@ class DebugViewModel: ObservableObject {
 
     private func handleStatusUpdate(_ status: DriverStatus) {
         sharedStatus = status
-        fetchLatestSnapshots()
+        if status.reason.invalidatesControllerSnapshot {
+            fetchLatestSnapshots()
+        }
     }
 
     func dumpDebugSnapshot() {

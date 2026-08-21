@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 #include "ASFWDiagnosticsABI.h"
+#include "Diagnostics/StatusNotificationPolicy.hpp"
 #include "UserClient/WireFormats/DiagnosticsWireEnvelope.hpp"
 #include <cstddef>
 
@@ -122,4 +123,18 @@ TEST_F(DiagnosticsServiceTests, ValidResponseRetainsSnapshotHeader) {
     EXPECT_EQ(phy.header.timestampNs, 42u);
     EXPECT_EQ(phy.header.generation, 7u);
     EXPECT_EQ(phy.header.snapshotSeq, 13u);
+}
+
+TEST_F(DiagnosticsServiceTests, StatusNotificationsOnlyWakeForInvalidations) {
+    using ASFW::Driver::SharedStatusReason;
+    using ASFW::Driver::ShouldNotifyStatusListener;
+
+    EXPECT_TRUE(ShouldNotifyStatusListener(SharedStatusReason::Boot));
+    EXPECT_TRUE(ShouldNotifyStatusListener(SharedStatusReason::BusReset));
+    EXPECT_TRUE(ShouldNotifyStatusListener(SharedStatusReason::Manual));
+    EXPECT_TRUE(ShouldNotifyStatusListener(SharedStatusReason::Disconnect));
+
+    EXPECT_FALSE(ShouldNotifyStatusListener(SharedStatusReason::Interrupt));
+    EXPECT_FALSE(ShouldNotifyStatusListener(SharedStatusReason::AsyncActivity));
+    EXPECT_FALSE(ShouldNotifyStatusListener(SharedStatusReason::Watchdog));
 }

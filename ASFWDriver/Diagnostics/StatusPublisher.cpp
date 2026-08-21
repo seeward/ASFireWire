@@ -1,4 +1,5 @@
 #include "StatusPublisher.hpp"
+#include "StatusNotificationPolicy.hpp"
 
 #include <string>
 
@@ -131,7 +132,7 @@ void StatusPublisher::Publish(ControllerCore* controller,
     std::memcpy(statusBlock_, &snapshot, sizeof(SharedStatusBlock));
     std::atomic_thread_fence(std::memory_order_release);
 
-    if (statusListener_) {
+    if (statusListener_ && ShouldNotifyStatusListener(reason)) {
         if (auto* client = OSDynamicCast(ASFWDriverUserClient, statusListener_.get())) {
             client->NotifyStatus(snapshot.sequence, snapshot.reason);
         }

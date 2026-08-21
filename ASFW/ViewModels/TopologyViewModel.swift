@@ -8,6 +8,7 @@
 import Foundation
 import Combine
 
+@MainActor
 class TopologyViewModel: ObservableObject {
     @Published var selfIDCapture: SelfIDCapture?
     @Published var topology: TopologySnapshot?
@@ -19,15 +20,12 @@ class TopologyViewModel: ObservableObject {
     
     init(connector: ASFWDriverConnector) {
         self.connector = connector
-        statusCancellable = connector.statusPublisher
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.refresh()
-            }
     }
     
     func startAutoRefresh(interval: TimeInterval = 1.0) {
+        guard statusCancellable == nil else { return }
         statusCancellable = connector.statusPublisher
+            .filter { $0.reason.invalidatesControllerSnapshot }
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.refresh()
@@ -41,7 +39,6 @@ class TopologyViewModel: ObservableObject {
     
     func refresh() {
         guard !isLoading else { 
-            print("[TopologyVM] 🔄 Refresh already in progress, skipping")
             return 
         }
         print("[TopologyVM] 🔍 Starting refresh...")
