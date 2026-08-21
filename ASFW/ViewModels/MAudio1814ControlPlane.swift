@@ -27,6 +27,11 @@ final class MAudio1814ControlPlane: ObservableObject {
     private var watchdogTask: Task<Void, Never>?
     private var configurationSnapshotTimeoutTask: Task<Void, Never>?
     private var refreshInFlight = false
+    private var meterRefreshInFlight = false
+    private var controlsRefreshInFlight = false
+    private var nextControlsRefresh = Date.distantPast
+    private var cachedControls: AudioControlSurfaceSnapshot?
+    private var cachedMeters: AudioMeterSnapshot?
     private var cachedConfiguration: AudioConfigurationSnapshot?
     private var nextConfigurationRefresh = Date.distantPast
     private var pending: [MAudio1814ControlID: Int32] = [:]
@@ -38,6 +43,7 @@ final class MAudio1814ControlPlane: ObservableObject {
     private let minimumWriteSpacing: TimeInterval = 0.050
     private let writeTimeout: TimeInterval = 2.0
     private let configurationRefreshInterval: TimeInterval = 0.5
+    private let controlsRefreshInterval: TimeInterval = 0.25
     private let configurationSnapshotTimeout: TimeInterval = 2.0
 
     init(connector: ASFWDriverConnector) {
@@ -56,7 +62,7 @@ final class MAudio1814ControlPlane: ObservableObject {
         refresh()
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(50))
+                try? await Task.sleep(for: .milliseconds(20))
                 guard !Task.isCancelled else { return }
                 self?.refresh()
             }
@@ -75,7 +81,12 @@ final class MAudio1814ControlPlane: ObservableObject {
         pending.removeAll()
         inFlightRequestID = nil
         cachedConfiguration = nil
+        cachedControls = nil
+        cachedMeters = nil
         nextConfigurationRefresh = .distantPast
+        nextControlsRefresh = .distantPast
+        meterRefreshInFlight = false
+        controlsRefreshInFlight = false
         isWriteInFlight = false
     }
 
@@ -135,34 +146,61 @@ final class MAudio1814ControlPlane: ObservableObject {
         }
     }
 
+    /// Meters and the control surface are polled **independently**.
+    ///
+    /// They used to share one completion gate, so a snapshot was published only
+    /// once both had returned. That made the meter rate the slower of the two —
+    /// and the control surface is much the slower, because it costs an async
+    /// header reply plus a struct read. Metering is the thing that has to look
+    /// live; the control surface only changes when we write or somebody turns a
+    /// knob, so it polls at a quarter of the rate and never holds meters up.
     private func refreshLiveState(configuration: AudioConfigurationSnapshot) {
-        var controls: AudioControlSurfaceSnapshot?
-        var meters: AudioMeterSnapshot?
-        var repliesRemaining = 2
-        func receivedReply() {
-            repliesRemaining -= 1
-            guard repliesRemaining == 0 else { return }
-            self.refreshInFlight = false
-            guard let controls else {
-                self.latest = nil
-                self.status = "FireWire 1814 control surface is not ready."
-                return
-            }
-            let snapshot = MAudio1814ControlPlaneSnapshot(
-                configuration: configuration, controls: controls, meters: meters)
-            self.latest = snapshot
-            if !self.isWriteInFlight, self.pending.isEmpty {
-                self.status = "Confirmed: \(configuration.committed.sampleRateHz.formatted()) Hz · \(configuration.committed.inputChannels) in / \(configuration.committed.outputChannels) out"
+        refreshInFlight = false
+
+        if !meterRefreshInFlight {
+            meterRefreshInFlight = true
+            connector.requestAudioMeterSnapshotAsync(endpointID: configuration.endpointID) {
+                [weak self] meters in
+                guard let self else { return }
+                self.meterRefreshInFlight = false
+                if let meters { self.cachedMeters = meters }
+                self.publish(configuration: configuration)
             }
         }
+
+        guard !controlsRefreshInFlight, Date() >= nextControlsRefresh else { return }
+        controlsRefreshInFlight = true
         connector.requestAudioControlSurfaceSnapshotAsync(endpointID: configuration.endpointID) {
-            controls = $0
-            receivedReply()
+            [weak self] controls in
+            guard let self else { return }
+            self.controlsRefreshInFlight = false
+            self.nextControlsRefresh = Date().addingTimeInterval(self.controlsRefreshInterval)
+            if let controls { self.cachedControls = controls }
+            self.publish(configuration: configuration)
         }
-        connector.requestAudioMeterSnapshotAsync(endpointID: configuration.endpointID) {
-            meters = $0
-            receivedReply()
+    }
+
+    /// Publishes whatever is currently known. Meters may be absent; the control
+    /// surface may not, because every fader position comes from it.
+    private func publish(configuration: AudioConfigurationSnapshot) {
+        guard let controls = cachedControls else {
+            if !controlsRefreshInFlight {
+                self.status = "FireWire 1814 control surface is not ready."
+            }
+            return
         }
+        latest = MAudio1814ControlPlaneSnapshot(
+            configuration: configuration, controls: controls, meters: cachedMeters)
+        if !isWriteInFlight, pending.isEmpty {
+            status = "Confirmed: \(configuration.committed.sampleRateHz.formatted()) Hz · \(configuration.committed.inputChannels) in / \(configuration.committed.outputChannels) out"
+        }
+    }
+
+    /// Pulls the control surface on the next tick instead of waiting out the
+    /// slow cadence — used after a write, when the confirmed value is the whole
+    /// point of the next poll.
+    private func invalidateControlsCache() {
+        nextControlsRefresh = .distantPast
     }
 
     private func schedulePump() {
@@ -211,6 +249,7 @@ final class MAudio1814ControlPlane: ObservableObject {
         status = result == KERN_SUCCESS
             ? "Hardware write confirmed."
             : "Hardware write failed: \(connector.interpretIOReturn(result))"
+        invalidateControlsCache()
         refresh()
         schedulePump()
     }

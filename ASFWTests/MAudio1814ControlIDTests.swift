@@ -77,17 +77,13 @@ struct MAudio1814ControlIDTests {
         #expect(MAudio1814ControlID(.physicalMixerSendMask).label == "Physical mixer sends")
     }
 
-    /// Width drives the pair's two balance registers in opposition, so full
-    /// width has to reproduce the vendor's ±32640 factory default exactly.
-    @Test func fullWidthReproducesTheVendorHardPanDefault() {
-        #expect(MAudio1814TopologyProjector.rawWidth(percent: 100, channel: 0) == 32_640)
-        #expect(MAudio1814TopologyProjector.rawWidth(percent: 100, channel: 1) == -32_640)
-        #expect(MAudio1814TopologyProjector.rawWidth(percent: 0, channel: 0) == 0)
-        #expect(MAudio1814TopologyProjector.rawWidth(percent: 0, channel: 1) == 0)
-    }
-
-    @Test func unityLevelIsZeroAndSilenceIsTheMinimum() {
-        #expect(MAudio1814TopologyProjector.rawLevel(percent: 100) == 0)
-        #expect(MAudio1814TopologyProjector.rawLevel(percent: 0) == -32_768)
+    /// Level and pan encoding live in `MAudio1814Level` and are covered by
+    /// `MAudio1814LevelTests`; what belongs here is that the control *domains*
+    /// agree with it.
+    @Test func controlDomainsMatchTheLevelScale() {
+        #expect(MAudio1814ControlID.levelMin == MAudio1814Level.rawMinimum)
+        #expect(MAudio1814ControlID.levelMax == MAudio1814Level.rawMaximum)
+        #expect(MAudio1814ControlID(.mixerAnalogBalance, 0).valueRange
+            .contains(MAudio1814Level.panExtent))
     }
 }

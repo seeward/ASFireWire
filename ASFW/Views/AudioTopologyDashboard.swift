@@ -1,8 +1,11 @@
 import SwiftUI
 
-/// Generic console and patchbay presentation for a confirmed audio topology.
-/// Device-specific code supplies an `AudioTopologySnapshot` and command
-/// closures; this view deliberately has no knowledge of M-Audio.
+/// Console presentation for a confirmed audio topology.
+///
+/// One vertically scrolling page with one horizontally scrolling rack. There is
+/// deliberately no tab bar and no separate patchbay: every source selector now
+/// sits on the strip it belongs to, which is where you are already looking when
+/// you want to change it.
 struct AudioTopologyDashboard: View {
     let topology: AudioTopologySnapshot
     let configuration: AudioConfigurationSnapshot
@@ -14,15 +17,12 @@ struct AudioTopologyDashboard: View {
     @Binding var selectedOutputOptical: AudioOpticalMode
     let supportedRates: [UInt32]
     let applyConfiguration: () -> Void
-    let setLevel: ([MAudio1814ControlID], Double) -> Void
-    let setWidth: ([MAudio1814ControlID], Double) -> Void
-    let setSend: (AudioTopologySend, Bool) -> Void
-    let setRoute: (MAudio1814ControlID, Int32) -> Void
     let setMeteringEnabled: (Bool) -> Void
+    let viewModel: MAudio1814ConfigurationViewModel
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 18) {
                 AudioTopologyHeader(configuration: configuration, meters: meters)
                 AudioTopologyWaist(
                     configuration: configuration,
@@ -34,8 +34,7 @@ struct AudioTopologyDashboard: View {
                     apply: applyConfiguration)
                 AudioTopologyConsoleRack(
                     topology: topology, meters: meters,
-                    setLevel: setLevel, setWidth: setWidth, setSend: setSend)
-                AudioTopologyPatchbay(topology: topology, setRoute: setRoute)
+                    peakHold: viewModel.peakHold, viewModel: viewModel)
                 AudioTopologyTelemetry(meters: meters, setEnabled: setMeteringEnabled)
                 Text(statusText)
                     .font(.caption.monospaced())

@@ -21,11 +21,8 @@ struct MAudio1814ConfigurationView: View {
                     selectedOutputOptical: $viewModel.selectedOutputOptical,
                     supportedRates: viewModel.supportedRates,
                     applyConfiguration: viewModel.apply,
-                    setLevel: viewModel.setTopologyLevel,
-                    setWidth: viewModel.setTopologyWidth,
-                    setSend: viewModel.setTopologySend,
-                    setRoute: viewModel.applyMixerControl,
-                    setMeteringEnabled: viewModel.setMeteringEnabled)
+                    setMeteringEnabled: viewModel.setMeteringEnabled,
+                    viewModel: viewModel)
             } else {
                 ContentUnavailableView(
                     "No FireWire 1814 configuration available",

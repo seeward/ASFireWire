@@ -12,6 +12,8 @@ final class MAudio1814ConfigurationViewModel: ObservableObject {
     @Published var selectedOutputOptical: AudioOpticalMode = .spdif
     @Published private(set) var statusText = "Looking for a FireWire 1814…"
     @Published private(set) var isApplying = false
+    @Published private(set) var console = MAudio1814ConsoleState()
+    @Published private(set) var peakHold = AudioMeterPeakHold()
 
     private let connector: ASFWDriverConnector
     let controlPlane: MAudio1814ControlPlane
@@ -29,6 +31,15 @@ final class MAudio1814ConfigurationViewModel: ObservableObject {
                 snapshot = state.configuration
                 mixerSnapshot = state.controls
                 meterSnapshot = state.meters
+                if let topology { console.reconcile(with: topology) }
+                // A nil or disabled snapshot means no new samples are arriving.
+                // Without this the bars would freeze at their last value and
+                // read as live signal that is not there any more.
+                if let meters = state.meters, meters.isEnabled {
+                    peakHold.observe(meters)
+                } else {
+                    peakHold.reset()
+                }
                 if configurationChanged {
                     selectedRateHz = state.configuration.committed.sampleRateHz
                     selectedInputOptical = state.configuration.committed.inputOptical
@@ -104,25 +115,74 @@ final class MAudio1814ConfigurationViewModel: ObservableObject {
 
     var topology: AudioTopologySnapshot? {
         guard let snapshot, let mixerSnapshot else { return nil }
-        return MAudio1814TopologyProjector.make(
-            configuration: snapshot, controls: mixerSnapshot, meters: meterSnapshot)
+        return MAudio1814TopologyProjector.make(configuration: snapshot, controls: mixerSnapshot)
     }
 
-    /// A console fader moves a whole stereo pair. The device's registers are
-    /// per-channel, so this submits one intent per channel; the control plane
-    /// keeps only the latest per control and paces the writes.
-    func setTopologyLevel(_ controls: [MAudio1814ControlID], percent: Double) {
-        let raw = MAudio1814TopologyProjector.rawLevel(percent: percent)
-        for control in controls {
-            applyMixerControl(control, value: raw)
+    // MARK: - Console
+
+    func isLinked(_ strip: AudioTopologyStrip) -> Bool { console.isLinked(strip.id) }
+    func isMuted(_ strip: AudioTopologyStrip) -> Bool { console.isMuted(strip.id) }
+    func isSoloed(_ strip: AudioTopologyStrip) -> Bool { console.isSoloed(strip.id) }
+    var isSoloActive: Bool { console.isSoloActive }
+
+    func isSuppressed(_ strip: AudioTopologyStrip) -> Bool {
+        console.isSuppressed(strip.id, kind: strip.kind)
+    }
+
+    /// What a fader should show. While a strip is suppressed the device holds
+    /// silence, so the confirmed value would drag every fader to the bottom.
+    func displayedLevel(_ strip: AudioTopologyStrip,
+                        _ channel: AudioTopologyStripChannel) -> Int32 {
+        console.displayLevel(channel.levelControl, confirmed: channel.levelRaw,
+                             suppressed: isSuppressed(strip))
+    }
+
+    /// Moves one channel's fader, or both when the strip is linked.
+    func setLevel(_ strip: AudioTopologyStrip, _ channel: AudioTopologyStripChannel,
+                  position: Double) {
+        let raw = MAudio1814Level.raw(position: position)
+        let targets = console.isLinked(strip.id) ? strip.channels : [channel]
+        let suppressed = console.isSuppressed(strip.id, kind: strip.kind)
+        for target in targets {
+            console.setIntendedLevel(target.levelControl, raw)
+            if !suppressed {
+                applyMixerControl(target.levelControl, value: raw)
+            }
         }
     }
 
-    /// Width drives the pair's two balance registers in opposition.
-    func setTopologyWidth(_ controls: [MAudio1814ControlID], percent: Double) {
-        for (index, control) in controls.enumerated() {
-            applyMixerControl(
-                control, value: MAudio1814TopologyProjector.rawWidth(percent: percent, channel: index))
+    func setPan(_ strip: AudioTopologyStrip, _ channel: AudioTopologyStripChannel,
+                position: Double) {
+        guard let control = channel.panControl else { return }
+        applyMixerControl(control, value: MAudio1814Level.rawPan(position: position))
+    }
+
+    /// Aux sends stay per-channel even when the fader pair is linked: the aux
+    /// bus is a separate mix and ganging it would remove the point of having it.
+    func setAux(_ channel: AudioTopologyStripChannel, position: Double) {
+        guard let control = channel.auxControl else { return }
+        applyMixerControl(control, value: MAudio1814Level.raw(position: position))
+    }
+
+    func toggleLink(_ strip: AudioTopologyStrip) { console.toggleLink(strip.id) }
+
+    func toggleMute(_ strip: AudioTopologyStrip) {
+        console.toggleMute(strip.id)
+        flushConsoleLevels()
+    }
+
+    func toggleSolo(_ strip: AudioTopologyStrip) {
+        console.toggleSolo(strip.id)
+        flushConsoleLevels()
+    }
+
+    /// Writes every level the current mute/solo state implies. Only controls
+    /// that actually differ are submitted, so an unmute of one strip does not
+    /// re-send the whole console.
+    private func flushConsoleLevels() {
+        guard let topology else { return }
+        for (control, value) in console.pendingLevelWrites(for: topology) {
+            applyMixerControl(control, value: value)
         }
     }
 

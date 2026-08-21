@@ -4,39 +4,55 @@ import Foundation
 ///
 /// A protocol family translates its confirmed hardware state into this model;
 /// the views never receive register offsets or family-specific parameter
-/// windows.  This is deliberately the same boundary as the lab's semantic
-/// topology → generic presenter split, pared down to the controls the real
-/// 1814 backend currently implements.
+/// windows.
+///
+/// The unit here is the **channel**, not the pair. The device's registers are
+/// per-channel and the vendor's own console exposes them that way — two faders,
+/// two pans, two aux sends per strip, with a link button to gang them. Folding a
+/// pair behind one fader loses the balance the hardware can actually do.
 struct AudioTopologySnapshot {
     let revision: UInt32
-    let channels: [AudioTopologyChannel]
-    let outputMasters: [AudioTopologyOutputMaster]
+    let strips: [AudioTopologyStrip]
     let routes: [AudioTopologyRoute]
 }
 
-struct AudioTopologyChannel: Identifiable {
-    let id: String
-    let name: String
-    let kind: AudioTopologyChannelKind
-    let sendControls: [AudioTopologySend]
-    let meterPair: Int?
-    /// Gain into the main mixer. Both channels of the pair, written together.
-    let gainControls: [MAudio1814ControlID]
-    let gain: Double
-    /// Gain into the aux bus, which is what the headphones hear when their
-    /// source is Aux.
-    let auxControls: [MAudio1814ControlID]
-    let auxSend: Double
-    /// Stereo spread. The pair's two balance registers move in opposition, so
-    /// 100% is the hard-panned factory default and 0% collapses it to mono.
-    /// Empty for playback pairs — the device has no balance register for them.
-    let widthControls: [MAudio1814ControlID]
-    let width: Double
+enum AudioTopologyStripKind {
+    case physicalInput
+    case playback
+    case output
+    case aux
+    case headphone
+
+    var isInput: Bool { self == .physicalInput || self == .playback }
 }
 
-enum AudioTopologyChannelKind {
-    case physical
-    case playback
+struct AudioTopologyStrip: Identifiable {
+    let id: String
+    let name: String
+    let kind: AudioTopologyStripKind
+    let channels: [AudioTopologyStripChannel]
+    /// Mixer destination buttons — the vendor labels these "out 1/2" and "3/4".
+    let sends: [AudioTopologySend]
+    /// Source selector shown on the strip itself, as the vendor puts "mon"
+    /// under the headphone faders rather than in a separate patchbay.
+    let source: AudioTopologyRoute?
+}
+
+struct AudioTopologyStripChannel: Identifiable {
+    let id: String
+    /// "L" / "R", or the channel number for a mono strip.
+    let label: String
+    let levelControl: MAudio1814ControlID
+    let levelRaw: Int32
+    /// Pan into the main mixer. Absent for playback and output strips, which
+    /// have no balance register.
+    let panControl: MAudio1814ControlID?
+    let panRaw: Int32
+    /// Send into the aux bus. Absent on output strips.
+    let auxControl: MAudio1814ControlID?
+    let auxRaw: Int32
+    /// Index into the 38-point peak block.
+    let meterIndex: Int?
 }
 
 struct AudioTopologySend: Identifiable {
@@ -45,14 +61,6 @@ struct AudioTopologySend: Identifiable {
     let control: MAudio1814ControlID
     let mask: UInt32
     let isEnabled: Bool
-}
-
-struct AudioTopologyOutputMaster: Identifiable {
-    let id: String
-    let name: String
-    let levelControls: [MAudio1814ControlID]
-    let level: Double
-    let meterPair: Int?
 }
 
 struct AudioTopologyRoute: Identifiable {
@@ -71,176 +79,171 @@ struct AudioTopologyRouteChoice: Identifiable {
 
 enum MAudio1814TopologyProjector {
     static func make(configuration: AudioConfigurationSnapshot,
-                     controls: AudioControlSurfaceSnapshot,
-                     meters: AudioMeterSnapshot?) -> AudioTopologySnapshot {
+                     controls: AudioControlSurfaceSnapshot) -> AudioTopologySnapshot {
         let opticalIsADAT = configuration.committed.inputOptical == .adat
-        let physicalPairCount = opticalIsADAT ? 8 : 5
 
-        var channels = (0..<physicalPairCount).map { pair -> AudioTopologyChannel in
-            let name: String
-            let meterPair: Int
-            let mask: UInt32
-            // Which register group and which pair within it. The device keeps
-            // analog, S/PDIF and ADAT in separate ranges, so the console's flat
-            // pair index has to be resolved back to one of them.
-            let gainGroup: MAudio1814ControlGroup
-            let auxGroup: MAudio1814ControlGroup
-            let balanceGroup: MAudio1814ControlGroup
-            let pairWithinGroup: UInt32
+        var strips: [AudioTopologyStrip] = []
 
-            if pair < 4 {
-                name = "LINE IN \(pair * 2 + 1)/\(pair * 2 + 2)"
-                meterPair = pair
-                mask = UInt32(pair)
-                (gainGroup, auxGroup, balanceGroup) =
-                    (.mixerAnalogGain, .auxAnalogGain, .mixerAnalogBalance)
-                pairWithinGroup = UInt32(pair)
-            } else if opticalIsADAT {
-                let adatPair = pair - 4
-                name = "ADAT IN \(adatPair * 2 + 1)/\(adatPair * 2 + 2)"
-                meterPair = 5 + adatPair
-                mask = UInt32(8 + adatPair)
-                (gainGroup, auxGroup, balanceGroup) =
-                    (.mixerAdatGain, .auxAdatGain, .mixerAdatBalance)
-                pairWithinGroup = UInt32(adatPair)
-            } else {
-                name = "S/PDIF IN 1/2"
-                meterPair = 4
-                mask = 16
-                (gainGroup, auxGroup, balanceGroup) =
-                    (.mixerSpdifGain, .auxSpdifGain, .mixerSpdifBalance)
-                pairWithinGroup = 0
-            }
-
-            let gains = pairControls(gainGroup, pairWithinGroup)
-            let auxes = pairControls(auxGroup, pairWithinGroup)
-            let balances = pairControls(balanceGroup, pairWithinGroup)
-            return AudioTopologyChannel(
-                id: "physical-\(pair)", name: name, kind: .physical,
-                sendControls: physicalSends(mask: mask, controls: controls),
-                meterPair: meterPair,
-                gainControls: gains,
-                gain: levelPercent(controls.value(for: gains[0])),
-                auxControls: auxes,
-                auxSend: levelPercent(controls.value(for: auxes[0])),
-                widthControls: balances,
-                width: widthPercent(controls.value(for: balances[0])))
+        // Analog inputs: four pairs, always present.
+        for pair in 0..<4 {
+            strips.append(inputStrip(
+                id: "analog-\(pair)", name: "ANALOG \(pair * 2 + 1)/\(pair * 2 + 2) IN",
+                gain: .mixerAnalogGain, pan: .mixerAnalogBalance, aux: .auxAnalogGain,
+                pair: UInt32(pair), sendBit: UInt32(pair), meterFirst: pair * 2,
+                controls: controls))
         }
 
-        channels += [
-            playbackChannel(pair: 0, controls: controls),
-            playbackChannel(pair: 1, controls: controls),
-        ]
+        if opticalIsADAT {
+            for pair in 0..<4 {
+                strips.append(inputStrip(
+                    id: "adat-\(pair)", name: "ADAT \(pair * 2 + 1)/\(pair * 2 + 2) IN",
+                    gain: .mixerAdatGain, pan: .mixerAdatBalance, aux: .auxAdatGain,
+                    pair: UInt32(pair), sendBit: UInt32(8 + pair), meterFirst: 10 + pair * 2,
+                    controls: controls))
+            }
+        } else {
+            strips.append(inputStrip(
+                id: "spdif-0", name: "S/PDIF IN",
+                gain: .mixerSpdifGain, pan: .mixerSpdifBalance, aux: .auxSpdifGain,
+                pair: 0, sendBit: 16, meterFirst: 8, controls: controls))
+        }
 
-        let outputs = [
-            output("ANALOG OUT 1/2", .analogOutputVolume, 0, controls: controls, meterPair: 9),
-            output("ANALOG OUT 3/4", .analogOutputVolume, 1, controls: controls, meterPair: 10),
-            output("HEADPHONE 1/2", .headphoneVolume, 0, controls: controls, meterPair: 16),
-            output("HEADPHONE 3/4", .headphoneVolume, 1, controls: controls, meterPair: 17),
-            output("AUX OUT 1/2", .auxOutputVolume, 0, controls: controls, meterPair: 18),
-        ]
+        // Software returns. These have a mixer gain and an aux send but no
+        // balance register, which is why the vendor's "sw rtn" strips carry no
+        // pan knobs.
+        for pair in 0..<2 {
+            strips.append(playbackStrip(pair: UInt32(pair), controls: controls))
+        }
+
+        strips.append(outputStrip(
+            id: "analog-out-0", name: "1/2 OUT", kind: .output,
+            group: .analogOutputVolume, pair: 0, meterFirst: 18, controls: controls,
+            source: route("Source", MAudio1814ControlID(.analogOutputSource, 0),
+                          controls, ["Mixer 1", "Aux"])))
+        strips.append(outputStrip(
+            id: "analog-out-1", name: "3/4 OUT", kind: .output,
+            group: .analogOutputVolume, pair: 1, meterFirst: 20, controls: controls,
+            source: route("Source", MAudio1814ControlID(.analogOutputSource, 1),
+                          controls, ["Mixer 2", "Aux"])))
+        strips.append(outputStrip(
+            id: "aux-out", name: "AUX", kind: .aux,
+            group: .auxOutputVolume, pair: 0, meterFirst: 36, controls: controls,
+            source: nil))
+        strips.append(outputStrip(
+            id: "phones-0", name: "PHONES 1", kind: .headphone,
+            group: .headphoneVolume, pair: 0, meterFirst: 32, controls: controls,
+            source: route("Mon", MAudio1814ControlID(.headphoneSource, 0),
+                          controls, ["1/2", "3/4", "Aux"])))
+        strips.append(outputStrip(
+            id: "phones-1", name: "PHONES 2", kind: .headphone,
+            group: .headphoneVolume, pair: 1, meterFirst: 34, controls: controls,
+            source: route("Mon", MAudio1814ControlID(.headphoneSource, 1),
+                          controls, ["1/2", "3/4", "Aux"])))
 
         return AudioTopologySnapshot(
-            revision: max(configuration.committed.sampleRateHz, controls.revision),
-            channels: channels,
-            outputMasters: outputs,
-            routes: [
-                route("Analog Out 1/2 Source", MAudio1814ControlID(.analogOutputSource, 0),
-                      controls, ["Mixer 1", "Aux"]),
-                route("Analog Out 3/4 Source", MAudio1814ControlID(.analogOutputSource, 1),
-                      controls, ["Mixer 2", "Aux"]),
-                route("Headphone 1/2 Source", MAudio1814ControlID(.headphoneSource, 0),
-                      controls, ["Mixer 1", "Mixer 2", "Aux"]),
-                route("Headphone 3/4 Source", MAudio1814ControlID(.headphoneSource, 1),
-                      controls, ["Mixer 1", "Mixer 2", "Aux"]),
-            ]
-        )
+            revision: controls.revision,
+            strips: strips,
+            routes: strips.compactMap(\.source))
     }
 
-    /// The two register indices belonging to one stereo pair.
-    private static func pairControls(_ group: MAudio1814ControlGroup,
-                                     _ pair: UInt32) -> [MAudio1814ControlID] {
-        [MAudio1814ControlID(group, pair * 2), MAudio1814ControlID(group, pair * 2 + 1)]
+    // MARK: - Strip builders
+
+    private static func inputStrip(id: String, name: String,
+                                   gain: MAudio1814ControlGroup,
+                                   pan: MAudio1814ControlGroup,
+                                   aux: MAudio1814ControlGroup,
+                                   pair: UInt32, sendBit: UInt32, meterFirst: Int,
+                                   controls: AudioControlSurfaceSnapshot) -> AudioTopologyStrip {
+        AudioTopologyStrip(
+            id: id, name: name, kind: .physicalInput,
+            channels: (0..<2).map { side in
+                let index = pair * 2 + UInt32(side)
+                return channel(
+                    id: "\(id)-\(side)", label: side == 0 ? "L" : "R",
+                    level: MAudio1814ControlID(gain, index),
+                    pan: MAudio1814ControlID(pan, index),
+                    aux: MAudio1814ControlID(aux, index),
+                    meterIndex: meterFirst + side, controls: controls)
+            },
+            sends: sends(prefix: id, control: MAudio1814ControlID(.physicalMixerSendMask),
+                         // Analog and ADAT sit in four-bit fields so their second
+                         // destination is four bits along; S/PDIF's is adjacent.
+                         firstBit: sendBit, secondBit: sendBit + (sendBit < 8 ? 4 : 1),
+                         controls: controls),
+            source: nil)
     }
 
-    private static func physicalSends(mask: UInt32,
-                                      controls: AudioControlSurfaceSnapshot) -> [AudioTopologySend] {
-        let control = MAudio1814ControlID(.physicalMixerSendMask)
+    private static func playbackStrip(pair: UInt32,
+                                      controls: AudioControlSurfaceSnapshot) -> AudioTopologyStrip {
+        let id = "playback-\(pair)"
+        return AudioTopologyStrip(
+            id: id, name: "\(pair * 2 + 1)/\(pair * 2 + 2) SW RTN", kind: .playback,
+            channels: (0..<2).map { side in
+                let index = pair * 2 + UInt32(side)
+                return channel(
+                    id: "\(id)-\(side)", label: side == 0 ? "L" : "R",
+                    level: MAudio1814ControlID(.mixerStreamGain, index),
+                    pan: nil,
+                    aux: MAudio1814ControlID(.auxStreamGain, index),
+                    meterIndex: nil, controls: controls)
+            },
+            sends: sends(prefix: id, control: MAudio1814ControlID(.streamMixerSendMask),
+                         firstBit: pair, secondBit: pair + 2, controls: controls),
+            source: nil)
+    }
+
+    private static func outputStrip(id: String, name: String, kind: AudioTopologyStripKind,
+                                    group: MAudio1814ControlGroup, pair: UInt32,
+                                    meterFirst: Int, controls: AudioControlSurfaceSnapshot,
+                                    source: AudioTopologyRoute?) -> AudioTopologyStrip {
+        AudioTopologyStrip(
+            id: id, name: name, kind: kind,
+            channels: (0..<2).map { side in
+                channel(
+                    id: "\(id)-\(side)", label: side == 0 ? "L" : "R",
+                    level: MAudio1814ControlID(group, pair * 2 + UInt32(side)),
+                    pan: nil, aux: nil,
+                    meterIndex: meterFirst + side, controls: controls)
+            },
+            sends: [], source: source)
+    }
+
+    private static func channel(id: String, label: String,
+                                level: MAudio1814ControlID,
+                                pan: MAudio1814ControlID?,
+                                aux: MAudio1814ControlID?,
+                                meterIndex: Int?,
+                                controls: AudioControlSurfaceSnapshot) -> AudioTopologyStripChannel {
+        AudioTopologyStripChannel(
+            id: id, label: label,
+            levelControl: level, levelRaw: controls.value(for: level),
+            panControl: pan, panRaw: pan.map { controls.value(for: $0) } ?? 0,
+            auxControl: aux, auxRaw: aux.map { controls.value(for: $0) } ?? 0,
+            meterIndex: meterIndex)
+    }
+
+    /// The two mixer destinations. The vendor labels these by the output pair
+    /// they feed rather than by mixer number.
+    private static func sends(prefix: String, control: MAudio1814ControlID,
+                              firstBit: UInt32, secondBit: UInt32,
+                              controls: AudioControlSurfaceSnapshot) -> [AudioTopologySend] {
         let value = UInt32(bitPattern: controls.value(for: control))
-        // Analog and ADAT occupy four-bit fields, so their mixer-2 bit is four
-        // along; S/PDIF has a two-bit field and its mixer-2 bit is adjacent.
-        let secondBit = mask + (mask < 8 ? 4 : 1)
         return [
-            AudioTopologySend(id: "physical-\(mask)-m1", label: "M1", control: control,
-                              mask: 1 << mask, isEnabled: value & (1 << mask) != 0),
-            AudioTopologySend(id: "physical-\(mask)-m2", label: "M2", control: control,
+            AudioTopologySend(id: "\(prefix)-out12", label: "1/2", control: control,
+                              mask: 1 << firstBit, isEnabled: value & (1 << firstBit) != 0),
+            AudioTopologySend(id: "\(prefix)-out34", label: "3/4", control: control,
                               mask: 1 << secondBit, isEnabled: value & (1 << secondBit) != 0),
         ]
-    }
-
-    private static func playbackChannel(pair: UInt32,
-                                        controls: AudioControlSurfaceSnapshot) -> AudioTopologyChannel {
-        let control = MAudio1814ControlID(.streamMixerSendMask)
-        let value = UInt32(bitPattern: controls.value(for: control))
-        let m1Mask: UInt32 = UInt32(1) << pair
-        let m2Mask: UInt32 = UInt32(1) << (pair + 2)
-        let gains = pairControls(.mixerStreamGain, pair)
-        let auxes = pairControls(.auxStreamGain, pair)
-        return AudioTopologyChannel(
-            id: "playback-\(pair)", name: "PLAYBACK \(pair * 2 + 1)/\(pair * 2 + 2)",
-            kind: .playback,
-            sendControls: [
-                AudioTopologySend(id: "playback-\(pair)-m1", label: "M1", control: control,
-                                  mask: m1Mask, isEnabled: value & m1Mask != 0),
-                AudioTopologySend(id: "playback-\(pair)-m2", label: "M2", control: control,
-                                  mask: m2Mask, isEnabled: value & m2Mask != 0),
-            ],
-            meterPair: nil,
-            gainControls: gains,
-            gain: levelPercent(controls.value(for: gains[0])),
-            auxControls: auxes,
-            auxSend: levelPercent(controls.value(for: auxes[0])),
-            widthControls: [],
-            width: 0)
-    }
-
-    private static func output(_ name: String, _ group: MAudio1814ControlGroup, _ pair: UInt32,
-                               controls: AudioControlSurfaceSnapshot,
-                               meterPair: Int) -> AudioTopologyOutputMaster {
-        let levels = pairControls(group, pair)
-        return AudioTopologyOutputMaster(
-            id: name, name: name, levelControls: levels,
-            level: levelPercent(controls.value(for: levels[0])), meterPair: meterPair)
     }
 
     private static func route(_ name: String, _ control: MAudio1814ControlID,
                               _ controls: AudioControlSurfaceSnapshot,
                               _ names: [String]) -> AudioTopologyRoute {
         AudioTopologyRoute(
-            id: name, name: name, control: control,
+            id: "\(control.rawValue)", name: name, control: control,
             choices: names.enumerated().map {
                 AudioTopologyRouteChoice(value: Int32($0.offset), name: $0.element)
             },
             selectedValue: controls.value(for: control))
-    }
-
-    static func rawLevel(percent: Double) -> Int32 {
-        Int32((max(0, min(100, percent)) * 327.68).rounded()) - 32_768
-    }
-
-    private static func levelPercent(_ value: Int32) -> Double {
-        max(0, min(100, Double(value + 32_768) * 100 / 32_768))
-    }
-
-    /// Width is carried by the pair's two opposed balance registers. The first
-    /// channel holds the positive extreme at full width, so its magnitude is the
-    /// spread; the second is written as its negation.
-    static func rawWidth(percent: Double, channel: Int) -> Int32 {
-        let magnitude = Int32((max(0, min(100, percent)) * 326.40).rounded())
-        return channel == 0 ? magnitude : -magnitude
-    }
-
-    private static func widthPercent(_ firstChannelValue: Int32) -> Double {
-        max(0, min(100, Double(abs(Int(firstChannelValue))) * 100 / 32_640))
     }
 }
