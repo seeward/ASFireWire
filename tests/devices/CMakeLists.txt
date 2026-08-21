@@ -241,6 +241,7 @@ add_device_test(MAudioTxClockAdapterTests
 add_device_test(MAudioInternalTxTimingTests
     MAudioInternalTxTimingTests.cpp
     "${ASFW_DRIVER_DIR}/Audio/Families/BeBoB/MAudio/MAudioInternalTxTiming.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Wire/AMDTP/AmdtpCadence.cpp"
 )
 
 # Apogee Duet runtime stream caps: aggregate vs per-stream wire view

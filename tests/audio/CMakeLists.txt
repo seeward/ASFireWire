@@ -161,6 +161,11 @@ add_audio_test(AmdtpRateGeometryTests
     AmdtpRateGeometryTests.cpp
 )
 
+add_audio_test(ResolvedAudioStreamProfileTests
+    ResolvedAudioStreamProfileTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/DriverKit/Config/ResolvedAudioStreamProfile.cpp"
+)
+
 add_audio_test(TimingCursorPolicyTests
     TimingCursorPolicyTests.cpp
 )

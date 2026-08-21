@@ -215,10 +215,17 @@ void BeBoBProtocol::ProgramSignalFormat(const AudioClockConfig& desiredClock,
         return;
     }
     auto output = std::make_shared<SignalFormatCommand>(*fcpTransport_, outPlug, false, rate);
-    output->Submit([this, completion = std::move(completion), output, rate](
+    ASFW_LOG(Audio,
+             "[BeBoBConfig] FCP OUTPUT_SIGNAL_FORMAT submit opcode=0xa1 plug=%u rate=%u",
+             outPlug, desiredClock.sampleRateHz);
+    output->Submit([this, completion = std::move(completion), output, rate, outPlug,
+                    rateHz = desiredClock.sampleRateHz](
                        Protocols::AVC::AVCResult outputResult,
                        const SignalFormatCommand::SignalFormat& /*outputFormat*/) mutable {
         const IOReturn outputStatus = MapAVCResultToIOReturn(outputResult);
+        ASFW_LOG(Audio,
+                 "[BeBoBConfig] FCP OUTPUT_SIGNAL_FORMAT reply opcode=0xa1 plug=%u rate=%u result=%u kr=0x%x",
+                 outPlug, rateHz, static_cast<unsigned>(outputResult), outputStatus);
         if (outputStatus != kIOReturnSuccess) {
             completion(outputStatus);
             return;
@@ -229,17 +236,24 @@ void BeBoBProtocol::ProgramSignalFormat(const AudioClockConfig& desiredClock,
             return;
         }
 
-        auto sendInput = [this, rate, completion = std::move(completion)]() mutable {
+        auto sendInput = [this, rate, rateHz, completion = std::move(completion)]() mutable {
             if (!fcpTransport_) {
                 completion(kIOReturnNotReady);
                 return;
             }
             const uint8_t inPlug = StreamPlug(true);
             auto input = std::make_shared<SignalFormatCommand>(*fcpTransport_, inPlug, true, rate);
-            input->Submit([completion = std::move(completion), input](
+            ASFW_LOG(Audio,
+                     "[BeBoBConfig] FCP INPUT_SIGNAL_FORMAT submit opcode=0xa0 plug=%u rate=%u",
+                     inPlug, rateHz);
+            input->Submit([completion = std::move(completion), input, inPlug, rateHz](
                                Protocols::AVC::AVCResult inputResult,
                                const SignalFormatCommand::SignalFormat& /*inputFormat*/) mutable {
-                completion(MapAVCResultToIOReturn(inputResult));
+                const IOReturn inputStatus = MapAVCResultToIOReturn(inputResult);
+                ASFW_LOG(Audio,
+                         "[BeBoBConfig] FCP INPUT_SIGNAL_FORMAT reply opcode=0xa0 plug=%u rate=%u result=%u kr=0x%x",
+                         inPlug, rateHz, static_cast<unsigned>(inputResult), inputStatus);
+                completion(inputStatus);
             });
         };
 

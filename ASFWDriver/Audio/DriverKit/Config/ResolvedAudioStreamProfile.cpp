@@ -2,6 +2,8 @@
 
 #include "ResolvedAudioStreamProfile.hpp"
 
+#include "../../Wire/AMDTP/AmdtpRateGeometry.hpp"
+
 #include <algorithm>
 
 namespace ASFW::Audio::DriverKit {
@@ -24,6 +26,37 @@ ResolvedAudioStreamProfile::Value() const noexcept { return profile_; }
 
 Devices::ResolvedAudioEndpointProfile&
 ResolvedAudioStreamProfile::MutableValue() noexcept { return profile_; }
+
+bool ResolvedAudioStreamProfile::ApplyRuntimeConfiguration(
+    const AudioStreamRuntimeCaps& runtimeCaps) noexcept {
+    const auto geometry = Encoding::AmdtpRateGeometryForSampleRate(
+        runtimeCaps.sampleRateHz);
+    if (!geometry || runtimeCaps.hostToDeviceStreamCount == 0 ||
+        runtimeCaps.deviceToHostStreamCount == 0) {
+        return false;
+    }
+
+    const auto validStream = [](const AudioStreamWireInfo& stream) {
+        return stream.pcmChannels != 0 && stream.am824Slots >= stream.pcmChannels &&
+               stream.pcmChannels <= UINT8_MAX && stream.am824Slots <= UINT8_MAX;
+    };
+    if (!validStream(runtimeCaps.hostToDeviceStreams[0]) ||
+        !validStream(runtimeCaps.deviceToHostStreams[0])) {
+        return false;
+    }
+
+    auto updated = profile_;
+    updated.currentSampleRateHz = geometry->sampleRateHz;
+    updated.runtimeCaps = runtimeCaps;
+    updated.captureFramesPerDataPacket =
+        static_cast<uint8_t>(geometry->sytIntervalFrames);
+    updated.playbackFramesPerDataPacket =
+        static_cast<uint8_t>(geometry->sytIntervalFrames);
+    updated.captureFdf = geometry->fdf;
+    updated.playbackFdf = geometry->fdf;
+    profile_ = std::move(updated);
+    return true;
+}
 
 const char* ResolvedAudioStreamProfile::Name() const noexcept {
     return profile_.deviceName.c_str();

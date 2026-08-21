@@ -22,6 +22,11 @@ struct ASFWAudioDevice_IVars {
     IOLock* configurationLock{nullptr};
     ASFW::Configuration::Machine configurationMachine{};
     bool configurationEnabled{false};
+    // Host-owned ADK configuration lifecycle observability. These tokens do
+    // not control the reducer; they only correlate request/StopIO/Perform/
+    // StartIO across the two service queues.
+    std::atomic<uint64_t> configurationInFlightToken{0};
+    std::atomic<uint64_t> configurationResumeToken{0};
 };
 
 bool ASFWAudioDevice::init(IOUserAudioDriver* in_driver,
@@ -114,8 +119,15 @@ kern_return_t ASFWAudioDevice::StartIO(IOUserAudioStartStopFlags in_flags) {
         return kIOReturnNotReady;
     }
 
+    const uint64_t resumeToken = this->ivars->configurationResumeToken.load(
+        std::memory_order_acquire);
     ASFW_LOG(DirectAudio, "ASFWAudioDevice: StartIO flags=0x%llx",
              static_cast<uint64_t>(in_flags));
+    if (resumeToken != 0) {
+        ASFW_LOG(Audio,
+                 "[AudioConfig] host restart entered endpoint=%llu token=%llu",
+                 this->ivars->driverIvars->device.endpointId, resumeToken);
+    }
 
     auto& ivars = *this->ivars->driverIvars;
     __block kern_return_t kr = kIOReturnSuccess;
@@ -231,13 +243,6 @@ kern_return_t ASFWAudioDevice::StartIO(IOUserAudioStartStopFlags in_flags) {
                 kr = failStart(kIOReturnError, "BuildDefaultTxStreamConfig");
                 return;
             }
-            // The profile describes the wire geometry at its default (48 kHz);
-            // the live cadence/FDF follow the device's current nominal rate.
-            if (ivars.device.currentSampleRate > 0) {
-                txConfig.sampleRate =
-                    static_cast<uint32_t>(ivars.device.currentSampleRate);
-            }
-
             const uint32_t numSlots =
                 ASFW::Audio::Shared::AudioTimingGeometry::kTxSharedSlotPackets;
             const uint32_t maxPacketBytes =
@@ -304,6 +309,11 @@ kern_return_t ASFWAudioDevice::StartIO(IOUserAudioStartStopFlags in_flags) {
                 kr = failStart(kIOReturnError, "ConfigureTxStreamEngine");
                 return;
             }
+            ASFW_LOG(Audio,
+                     "[AudioConfig] packetizer prepared endpoint=%llu rate=%u pcm=%u dbs=%u fdf=0x%02x syt=%u bytes=%u",
+                     ivars.device.endpointId, txConfig.sampleRate, txConfig.pcmChannels,
+                     txConfig.dbs, txConfig.fdf, txConfig.framesPerDataPacket,
+                     maxPacketBytes);
             ivars.runtime.txPcmStagingRing.BindTelemetry(
                 &control->txPcmStagingTelemetry);
             if (!ivars.runtime.txPcmStagingRing.Configure(
@@ -354,10 +364,6 @@ kern_return_t ASFWAudioDevice::StartIO(IOUserAudioStartStopFlags in_flags) {
             if (!profile->BuildDefaultTxStreamConfig(txConfig2)) {
                 kr = failStart(kIOReturnError, "BuildDefaultTxStreamConfig2");
                 return;
-            }
-            if (ivars.device.currentSampleRate > 0) {
-                txConfig2.sampleRate =
-                    static_cast<uint32_t>(ivars.device.currentSampleRate);
             }
             txConfig2.sourceChannelOffset = txConfig2.pcmChannels;
 
@@ -458,21 +464,28 @@ kern_return_t ASFWAudioDevice::StartIO(IOUserAudioStartStopFlags in_flags) {
                 kr = failStart(kIOReturnNotReady, "ArmMAudioTxClock");
                 return;
             }
-            // V1 deliberately supports the vendor-verified internal 48 kHz
-            // output policy only.  Do not let another rate silently borrow
-            // generic RX replay and look like a successful M-Audio start.
+            // The M-Audio adapter retains completion-cycle anchoring, while
+            // the cadence itself is the shared rational IEC 61883-6 engine.
+            // Arm it from the freshly projected rate/geometry rather than
+            // retaining any previous-rate packet schedule.
             if (!ivars.runtime.mAudioInternalTxTiming.Arm(
                     startEpoch,
                     txStreamConfig.sampleRate,
                     txStreamConfig.framesPerDataPacket)) {
                 ASFW_LOG(Audio,
-                         "ASFWAudioDevice: StartIO failed - M-Audio internal TX timing requires 48k/8 rate=%u frames=%u",
+                         "ASFWAudioDevice: StartIO failed - M-Audio TX timing rejected rate=%u frames=%u",
                          txStreamConfig.sampleRate,
                          txStreamConfig.framesPerDataPacket);
                 kr = failStart(kIOReturnUnsupported,
                                "ArmMAudioInternalTxTiming");
                 return;
             }
+            ASFW_LOG(Audio,
+                     "[AudioConfig] M-Audio TX cadence armed endpoint=%llu rate=%u syt=%u "
+                     "delay=%u source=rational-blocking",
+                     ivars.device.endpointId, txStreamConfig.sampleRate,
+                     txStreamConfig.framesPerDataPacket,
+                     ivars.runtime.mAudioInternalTxTiming.TransferDelayTicks());
             // Arm the one-shot SYT seed trace for this stream. It prints the
             // seed and the next few increments once the transmit anchor lands,
             // then goes quiet; see AudioDriverRuntimeState.
@@ -594,6 +607,14 @@ kern_return_t ASFWAudioDevice::StartIO(IOUserAudioStartStopFlags in_flags) {
     });
 
     if (kr == kIOReturnSuccess) {
+        if (resumeToken != 0) {
+            uint64_t expected = resumeToken;
+            (void)this->ivars->configurationResumeToken.compare_exchange_strong(
+                expected, 0, std::memory_order_acq_rel);
+            ASFW_LOG(Audio,
+                     "[AudioConfig] host restart complete endpoint=%llu token=%llu",
+                     ivars.device.endpointId, resumeToken);
+        }
         const auto inputFormat = ivars.inputStream
             ? ivars.inputStream->GetCurrentStreamFormat()
             : IOUserAudioStreamBasicDescription{};
@@ -668,8 +689,15 @@ kern_return_t ASFWAudioDevice::StopIO(IOUserAudioStartStopFlags in_flags) {
         return kIOReturnNotReady;
     }
 
+    const uint64_t inFlightToken = this->ivars->configurationInFlightToken.load(
+        std::memory_order_acquire);
     ASFW_LOG(DirectAudio, "ASFWAudioDevice: StopIO flags=0x%llx",
              static_cast<uint64_t>(in_flags));
+    if (inFlightToken != 0) {
+        ASFW_LOG(Audio,
+                 "[AudioConfig] host quiesce entered endpoint=%llu token=%llu",
+                 this->ivars->driverIvars->device.endpointId, inFlightToken);
+    }
 
     auto& ivars = *this->ivars->driverIvars;
     __block kern_return_t kr = kIOReturnSuccess;
@@ -749,6 +777,11 @@ kern_return_t ASFWAudioDevice::StopIO(IOUserAudioStartStopFlags in_flags) {
         }
 
         kr = super::StopIO(in_flags);
+        if (inFlightToken != 0) {
+            ASFW_LOG(Audio,
+                     "[AudioConfig] host quiesce complete endpoint=%llu token=%llu kr=0x%x",
+                     ivars.device.endpointId, inFlightToken, kr);
+        }
     });
 
     return kr;
@@ -808,6 +841,8 @@ OpticalModeFromWire(uint32_t raw) noexcept {
     const auto* capability = driverIvars.resolvedProfile.Value().ConfigurationFor(configuration);
     if (!capability || inputChannels != capability->runtimeCaps.hostInputPcmChannels ||
         outputChannels != capability->runtimeCaps.hostOutputPcmChannels ||
+        capability->runtimeCaps.sampleRateHz != configuration.sampleRate ||
+        !ASFW::Encoding::AmdtpRateGeometryForSampleRate(configuration.sampleRate).has_value() ||
         driverIvars.runtime.isRunning.load(std::memory_order_acquire)) {
         return kIOReturnBadArgument;
     }
@@ -873,9 +908,19 @@ OpticalModeFromWire(uint32_t raw) noexcept {
     driverIvars.device.inputChannelCount = inputChannels;
     driverIvars.device.outputChannelCount = outputChannels;
     driverIvars.device.channelCount = std::max(inputChannels, outputChannels);
-    auto& mutableProfile = driverIvars.resolvedProfile.MutableValue();
-    mutableProfile.currentSampleRateHz = configuration.sampleRate;
-    mutableProfile.runtimeCaps = capability->runtimeCaps;
+    if (!driverIvars.resolvedProfile.ApplyRuntimeConfiguration(capability->runtimeCaps)) {
+        return kIOReturnBadArgument;
+    }
+    const auto packetGeometry = ASFW::Encoding::AmdtpRateGeometryForSampleRate(
+        configuration.sampleRate);
+    ASFW_LOG(Audio,
+             "[AudioConfig] stream profile projected endpoint=%llu rate=%u rx=%u/%u tx=%u/%u fdf=0x%02x syt=%u",
+             driverIvars.device.endpointId, configuration.sampleRate,
+             capability->runtimeCaps.deviceToHostStreams[0].pcmChannels,
+             capability->runtimeCaps.deviceToHostStreams[0].am824Slots,
+             capability->runtimeCaps.hostToDeviceStreams[0].pcmChannels,
+             capability->runtimeCaps.hostToDeviceStreams[0].am824Slots,
+             packetGeometry->fdf, packetGeometry->sytIntervalFrames);
     if (!ASFW::Audio::DriverKit::UpdateDirectAudioGeometry(
             driverIvars,
             {.inputFrames = driverIvars.runtime.directAudioGraph.memory.inputFrameCapacity,
@@ -1063,10 +1108,18 @@ kern_return_t ASFWAudioDevice::RequestControlConfiguration(
              "[AudioConfig] requesting ADK window endpoint=%llu token=%llu rate=%u opticalIn=%u opticalOut=%u",
              driverIvars.device.endpointId, window.identity.token, sampleRateHz,
              opticalInput, opticalOutput);
+    ivars->configurationInFlightToken.store(
+        window.identity.token, std::memory_order_release);
     kr = RequestDeviceConfigurationChange(window.identity.token, nullptr);
     if (kr != kIOReturnSuccess) {
         (void)dispatch(ASFW::Configuration::ADKWindowRejected{.identity = window.identity});
+        uint64_t expected = window.identity.token;
+        (void)ivars->configurationInFlightToken.compare_exchange_strong(
+            expected, 0, std::memory_order_acq_rel);
     }
+    ASFW_LOG(Audio,
+             "[AudioConfig] ADK window request result endpoint=%llu token=%llu kr=0x%x",
+             driverIvars.device.endpointId, window.identity.token, kr);
     return kr;
 }
 
@@ -1089,6 +1142,11 @@ kern_return_t ASFWAudioDevice::PerformDeviceConfigurationChange(
         return super::PerformDeviceConfigurationChange(change_action, in_change_info);
     }
 
+    ASFW_LOG(Audio,
+             "[AudioConfig] host Perform granted endpoint=%llu token=%llu running=%d",
+             driverIvars.device.endpointId, identity.token,
+             driverIvars.runtime.isRunning.load(std::memory_order_acquire));
+
     ASFW::Configuration::TransitionResult transition{};
     auto dispatch = [&](const ASFW::Configuration::ConfigurationEvent& event)
         -> kern_return_t {
@@ -1107,6 +1165,9 @@ kern_return_t ASFWAudioDevice::PerformDeviceConfigurationChange(
     if (kr != kIOReturnSuccess || transition.effects.size() != 1 ||
         !std::holds_alternative<ASFW::Configuration::ApplyHardwareEffect>(transition.effects[0])) {
         const kern_return_t superKr = super::PerformDeviceConfigurationChange(change_action, in_change_info);
+        uint64_t expected = identity.token;
+        (void)ivars->configurationInFlightToken.compare_exchange_strong(
+            expected, 0, std::memory_order_acq_rel);
         return kr != kIOReturnSuccess ? kr : superKr;
     }
     const auto apply = std::get<ASFW::Configuration::ApplyHardwareEffect>(transition.effects[0]);
@@ -1123,6 +1184,9 @@ kern_return_t ASFWAudioDevice::PerformDeviceConfigurationChange(
             .outcome = ASFW::Configuration::HardwareUnknown{},
         });
         (void)super::PerformDeviceConfigurationChange(change_action, in_change_info);
+        uint64_t expected = identity.token;
+        (void)ivars->configurationInFlightToken.compare_exchange_strong(
+            expected, 0, std::memory_order_acq_rel);
         ASFW_LOG_ERROR(Audio,
                        "[AudioConfig] ADK Perform hardware failure token=%llu kr=0x%x",
                        identity.token, hardwareKr);
@@ -1137,6 +1201,9 @@ kern_return_t ASFWAudioDevice::PerformDeviceConfigurationChange(
     if (kr != kIOReturnSuccess || transition.effects.size() != 1 ||
         !std::holds_alternative<ASFW::Configuration::ProjectADKEffect>(transition.effects[0])) {
         const kern_return_t superKr = super::PerformDeviceConfigurationChange(change_action, in_change_info);
+        uint64_t expected = identity.token;
+        (void)ivars->configurationInFlightToken.compare_exchange_strong(
+            expected, 0, std::memory_order_acq_rel);
         return kr != kIOReturnSuccess ? kr : superKr;
     }
     const auto project = std::get<ASFW::Configuration::ProjectADKEffect>(transition.effects[0]);
@@ -1158,6 +1225,12 @@ kern_return_t ASFWAudioDevice::PerformDeviceConfigurationChange(
     const kern_return_t result = mutation != kIOReturnSuccess ? mutation
         : runtimeKr != kIOReturnSuccess ? runtimeKr
         : superKr != kIOReturnSuccess ? superKr : finishKr;
+    uint64_t expected = identity.token;
+    (void)ivars->configurationInFlightToken.compare_exchange_strong(
+        expected, 0, std::memory_order_acq_rel);
+    if (result == kIOReturnSuccess) {
+        ivars->configurationResumeToken.store(identity.token, std::memory_order_release);
+    }
     ASFW_LOG(Audio,
              "[AudioConfig] ADK Perform result endpoint=%llu token=%llu rate=%u in=%u out=%u kr=0x%x",
              driverIvars.device.endpointId, identity.token,
@@ -1180,6 +1253,10 @@ kern_return_t ASFWAudioDevice::AbortDeviceConfigurationChange(
             }});
         if (result) ivars->configurationMachine = result->next;
         IOLockUnlock(ivars->configurationLock);
+        uint64_t expected = change_action;
+        (void)ivars->configurationInFlightToken.compare_exchange_strong(
+            expected, 0, std::memory_order_acq_rel);
+        ASFW_LOG(Audio, "[AudioConfig] host aborted token=%llu", change_action);
     }
     return super::AbortDeviceConfigurationChange(change_action, in_change_info);
 }

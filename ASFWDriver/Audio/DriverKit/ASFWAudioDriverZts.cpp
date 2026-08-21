@@ -297,19 +297,21 @@ uint32_t PrepareTransmitSlots(ASFWAudioDriver_IVars& ivars,
                 emitData
                     ? ASFW::Audio::Families::BeBoB::MAudio::
                           ComputeInternalTxSyt(
-                              mAudioPacketPlan.sytPhaseTicks,
+                              mAudioPacketPlan.sytOffsetTicks,
                               static_cast<uint32_t>(
                                   (transmitTicks /
                                    ASFW::Timing::kTicksPerCycle) %
-                                  ASFW::Timing::kCyclesPerSecond))
+                                  ASFW::Timing::kCyclesPerSecond),
+                              ivars.runtime.mAudioInternalTxTiming.
+                                  TransferDelayTicks())
                     : uint16_t{0xFFFF};
 
             // Bounded SYT seed trace: the first DATA packet after the transmit
             // anchor lands, plus the next few. Without a packet analyzer this
             // is the only view of the seed and its increment. `delta` is the
-            // diagnostic — it must equal the rate's exact SYT step, 4096 ticks
-            // at 48 kHz; anything else means the phase is not tracking the
-            // transmit cycle. Stops after kSytSeedTracePackets.
+            // diagnostic — 48 kHz advances by 4096 ticks, while the 44.1 kHz
+            // family alternates its exact rational 4458/4459-tick steps.
+            // Stops after kSytSeedTracePackets.
             if (emitData && ivars.runtime.sytSeedTraceRemaining > 0) {
                 const uint32_t transmitCycle = static_cast<uint32_t>(
                     (transmitTicks / ASFW::Timing::kTicksPerCycle) %
@@ -322,11 +324,10 @@ uint32_t PrepareTransmitSlots(ASFWAudioDriver_IVars& ivars,
                 if (!ivars.runtime.sytSeedTraceHavePrev) {
                     ASFW_LOG_INFO(
                         Audio,
-                        "[TxSytSeed] anchor cycle=%u phase=%u delay=%u "
+                        "[TxSytSeed] anchor cycle=%u offset=%u delay=%u "
                         "-> syt=0x%04x (cyc %u off %u) pkt=%llu",
-                        transmitCycle, mAudioPacketPlan.sytPhaseTicks,
-                        ASFW::Audio::Families::BeBoB::MAudio::
-                            kInternalTxTransferDelayTicks,
+                        transmitCycle, mAudioPacketPlan.sytOffsetTicks,
+                        ivars.runtime.mAudioInternalTxTiming.TransferDelayTicks(),
                         syt, (syt >> 12) & 0x0FU, syt & 0x0FFFU,
                         static_cast<unsigned long long>(nextPacketToPrepare));
                 } else {
@@ -342,9 +343,9 @@ uint32_t PrepareTransmitSlots(ASFWAudioDriver_IVars& ivars,
                         (sytTicks + kSytDomain - prevTicks) % kSytDomain;
                     ASFW_LOG_INFO(
                         Audio,
-                        "[TxSytSeed] cycle=%u phase=%u syt=0x%04x delta=%u "
+                        "[TxSytSeed] cycle=%u offset=%u syt=0x%04x delta=%u "
                         "ticks pkt=%llu",
-                        transmitCycle, mAudioPacketPlan.sytPhaseTicks, syt,
+                        transmitCycle, mAudioPacketPlan.sytOffsetTicks, syt,
                         delta,
                         static_cast<unsigned long long>(nextPacketToPrepare));
                 }

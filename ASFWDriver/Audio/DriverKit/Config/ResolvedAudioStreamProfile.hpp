@@ -18,6 +18,12 @@ public:
     [[nodiscard]] const Devices::ResolvedAudioEndpointProfile& Value() const noexcept;
     [[nodiscard]] Devices::ResolvedAudioEndpointProfile& MutableValue() noexcept;
 
+    // Projects a confirmed hardware formation into the next StartIO packetizer
+    // configuration.  Rate, FDF, SYT interval and AM824 slots are one atomic
+    // wire contract and must never be updated independently.
+    [[nodiscard]] bool ApplyRuntimeConfiguration(
+        const AudioStreamRuntimeCaps& runtimeCaps) noexcept;
+
     [[nodiscard]] const char* Name() const noexcept override;
     [[nodiscard]] Encoding::AudioWireFormat TxWireFormat() const noexcept override;
     [[nodiscard]] Encoding::AudioWireFormat RxWireFormat() const noexcept override;

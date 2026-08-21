@@ -1164,12 +1164,22 @@ IOReturn DuplexStartTransaction::Run(const StartRequest& request) noexcept {
         liveProfile, record.link.localToNode, channels);
     StoreSession(session);
 
+    // Log the plan after the IRM-assigned channels have been projected back
+    // into it. This is the geometry that CMP and the OHCI contexts will use,
+    // rather than merely the capability estimate used before reservation.
+    const Duplex::CaptureStreamGeometry& masterCapture = streamProfile.captureStreams[0];
+    const Duplex::PlaybackStreamGeometry& masterPlayback = streamProfile.playbackStreams[0];
     ASFW_LOG(Audio,
-             "AUDIO DUPLEX START endpointId=0x%016llx ir=%u it=%u inCh=%u outCh=%u inSlots=%u outSlots=%u "
-             "mode=blocking rxFmt=%u txFmt=%u",
-             endpointId.value, channels.deviceToHostIsoChannel, channels.hostToDeviceIsoChannel,
+             "AUDIO DUPLEX START endpointId=0x%016llx rate=%u ir=%u it=%u inCh=%u outCh=%u "
+             "inSlots=%u outSlots=%u rx0=pcm%u/dbs%u@iso%u bw=%u "
+             "tx0=pcm%u/dbs%u@iso%u bw=%u mode=blocking rxFmt=%u txFmt=%u",
+             endpointId.value, session.runtimeCaps.sampleRateHz,
+             channels.deviceToHostIsoChannel, channels.hostToDeviceIsoChannel,
              session.runtimeCaps.hostInputPcmChannels, session.runtimeCaps.hostOutputPcmChannels,
              session.runtimeCaps.deviceToHostAm824Slots, session.runtimeCaps.hostToDeviceAm824Slots,
+             masterCapture.pcmChannels, masterCapture.am824Slots, masterCapture.isoChannel,
+             masterCapture.bandwidthUnits, masterPlayback.pcmChannels, masterPlayback.am824Slots,
+             masterPlayback.isoChannel, masterPlayback.bandwidthUnits,
              static_cast<uint32_t>(streamProfile.captureWireFormat),
              static_cast<uint32_t>(streamProfile.playbackWireFormat));
 
@@ -1180,8 +1190,6 @@ IOReturn DuplexStartTransaction::Run(const StartRequest& request) noexcept {
     // profile's per-stream AM824/PCM geometry. The master owns clock/ZTS/replay;
     // secondaries write their PCM slice only. A single stream retains the legacy
     // full-width (streamChannels == 0) host receive path.
-    const Duplex::CaptureStreamGeometry& masterCapture = streamProfile.captureStreams[0];
-
     for (const Duplex::HostDirection direction : streamProfile.startOrder.prepareOrder) {
         if (direction == Duplex::HostDirection::kReceive) {
             if (abortIfTeardown("PreparingHostReceive")) {

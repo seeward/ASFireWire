@@ -165,10 +165,15 @@ void MAudioSpecialProtocol::ApplyConfiguration(
     // we update our write-only-register belief, then use the shared BeBoB
     // OUTPUT -> 100 ms -> INPUT rate sequence (bebob_maudio.c:301-339).
     ASFW_LOG(Audio,
-             "[MAudioConfig] apply requested rate=%u input=%u output=%u",
+             "[MAudioConfig] FCP special-clock submit rate=%u input=%{public}s output=%{public}s "
+             "ctype=0x%02x subunit=0x%02x opcode=0x%02x frame=%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x",
              configuration.sampleRate,
-             static_cast<unsigned>(capture),
-             static_cast<unsigned>(playback));
+             capture == MAudioDigitalFormat::ADAT ? "ADAT" : "S/PDIF",
+             playback == MAudioDigitalFormat::ADAT ? "ADAT" : "S/PDIF",
+             command.data[0], command.data[1], command.data[2], command.data[0],
+             command.data[1], command.data[2], command.data[3], command.data[4],
+             command.data[5], command.data[6], command.data[7], command.data[8],
+             command.data[9], command.data[10], command.data[11]);
     const auto handle = fcpTransport_->SubmitCommand(
         command,
         [this, configuration, capture, playback,
@@ -183,6 +188,9 @@ void MAudioSpecialProtocol::ApplyConfiguration(
                 callback(kIOReturnIOError, {});
                 return;
             }
+            ASFW_LOG(Audio,
+                     "[MAudioConfig] FCP special-clock reply status=%u response=0x%02x bytes=%zu",
+                     static_cast<unsigned>(status), responseCode, response.length);
 
             captureFormat_ = capture;
             playbackFormat_ = playback;
