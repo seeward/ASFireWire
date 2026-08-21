@@ -8,6 +8,8 @@
 #include "../Duplex/AudioDuplexCoordinator.hpp"
 #include "../Duplex/IsochDuplexHostTransport.hpp"
 #include "../Protocols/Configuration/IAudioConfigurationControl.hpp"
+#include "../Shared/Controls/IAudioControlSurface.hpp"
+#include "../Shared/Metering/IAudioMetering.hpp"
 #include "../Shared/Configuration/DeviceConfigurationSnapshot.hpp"
 
 #include <DriverKit/IOLib.h>
@@ -84,6 +86,21 @@ public:
     [[nodiscard]] uint32_t CopyConfigurationEndpointIds(
         std::array<EndpointId,
                    Configuration::kMaxConfigurationSnapshotCapabilities>& out) noexcept;
+    [[nodiscard]] IOReturn CopyAudioControlSurfaceSnapshot(
+        EndpointId endpointId, AudioControlSurfaceSnapshot& outSnapshot) noexcept;
+    [[nodiscard]] IOReturn RequestAudioControlValue(
+        EndpointId endpointId, uint32_t controlId, int32_t value) noexcept;
+    /// Starts a bounded semantic control write and returns immediately. The
+    /// completion is the only authority for the resulting hardware belief.
+    /// UserClient callers must use this instead of waiting on an async bus
+    /// response on an external-method queue.
+    [[nodiscard]] IOReturn SubmitAudioControlValue(
+        EndpointId endpointId, uint32_t controlId, int32_t value,
+        IAudioControlSurface::ApplyCallback completion) noexcept;
+    [[nodiscard]] IOReturn CopyAudioMeterSnapshot(
+        EndpointId endpointId, AudioMeterSnapshot& outSnapshot) noexcept;
+    [[nodiscard]] IOReturn SetAudioMeteringEnabled(
+        EndpointId endpointId, bool enabled) noexcept;
     void BeginTeardown() noexcept;
 
     [[nodiscard]] ASFWAudioNub* GetNub(EndpointId endpointId) const noexcept {

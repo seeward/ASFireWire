@@ -15,6 +15,7 @@
 #include <array>
 #include <cstring>
 #include <span>
+#include <utility>
 
 namespace ASFW::Audio::BeBoB {
 
@@ -27,7 +28,33 @@ MAudioSpecialProtocol::MAudioSpecialProtocol(
     Scheduling::ITimerScheduler* timerScheduler,
     MAudioSpecialModel model) noexcept
     : BeBoBProtocol(busOps, busInfo, route, irmClient, cmpClient, timerScheduler),
-      model_(model) {}
+      model_(model) {
+    parameterLock_ = IOLockAlloc();
+    if (!parameterLock_) {
+        ASFW_LOG_ERROR(Audio, "[MAudioControl] parameter lock allocation failed");
+    }
+    meterLock_ = IOLockAlloc();
+    if (!meterLock_) {
+        ASFW_LOG_ERROR(Audio, "[MAudioMeter] meter lock allocation failed");
+    }
+}
+
+MAudioSpecialProtocol::~MAudioSpecialProtocol() noexcept {
+    (void)SetAudioMeteringEnabled(false);
+    if (meterLock_) {
+        IOLockFree(meterLock_);
+        meterLock_ = nullptr;
+    }
+    if (parameterLock_) {
+        IOLockFree(parameterLock_);
+        parameterLock_ = nullptr;
+    }
+}
+
+IOReturn MAudioSpecialProtocol::Shutdown() {
+    (void)SetAudioMeteringEnabled(false);
+    return BeBoBProtocol::Shutdown();
+}
 
 const char* MAudioSpecialProtocol::DeviceName() const {
     switch (model_) {
@@ -115,6 +142,268 @@ bool MAudioSpecialProtocol::SupportsConfiguration(
            configuration.opticalOutput.has_value();
 }
 
+bool MAudioSpecialProtocol::CopyAudioControlSurfaceSnapshot(
+    AudioControlSurfaceSnapshot& outSnapshot) const noexcept {
+    outSnapshot = {};
+    if (model_ != MAudioSpecialModel::FireWire1814 || !parameterLock_) return false;
+
+    static constexpr std::array kControls = {
+        MAudio1814ControlId::AnalogOutput12Level,
+        MAudio1814ControlId::AnalogOutput34Level,
+        MAudio1814ControlId::Headphone12Level,
+        MAudio1814ControlId::Headphone34Level,
+        MAudio1814ControlId::AnalogOutput12Source,
+        MAudio1814ControlId::AnalogOutput34Source,
+        MAudio1814ControlId::Headphone12Source,
+        MAudio1814ControlId::Headphone34Source,
+        MAudio1814ControlId::PhysicalMixerSendMask,
+        MAudio1814ControlId::StreamMixerSendMask,
+    };
+
+    IOLockLock(parameterLock_);
+    outSnapshot.kind = AudioControlSurfaceKind::MAudio1814Mixer;
+    outSnapshot.revision = parameterRevision_;
+    outSnapshot.valueCount = static_cast<uint32_t>(kControls.size());
+    for (size_t i = 0; i < kControls.size(); ++i) {
+        outSnapshot.values[i] = {
+            .id = static_cast<uint32_t>(kControls[i]),
+            .value = parameterImage_.ControlValue(kControls[i]),
+        };
+    }
+    IOLockUnlock(parameterLock_);
+    return true;
+}
+
+bool MAudioSpecialProtocol::CopyAudioMeterSnapshot(
+    AudioMeterSnapshot& outSnapshot) const noexcept {
+    outSnapshot = {};
+    if (model_ != MAudioSpecialModel::FireWire1814 || !meterLock_) return false;
+
+    IOLockLock(meterLock_);
+    outSnapshot.revision = meterRevision_;
+    outSnapshot.valueCount = static_cast<uint32_t>(meterState_.peaks.size());
+    outSnapshot.detectedSampleRateHz = meterState_.detectedSampleRateHz;
+    outSnapshot.enabled = meterEnabled_;
+    outSnapshot.clockLocked = meterState_.clockLocked;
+    for (size_t i = 0; i < meterState_.peaks.size(); ++i) {
+        outSnapshot.values[i] = meterState_.peaks[i];
+    }
+    IOLockUnlock(meterLock_);
+    return true;
+}
+
+IOReturn MAudioSpecialProtocol::SetAudioMeteringEnabled(bool enabled) noexcept {
+    if (model_ != MAudioSpecialModel::FireWire1814 || !meterLock_) {
+        return kIOReturnUnsupported;
+    }
+
+    Scheduling::TimerToken cancelled = Scheduling::kInvalidTimerToken;
+    uint64_t epoch = 0;
+    IOLockLock(meterLock_);
+    if (meterEnabled_ == enabled) {
+        IOLockUnlock(meterLock_);
+        return kIOReturnSuccess;
+    }
+    meterEnabled_ = enabled;
+    epoch = ++meterEpoch_;
+    cancelled = std::exchange(meterTimer_, Scheduling::kInvalidTimerToken);
+    if (enabled) {
+        // Any older completion is epoch-stamped and must not block a newly
+        // enabled poller, nor overwrite the new epoch's in-flight marker.
+        meterReadInFlight_ = false;
+        meterReadEpoch_ = 0;
+    }
+    if (!enabled) {
+        meterState_.clockLocked = false;
+        ++meterRevision_;
+    }
+    IOLockUnlock(meterLock_);
+    if (cancelled != Scheduling::kInvalidTimerToken && timerScheduler_) {
+        timerScheduler_->Cancel(cancelled);
+    }
+
+    ASFW_LOG(Audio, "[MAudioMeter] enabled=%u epoch=%llu", enabled ? 1U : 0U,
+             static_cast<unsigned long long>(epoch));
+    if (enabled) ScheduleMeterRead(0, epoch);
+    return kIOReturnSuccess;
+}
+
+void MAudioSpecialProtocol::ScheduleMeterRead(uint64_t delayNs, uint64_t epoch) noexcept {
+    if (!timerScheduler_) {
+        ASFW_LOG_ERROR(Audio, "[MAudioMeter] unavailable: no timer scheduler");
+        return;
+    }
+    const auto token = timerScheduler_->ScheduleAfter(delayNs, [this, epoch] {
+        PollMeter(epoch);
+    });
+    if (token == Scheduling::kInvalidTimerToken) {
+        ASFW_LOG_ERROR(Audio, "[MAudioMeter] timer scheduling failed");
+        return;
+    }
+
+    bool keep = false;
+    IOLockLock(meterLock_);
+    if (meterEnabled_ && meterEpoch_ == epoch &&
+        meterTimer_ == Scheduling::kInvalidTimerToken) {
+        meterTimer_ = token;
+        keep = true;
+    }
+    IOLockUnlock(meterLock_);
+    if (!keep) timerScheduler_->Cancel(token);
+}
+
+void MAudioSpecialProtocol::PollMeter(uint64_t epoch) noexcept {
+    Discovery::DeviceRouteToken issuedRoute{};
+    IOLockLock(meterLock_);
+    meterTimer_ = Scheduling::kInvalidTimerToken;
+    if (!meterEnabled_ || meterEpoch_ != epoch || meterReadInFlight_) {
+        IOLockUnlock(meterLock_);
+        return;
+    }
+    meterReadInFlight_ = true;
+    meterReadEpoch_ = epoch;
+    issuedRoute = route_;
+    IOLockUnlock(meterLock_);
+
+    const auto operationalNode = Discovery::TryOperationalNodeId(issuedRoute.nodeId);
+    if (!operationalNode) {
+        CompleteMeterRead(epoch, issuedRoute, Async::AsyncStatus::kAborted, {});
+        return;
+    }
+
+    const Async::FWAddress address{Async::FWAddress::QualifiedAddressParts{
+        .addressHi = kMAudioParamAddressHi,
+        .addressLo = 0x0060'0000U,
+        .nodeID = issuedRoute.nodeId}};
+    (void)busOps_.ReadBlock(
+        issuedRoute.generation, FW::NodeId{*operationalNode}, address,
+        MAudioSpecialMeterState::kBlockBytes, FW::FwSpeed::S100,
+        [this, epoch, issuedRoute](Async::AsyncStatus status,
+                                   std::span<const uint8_t> payload) {
+            CompleteMeterRead(epoch, issuedRoute, status, payload);
+        });
+}
+
+void MAudioSpecialProtocol::CompleteMeterRead(
+    uint64_t epoch, Discovery::DeviceRouteToken issuedRoute,
+    Async::AsyncStatus status, std::span<const uint8_t> payload) noexcept {
+    constexpr uint64_t kPollNs = 50ULL * 1000ULL * 1000ULL;
+    constexpr uint64_t kRetryNs = 1000ULL * 1000ULL * 1000ULL;
+    bool accepted = false;
+    bool decoded = false;
+    bool clockStateChanged = false;
+    uint32_t detectedRateHz = 0;
+    bool clockLocked = false;
+    uint64_t nextDelayNs = kRetryNs;
+
+    IOLockLock(meterLock_);
+    if (meterReadInFlight_ && meterReadEpoch_ == epoch) {
+        meterReadInFlight_ = false;
+        meterReadEpoch_ = 0;
+    }
+    const bool active = meterEnabled_ && meterEpoch_ == epoch;
+    const bool sameRoute = route_.generation == issuedRoute.generation &&
+                           route_.nodeId == issuedRoute.nodeId;
+    if (active && sameRoute && status == Async::AsyncStatus::kSuccess) {
+        MAudioSpecialMeterState decodedState{};
+        if (DecodeMAudioSpecialMeter(payload, currentRateHz_, decodedState)) {
+            clockStateChanged = meterRevision_ == 0 ||
+                meterState_.detectedSampleRateHz != decodedState.detectedSampleRateHz ||
+                meterState_.clockLocked != decodedState.clockLocked;
+            meterState_ = decodedState;
+            ++meterRevision_;
+            accepted = true;
+            decoded = true;
+            detectedRateHz = decodedState.detectedSampleRateHz;
+            clockLocked = decodedState.clockLocked;
+            nextDelayNs = kPollNs;
+        }
+    }
+    const bool reschedule = meterEnabled_ && meterEpoch_ == epoch;
+    IOLockUnlock(meterLock_);
+
+    if (accepted) {
+        if (clockStateChanged) {
+            ASFW_LOG(Audio,
+                     "[MAudioMeter] clock rate=%u locked=%u node=0x%04x gen=%u",
+                     detectedRateHz, clockLocked ? 1U : 0U,
+                     static_cast<unsigned>(issuedRoute.nodeId),
+                     static_cast<unsigned>(issuedRoute.generation.value));
+        }
+    } else if (reschedule) {
+        ASFW_LOG_ERROR(Audio,
+                       "[MAudioMeter] read rejected status=%u bytes=%zu routeCurrent=%u decoded=%u; retry=1s",
+                       static_cast<unsigned>(status), payload.size(),
+                       sameRoute ? 1U : 0U, decoded ? 1U : 0U);
+    }
+    if (reschedule) ScheduleMeterRead(nextDelayNs, epoch);
+}
+
+void MAudioSpecialProtocol::ApplyAudioControlValue(
+    uint32_t controlId, int32_t value, IAudioControlSurface::ApplyCallback callback) {
+    if (!callback) return;
+    if (model_ != MAudioSpecialModel::FireWire1814 || !parameterLock_) {
+        callback(kIOReturnUnsupported);
+        return;
+    }
+
+    const auto control = static_cast<MAudio1814ControlId>(controlId);
+    size_t changedIndex = 0;
+    uint32_t changedValue = 0;
+    IOLockLock(parameterLock_);
+    if (parameterWriteInFlight_) {
+        IOLockUnlock(parameterLock_);
+        callback(kIOReturnBusy);
+        return;
+    }
+    MAudioSpecialParameterImage proposed = parameterImage_;
+    if (!proposed.Apply(control, value, changedIndex)) {
+        IOLockUnlock(parameterLock_);
+        callback(kIOReturnBadArgument);
+        return;
+    }
+    changedValue = proposed.ValueAt(changedIndex);
+    parameterWriteInFlight_ = true;
+    IOLockUnlock(parameterLock_);
+
+    ASFW_LOG(Audio,
+             "[MAudioControl] request id=%u value=%d offset=0x%02zx quadlet=0x%08x "
+             "node=0x%04x gen=%u",
+             controlId, value, changedIndex * sizeof(uint32_t), changedValue,
+             static_cast<unsigned>(route_.nodeId), static_cast<unsigned>(route_.generation.value));
+    SendParameterQuadlet(
+        changedIndex, changedValue,
+        [this, controlId, value, changedIndex, changedValue,
+         callback = std::move(callback)](IOReturn status) mutable {
+            if (parameterLock_) {
+                IOLockLock(parameterLock_);
+                parameterWriteInFlight_ = false;
+                if (status == kIOReturnSuccess) {
+                    // Apply exactly the acknowledged quadlet to the belief
+                    // image. A failed write must not be reflected in UI state.
+                    const auto control = static_cast<MAudio1814ControlId>(controlId);
+                    size_t confirmedIndex = 0;
+                    (void)parameterImage_.Apply(control, value, confirmedIndex);
+                    if (confirmedIndex == changedIndex &&
+                        parameterImage_.ValueAt(confirmedIndex) == changedValue) {
+                        ++parameterRevision_;
+                    }
+                }
+                IOLockUnlock(parameterLock_);
+            }
+            if (status == kIOReturnSuccess) {
+                ASFW_LOG(Audio,
+                         "[MAudioControl] confirmed-belief id=%u value=%d offset=0x%02zx",
+                         controlId, value, changedIndex * sizeof(uint32_t));
+            } else {
+                ASFW_LOG_ERROR(Audio,
+                               "[MAudioControl] rejected id=%u value=%d offset=0x%02zx kr=0x%08x",
+                               controlId, value, changedIndex * sizeof(uint32_t), status);
+            }
+            callback(status);
+        });
+}
+
 AudioConfigurationApplyResult MAudioSpecialProtocol::CurrentConfiguration() const noexcept {
     return {
         .configuration = {
@@ -130,7 +419,7 @@ AudioConfigurationApplyResult MAudioSpecialProtocol::CurrentConfiguration() cons
 
 void MAudioSpecialProtocol::ApplyConfiguration(
     const Configuration::DeviceConfiguration& configuration,
-    ApplyCallback callback) {
+    IAudioConfigurationControl::ApplyCallback callback) {
     if (!callback) {
         return;
     }
@@ -385,62 +674,21 @@ void MAudioSpecialProtocol::ReadClockHealth(HealthCallback callback) {
 
 void MAudioSpecialProtocol::SendParameterBlock(
     std::function<void(IOReturn)> completion) {
-    // FFADO's Mixer::initialize (special_mixer.cpp:74-106) asserts all 40
-    // quadlets of 0x00-0x9c: gains and aux sends at unity/zero, the nine LR
-    // balance registers hard-panned, and the four routing registers cleared.
-    //
-    // Clearing the routing registers is where FFADO and we part company. FFADO
-    // ships a mixer GUI, so it can hand the user an empty matrix to fill in. We
-    // have none, so a cleared matrix is permanent silence: the device reports
-    // "There are no connections!" and every physical output meters exactly zero
-    // while a perfectly healthy stream arrives (rxPackets nominal, onlyHeaders
-    // and BCOHdrErr both 0, TGEN locked). Assert the routing defaults instead.
-    //
-    // Values derived from the ALSA userspace BeBoB crate's parameter defaults,
-    // references/alsa-userspace-control-protocols-impl/protocols/bebob/src/
-    // maudio/special.rs: MaudioSpecialMixerParameters::default() has
-    // stream_pairs [[true,false],[false,true]] encoded as 1<<(pair*2 + mixer),
-    // and MaudioSpecialOutputParameters::default() sources the headphone pairs
-    // from MixerOutputPair0/1 encoded as flag<<(pair*16).
-    static constexpr size_t kQuadletCount = 40;              // 0x00..0x9c
-    static constexpr size_t kBalanceFirst = 16;              // 0x40
-    static constexpr size_t kBalanceLast = 24;               // 0x60
-    static constexpr uint32_t kBalanceHardPanned = 0x7FFE8000U;
+    // The device cannot read this window. The cache begins with the lab-derived
+    // audible routing defaults, and subsequent semantic writes amend it only
+    // after an async acknowledgment. Reassert that belief at initialization;
+    // never regenerate defaults here, or a later initialization would erase
+    // a control change that the UI has already confirmed.
+    std::array<uint32_t, MAudioSpecialParameterImage::kQuadletCount> values{};
+    if (parameterLock_) {
+        IOLockLock(parameterLock_);
+        values = parameterImage_.Values();
+        IOLockUnlock(parameterLock_);
+    }
 
-    static constexpr size_t kMixerPhysSourceIndex = 36;      // 0x90
-    static constexpr size_t kMixerStreamSourceIndex = 37;    // 0x94
-    static constexpr size_t kHeadphonePairSourceIndex = 38;  // 0x98
-    static constexpr size_t kAnalogOutPairSourceIndex = 39;  // 0x9c
-
-    // No physical input feeds the mixer; the two stream pairs feed mixer pairs
-    // 0 and 1; both headphone pairs follow those mixer pairs; the analog output
-    // pairs take the mixer output rather than the aux bus.
-    static constexpr uint32_t kMixerPhysSourceNone = 0x00000000U;
-    static constexpr uint32_t kMixerStreamSourcePairs = 0x00000009U;
-    static constexpr uint32_t kHeadphoneFromMixerPairs = 0x00020001U;
-    static constexpr uint32_t kAnalogOutFromMixer = 0x00000000U;
-
-    const auto quadletAt = [](size_t index) -> uint32_t {
-        if (index >= kBalanceFirst && index <= kBalanceLast) {
-            return kBalanceHardPanned;
-        }
-        switch (index) {
-        case kMixerPhysSourceIndex:
-            return kMixerPhysSourceNone;
-        case kMixerStreamSourceIndex:
-            return kMixerStreamSourcePairs;
-        case kHeadphonePairSourceIndex:
-            return kHeadphoneFromMixerPairs;
-        case kAnalogOutPairSourceIndex:
-            return kAnalogOutFromMixer;
-        default:
-            return 0U;
-        }
-    };
-
-    std::array<uint8_t, kQuadletCount * 4> payload{};
-    for (size_t i = 0; i < kQuadletCount; ++i) {
-        const uint32_t value = quadletAt(i);
+    std::array<uint8_t, MAudioSpecialParameterImage::kQuadletCount * 4> payload{};
+    for (size_t i = 0; i < values.size(); ++i) {
+        const uint32_t value = values[i];
         // IEEE 1394 payloads are big-endian regardless of host order.
         payload[(i * 4) + 0] = static_cast<uint8_t>(value >> 24);
         payload[(i * 4) + 1] = static_cast<uint8_t>(value >> 16);
@@ -466,7 +714,7 @@ void MAudioSpecialProtocol::SendParameterBlock(
     ASFW_LOG(Audio,
              "[BeBoB] %{public}s: asserting parameter window +0x00..0x9c "
              "(%zu quadlets) node=0x%04x gen=%u",
-             DeviceName(), kQuadletCount,
+             DeviceName(), values.size(),
              static_cast<unsigned>(route_.nodeId),
              static_cast<unsigned>(route_.generation.value));
 
@@ -488,6 +736,37 @@ void MAudioSpecialProtocol::SendParameterBlock(
                 ASFW_LOG(Audio, "[BeBoB] parameter window asserted");
             }
             completion(kIOReturnSuccess);
+        });
+}
+
+void MAudioSpecialProtocol::SendParameterQuadlet(
+    size_t index, uint32_t value, IAudioControlSurface::ApplyCallback completion) {
+    if (index >= MAudioSpecialParameterImage::kQuadletCount) {
+        completion(kIOReturnBadArgument);
+        return;
+    }
+    const auto operationalNode = Discovery::TryOperationalNodeId(route_.nodeId);
+    if (!operationalNode) {
+        ASFW_LOG_ERROR(Audio,
+                       "[MAudioControl] parameter write skipped: node 0x%04x is not operational",
+                       static_cast<unsigned>(route_.nodeId));
+        completion(kIOReturnNoDevice);
+        return;
+    }
+
+    const Async::FWAddress address{Async::FWAddress::QualifiedAddressParts{
+        .addressHi = kMAudioParamAddressHi,
+        .addressLo = kMAudioParamAddressLo + static_cast<uint32_t>(index * sizeof(uint32_t)),
+        .nodeID = route_.nodeId}};
+    const std::array<uint8_t, 4> payload{
+        static_cast<uint8_t>(value >> 24), static_cast<uint8_t>(value >> 16),
+        static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value)};
+
+    (void)busOps_.WriteBlock(
+        route_.generation, FW::NodeId{*operationalNode}, address, payload, FW::FwSpeed::S100,
+        [completion = std::move(completion)](Async::AsyncStatus status,
+                                             std::span<const uint8_t>) mutable {
+            completion(status == Async::AsyncStatus::kSuccess ? kIOReturnSuccess : kIOReturnError);
         });
 }
 

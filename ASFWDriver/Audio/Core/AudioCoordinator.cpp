@@ -390,6 +390,67 @@ uint32_t AudioCoordinator::CopyConfigurationEndpointIds(
     return runtime_.CopyConfigurationEndpointIds(out);
 }
 
+IOReturn AudioCoordinator::CopyAudioControlSurfaceSnapshot(
+    EndpointId endpointId, AudioControlSurfaceSnapshot& outSnapshot) noexcept {
+    outSnapshot = {};
+    if (!endpointId || teardownRequested_.load(std::memory_order_acquire)) {
+        return kIOReturnNotReady;
+    }
+    const auto protocol = runtime_.FindShared(endpointId);
+    auto* surface = protocol ? protocol->AsAudioControlSurface() : nullptr;
+    if (!surface) return kIOReturnUnsupported;
+    return surface->CopyAudioControlSurfaceSnapshot(outSnapshot)
+        ? kIOReturnSuccess : kIOReturnNotReady;
+}
+
+IOReturn AudioCoordinator::RequestAudioControlValue(
+    EndpointId endpointId, uint32_t controlId, int32_t value) noexcept {
+    // Selector 1019 predates the asynchronous control plane. It deliberately
+    // remains a hard refusal: waiting for a FireWire completion here can block
+    // the UserClient queue for two seconds and make the host appear frozen.
+    (void)endpointId;
+    (void)controlId;
+    (void)value;
+    return kIOReturnUnsupported;
+}
+
+IOReturn AudioCoordinator::SubmitAudioControlValue(
+    EndpointId endpointId, uint32_t controlId, int32_t value,
+    IAudioControlSurface::ApplyCallback completion) noexcept {
+    if (!completion) return kIOReturnBadArgument;
+    if (!endpointId || teardownRequested_.load(std::memory_order_acquire)) {
+        return kIOReturnNotReady;
+    }
+    const auto protocol = runtime_.FindShared(endpointId);
+    auto* surface = protocol ? protocol->AsAudioControlSurface() : nullptr;
+    if (!surface) return kIOReturnUnsupported;
+    surface->ApplyAudioControlValue(controlId, value, std::move(completion));
+    return kIOReturnSuccess;
+}
+
+IOReturn AudioCoordinator::CopyAudioMeterSnapshot(
+    EndpointId endpointId, AudioMeterSnapshot& outSnapshot) noexcept {
+    outSnapshot = {};
+    if (!endpointId || teardownRequested_.load(std::memory_order_acquire)) {
+        return kIOReturnNotReady;
+    }
+    const auto protocol = runtime_.FindShared(endpointId);
+    auto* metering = protocol ? protocol->AsAudioMetering() : nullptr;
+    if (!metering) return kIOReturnUnsupported;
+    return metering->CopyAudioMeterSnapshot(outSnapshot)
+        ? kIOReturnSuccess : kIOReturnNotReady;
+}
+
+IOReturn AudioCoordinator::SetAudioMeteringEnabled(
+    EndpointId endpointId, bool enabled) noexcept {
+    if (!endpointId || teardownRequested_.load(std::memory_order_acquire)) {
+        return kIOReturnNotReady;
+    }
+    const auto protocol = runtime_.FindShared(endpointId);
+    auto* metering = protocol ? protocol->AsAudioMetering() : nullptr;
+    return metering ? metering->SetAudioMeteringEnabled(enabled) : kIOReturnUnsupported;
+}
+
 void AudioCoordinator::HandleCycleInconsistent() noexcept {
     EndpointId endpointId{};
     if (lock_) {

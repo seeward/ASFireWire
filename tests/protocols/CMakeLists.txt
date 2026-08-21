@@ -299,6 +299,16 @@ add_protocols_test(MAudioSpecialFormationTests
     MAudioSpecialFormationTests.cpp
 )
 
+# Write-only M-Audio parameter window image: semantic IDs must remain bounded
+# and map to the known 1814 quadlets before any hardware write is possible.
+add_protocols_test(MAudioSpecialParametersTests
+    MAudioSpecialParametersTests.cpp
+)
+
+add_protocols_test(MAudioSpecialMeterTests
+    MAudioSpecialMeterTests.cpp
+)
+
 # Exact vendor blank-slate clock operands and timing. Header-only so the test
 # cannot accidentally exercise or broaden the live FCP surface.
 add_protocols_test(MAudioClockCommandTests

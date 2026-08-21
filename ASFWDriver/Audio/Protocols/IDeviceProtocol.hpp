@@ -25,6 +25,8 @@ namespace ASFW::IRM {
 namespace ASFW::Audio {
 class IDuplexDeviceControl;
 class IAudioConfigurationControl;
+class IAudioControlSurface;
+class IAudioMetering;
 }
 
 namespace ASFW::Audio {
@@ -150,6 +152,19 @@ public:
     virtual const IAudioConfigurationControl* AsAudioConfigurationControl() const noexcept {
         return nullptr;
     }
+
+    /// Optional semantic mixer/routing control surface. This deliberately
+    /// exposes named controls rather than a family register or raw async path.
+    virtual IAudioControlSurface* AsAudioControlSurface() noexcept {
+        return nullptr;
+    }
+
+    virtual const IAudioControlSurface* AsAudioControlSurface() const noexcept {
+        return nullptr;
+    }
+
+    virtual IAudioMetering* AsAudioMetering() noexcept { return nullptr; }
+    virtual const IAudioMetering* AsAudioMetering() const noexcept { return nullptr; }
 
     /// Update volatile runtime context that can change across bus resets.
     virtual void UpdateRuntimeContext(const Discovery::DeviceRouteToken& route,

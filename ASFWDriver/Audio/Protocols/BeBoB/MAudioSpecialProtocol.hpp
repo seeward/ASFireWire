@@ -26,7 +26,13 @@
 
 #include "BeBoBProtocol.hpp"
 #include "MAudioSpecialFormation.hpp"
+#include "MAudioSpecialMeter.hpp"
+#include "MAudioSpecialParameters.hpp"
 #include "../Configuration/IAudioConfigurationControl.hpp"
+#include "../../Shared/Controls/IAudioControlSurface.hpp"
+#include "../../Shared/Metering/IAudioMetering.hpp"
+
+#include <DriverKit/IOLib.h>
 
 #include <cstdint>
 #include <vector>
@@ -47,7 +53,9 @@ enum class MAudioSpecialModel : uint8_t {
 };
 
 class MAudioSpecialProtocol final : public BeBoBProtocol,
-                                   public IAudioConfigurationControl {
+                                   public IAudioConfigurationControl,
+                                   public IAudioControlSurface,
+                                   public IAudioMetering {
 public:
     MAudioSpecialProtocol(Protocols::Ports::FireWireBusOps& busOps,
                           Protocols::Ports::FireWireBusInfo& busInfo,
@@ -56,6 +64,8 @@ public:
                           CMP::CMPClient* cmpClient,
                           Scheduling::ITimerScheduler* timerScheduler,
                           MAudioSpecialModel model) noexcept;
+    ~MAudioSpecialProtocol() noexcept override;
+    IOReturn Shutdown() override;
 
     const char* GetName() const override { return DeviceName(); }
     bool GetRuntimeAudioStreamCaps(AudioStreamRuntimeCaps& outCaps) const override;
@@ -65,12 +75,23 @@ public:
     const IAudioConfigurationControl* AsAudioConfigurationControl() const noexcept override {
         return this;
     }
+    IAudioControlSurface* AsAudioControlSurface() noexcept override { return this; }
+    const IAudioControlSurface* AsAudioControlSurface() const noexcept override { return this; }
+    IAudioMetering* AsAudioMetering() noexcept override { return this; }
+    const IAudioMetering* AsAudioMetering() const noexcept override { return this; }
     [[nodiscard]] bool SupportsConfiguration(
         const Configuration::DeviceConfiguration& configuration) const noexcept override;
     void ApplyConfiguration(const Configuration::DeviceConfiguration& configuration,
-                            ApplyCallback callback) override;
+                            IAudioConfigurationControl::ApplyCallback callback) override;
     [[nodiscard]] AudioConfigurationApplyResult
     CurrentConfiguration() const noexcept override;
+    [[nodiscard]] bool CopyAudioControlSurfaceSnapshot(
+        AudioControlSurfaceSnapshot& outSnapshot) const noexcept override;
+    void ApplyAudioControlValue(uint32_t controlId, int32_t value,
+                                IAudioControlSurface::ApplyCallback callback) override;
+    [[nodiscard]] bool CopyAudioMeterSnapshot(
+        AudioMeterSnapshot& outSnapshot) const noexcept override;
+    [[nodiscard]] IOReturn SetAudioMeteringEnabled(bool enabled) noexcept override;
 
     /// Tell the device which clock to run on and which digital formats are
     /// selected, then wait out its settle. Must complete before streaming.
@@ -98,7 +119,7 @@ protected:
     void ConfirmDuplexStart(ConfirmCallback callback) override;
 
 private:
-    /// Assert the whole 0x00-0x9c parameter window in one block write.
+    /// Assert the whole cached 0x00-0x9c parameter window in one block write.
     ///
     /// These registers are write-only: the firmware answers no read for them,
     /// so their power-on state is indeterminate and every quadlet must be
@@ -111,6 +132,13 @@ private:
     /// non-blank-slate pass, where the equivalent register push happens
     /// (FWSettingsLevels::SendToDevice).
     void SendParameterBlock(std::function<void(IOReturn)> completion);
+    void SendParameterQuadlet(size_t index, uint32_t value,
+                              IAudioControlSurface::ApplyCallback completion);
+    void ScheduleMeterRead(uint64_t delayNs, uint64_t epoch) noexcept;
+    void PollMeter(uint64_t epoch) noexcept;
+    void CompleteMeterRead(uint64_t epoch, Discovery::DeviceRouteToken issuedRoute,
+                           Async::AsyncStatus status,
+                           std::span<const uint8_t> payload) noexcept;
 
     [[nodiscard]] AudioStreamRuntimeCaps CapsForCurrentFormation() const noexcept;
 
@@ -131,6 +159,23 @@ private:
     // the signal-format probe rather than assumed, because this firmware keeps
     // its rate across a host restart and guessing wrong mis-shapes the stream.
     uint32_t currentRateHz_{48000};
+
+    // The special firmware's parameter window is write-only. This is the
+    // authoritative host belief; it changes only after the corresponding
+    // direct async write is acknowledged.
+    IOLock* parameterLock_{nullptr};
+    MAudioSpecialParameterImage parameterImage_{};
+    uint32_t parameterRevision_{1};
+    bool parameterWriteInFlight_{false};
+
+    IOLock* meterLock_{nullptr};
+    MAudioSpecialMeterState meterState_{};
+    uint32_t meterRevision_{0};
+    uint64_t meterEpoch_{0};
+    Scheduling::TimerToken meterTimer_{Scheduling::kInvalidTimerToken};
+    bool meterEnabled_{false};
+    bool meterReadInFlight_{false};
+    uint64_t meterReadEpoch_{0};
 };
 
 } // namespace ASFW::Audio::BeBoB

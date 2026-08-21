@@ -17,6 +17,8 @@
 #include "../../Audio/Shared/Configuration/DeviceConfigurationSnapshot.hpp"
 #include "../../Service/DriverContext.hpp"
 #include "../WireFormats/AudioConfigurationWireFormats.hpp"
+#include "../WireFormats/AudioControlSurfaceWireFormats.hpp"
+#include "../WireFormats/AudioMeterWireFormats.hpp"
 
 #include <DriverKit/IOLib.h>
 #include <DriverKit/OSData.h>
@@ -58,6 +60,16 @@ enum {
     kMethodGetAudioConfiguration = 1015,
     kMethodRequestAudioConfiguration = 1016,
     kMethodGetAudioConfigurationEndpoints = 1017,
+    kMethodGetAudioControlSurface = 1018,
+    kMethodRequestAudioControlValue = 1019,
+    kMethodGetAudioMeterSnapshot = 1020,
+    kMethodSetAudioMeteringEnabled = 1021,
+    kMethodSubmitAudioControlValue = 1022,
+    kMethodGetAudioConfigurationAsync = 1023,
+    kMethodGetAudioControlSurfaceAsync = 1024,
+    kMethodGetAudioMeterSnapshotAsync = 1025,
+    kMethodSetAudioMeteringEnabledAsync = 1026,
+    kMethodRequestAudioConfigurationAsync = 1027,
     kMethodSetIsochVerbosity = 40,
     // 41 retired (was the dev TX-verifier toggle)
     kMethodSetAudioAutoStart = 42,
@@ -332,8 +344,35 @@ kern_return_t HandleRequestAudioConfiguration(
     ASFWDriver& driver, IOUserClientMethodArguments* arguments);
 kern_return_t HandleGetAudioConfigurationEndpoints(
     ASFWDriver& driver, IOUserClientMethodArguments* arguments);
+kern_return_t HandleGetAudioControlSurface(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments);
+kern_return_t HandleRequestAudioControlValue(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments);
+kern_return_t HandleGetAudioMeterSnapshot(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments);
+kern_return_t HandleSetAudioMeteringEnabled(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments);
+kern_return_t HandleSubmitAudioControlValue(
+    ASFWDriver& driver, ASFWDriverUserClient& userClient,
+    IOUserClientMethodArguments* arguments);
+kern_return_t HandleGetAudioConfigurationAsync(
+    ASFWDriver& driver, ASFWDriverUserClient& userClient,
+    IOUserClientMethodArguments* arguments);
+kern_return_t HandleGetAudioControlSurfaceAsync(
+    ASFWDriver& driver, ASFWDriverUserClient& userClient,
+    IOUserClientMethodArguments* arguments);
+kern_return_t HandleGetAudioMeterSnapshotAsync(
+    ASFWDriver& driver, ASFWDriverUserClient& userClient,
+    IOUserClientMethodArguments* arguments);
+kern_return_t HandleSetAudioMeteringEnabledAsync(
+    ASFWDriver& driver, ASFWDriverUserClient& userClient,
+    IOUserClientMethodArguments* arguments);
+kern_return_t HandleRequestAudioConfigurationAsync(
+    ASFWDriver& driver, ASFWDriverUserClient& userClient,
+    IOUserClientMethodArguments* arguments);
 
 MethodDispatchResult DispatchDriverControlMethods(ASFWDriver& driver,
+                                                  ASFWDriverUserClient& userClient,
                                                   IOUserClientMethodArguments* arguments,
                                                   uint64_t selector) {
     if (selector == kMethodGetDriverVersion) {
@@ -365,6 +404,26 @@ MethodDispatchResult DispatchDriverControlMethods(ASFWDriver& driver,
         return HandleRequestAudioConfiguration(driver, arguments);
     case kMethodGetAudioConfigurationEndpoints:
         return HandleGetAudioConfigurationEndpoints(driver, arguments);
+    case kMethodGetAudioControlSurface:
+        return HandleGetAudioControlSurface(driver, arguments);
+    case kMethodRequestAudioControlValue:
+        return HandleRequestAudioControlValue(driver, arguments);
+    case kMethodSubmitAudioControlValue:
+        return HandleSubmitAudioControlValue(driver, userClient, arguments);
+    case kMethodGetAudioConfigurationAsync:
+        return HandleGetAudioConfigurationAsync(driver, userClient, arguments);
+    case kMethodGetAudioControlSurfaceAsync:
+        return HandleGetAudioControlSurfaceAsync(driver, userClient, arguments);
+    case kMethodGetAudioMeterSnapshotAsync:
+        return HandleGetAudioMeterSnapshotAsync(driver, userClient, arguments);
+    case kMethodSetAudioMeteringEnabledAsync:
+        return HandleSetAudioMeteringEnabledAsync(driver, userClient, arguments);
+    case kMethodRequestAudioConfigurationAsync:
+        return HandleRequestAudioConfigurationAsync(driver, userClient, arguments);
+    case kMethodGetAudioMeterSnapshot:
+        return HandleGetAudioMeterSnapshot(driver, arguments);
+    case kMethodSetAudioMeteringEnabled:
+        return HandleSetAudioMeteringEnabled(driver, arguments);
     case kMethodGetLogConfig:
         return HandleGetLogConfig(driver, arguments);
     default:
@@ -429,6 +488,39 @@ constexpr uint64_t kMethodDiagGetLogCatalog       = 1014;
     const std::optional<ASFW::Configuration::OpticalMode>& mode) noexcept {
     if (!mode) return 0;
     return *mode == ASFW::Configuration::OpticalMode::Adat ? 1U : 2U;
+}
+
+[[nodiscard]] uint64_t PackConfigurationCapability(
+    const ASFW::Configuration::DeviceConfigurationCapabilitySnapshot& capability) noexcept {
+    // [31:0] rate, [39:32] input channels, [47:40] output channels,
+    // [55:48] input optical, [63:56] output optical.
+    return static_cast<uint64_t>(capability.configuration.sampleRate) |
+           (static_cast<uint64_t>(capability.inputChannels & 0xffU) << 32U) |
+           (static_cast<uint64_t>(capability.outputChannels & 0xffU) << 40U) |
+           (static_cast<uint64_t>(OpticalModeToWire(capability.configuration.opticalInput)) << 48U) |
+           (static_cast<uint64_t>(OpticalModeToWire(capability.configuration.opticalOutput)) << 56U);
+}
+
+[[nodiscard]] uint64_t PackI32Pair(int32_t low, int32_t high) noexcept {
+    return static_cast<uint64_t>(static_cast<uint32_t>(low)) |
+           (static_cast<uint64_t>(static_cast<uint32_t>(high)) << 32U);
+}
+
+[[nodiscard]] uint64_t PackI16Quad(std::span<const int16_t> values, size_t offset) noexcept {
+    uint64_t packed = 0;
+    for (size_t index = 0; index < 4 && offset + index < values.size(); ++index) {
+        packed |= static_cast<uint64_t>(static_cast<uint16_t>(values[offset + index])) <<
+                  (index * 16U);
+    }
+    return packed;
+}
+
+void CompleteAudioControlPlaneAction(ASFWDriverUserClient* userClient,
+                                     OSAction* completion,
+                                     IOReturn status,
+                                     const IOUserClientAsyncArgumentsArray& data,
+                                     uint32_t dataCount) noexcept {
+    userClient->AsyncCompletion(completion, status, data, dataCount);
 }
 
 kern_return_t HandleGetAudioConfiguration(
@@ -521,6 +613,311 @@ kern_return_t HandleRequestAudioConfiguration(
         {.sampleRate = static_cast<uint32_t>(arguments->scalarInput[1]),
          .opticalInput = input,
          .opticalOutput = output});
+}
+
+kern_return_t HandleGetAudioControlSurface(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments) {
+    if (!arguments || !arguments->scalarInput || arguments->scalarInputCount != 1) {
+        return kIOReturnBadArgument;
+    }
+    auto* context = static_cast<ServiceContext*>(driver.GetServiceContext());
+    if (!context || !context->audioCoordinator) return kIOReturnNotReady;
+
+    ASFW::Audio::AudioControlSurfaceSnapshot snapshot{};
+    const auto endpointId = ASFW::Audio::Devices::AudioEndpointId{arguments->scalarInput[0]};
+    const kern_return_t kr = context->audioCoordinator->CopyAudioControlSurfaceSnapshot(
+        endpointId, snapshot);
+    if (kr != kIOReturnSuccess) return kr;
+
+    ASFW::UserClient::Wire::AudioControlSurfaceSnapshotWire wire{};
+    wire.kind = static_cast<uint32_t>(snapshot.kind);
+    wire.endpointId = endpointId.value;
+    wire.revision = snapshot.revision;
+    wire.valueCount = snapshot.valueCount;
+    for (uint32_t i = 0; i < snapshot.valueCount; ++i) {
+        wire.values[i] = {.id = snapshot.values[i].id, .value = snapshot.values[i].value};
+    }
+    auto* data = OSData::withBytes(&wire, sizeof(wire));
+    if (!data) return kIOReturnNoMemory;
+    arguments->structureOutput = data;
+    arguments->structureOutputDescriptor = nullptr;
+    return kIOReturnSuccess;
+}
+
+kern_return_t HandleRequestAudioControlValue(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments) {
+    if (!arguments || !arguments->scalarInput || arguments->scalarInputCount != 3) {
+        return kIOReturnBadArgument;
+    }
+    auto* context = static_cast<ServiceContext*>(driver.GetServiceContext());
+    if (!context || !context->audioCoordinator) return kIOReturnNotReady;
+    return context->audioCoordinator->RequestAudioControlValue(
+        ASFW::Audio::Devices::AudioEndpointId{arguments->scalarInput[0]},
+        static_cast<uint32_t>(arguments->scalarInput[1]),
+        static_cast<int32_t>(arguments->scalarInput[2]));
+}
+
+kern_return_t HandleSubmitAudioControlValue(
+    ASFWDriver& driver, ASFWDriverUserClient& userClient,
+    IOUserClientMethodArguments* arguments) {
+    // endpoint, semantic control ID, value, client request ID. The completion
+    // action exists only for IOConnectCallAsyncScalarMethod and must be held
+    // until the device's async transaction has completed.
+    if (!arguments || !arguments->completion || !arguments->scalarInput ||
+        arguments->scalarInputCount != 4) {
+        return kIOReturnBadArgument;
+    }
+    auto* context = static_cast<ServiceContext*>(driver.GetServiceContext());
+    if (!context || !context->audioCoordinator) return kIOReturnNotReady;
+
+    const auto endpointId = ASFW::Audio::Devices::AudioEndpointId{arguments->scalarInput[0]};
+    const uint32_t controlId = static_cast<uint32_t>(arguments->scalarInput[1]);
+    const int32_t value = static_cast<int32_t>(arguments->scalarInput[2]);
+    const uint64_t requestId = arguments->scalarInput[3];
+    OSAction* const completion = arguments->completion;
+    completion->retain();
+    userClient.retain();
+
+    const kern_return_t started = context->audioCoordinator->SubmitAudioControlValue(
+        endpointId, controlId, value,
+        [&userClient, completion, requestId, controlId](IOReturn status) {
+            IOUserClientAsyncArgumentsArray data{};
+            data[0] = requestId;
+            data[1] = controlId;
+            userClient.AsyncCompletion(completion, status, data, 2);
+            completion->release();
+            userClient.release();
+        });
+    if (started != kIOReturnSuccess) {
+        IOUserClientAsyncArgumentsArray data{};
+        data[0] = requestId;
+        data[1] = controlId;
+        userClient.AsyncCompletion(completion, started, data, 2);
+        completion->release();
+        userClient.release();
+        return kIOReturnSuccess;
+    }
+    return started;
+}
+
+kern_return_t HandleGetAudioConfigurationAsync(
+    ASFWDriver& driver, ASFWDriverUserClient& userClient,
+    IOUserClientMethodArguments* arguments) {
+    if (!arguments || !arguments->completion || !arguments->scalarInput ||
+        arguments->scalarInputCount != 1) {
+        ASFW_LOG_ERROR(UserClient,
+                       "[ControlPlane] configuration snapshot rejected: invalid async arguments");
+        return kIOReturnBadArgument;
+    }
+    auto* context = static_cast<ServiceContext*>(driver.GetServiceContext());
+    if (!context || !context->audioCoordinator) {
+        ASFW_LOG_ERROR(UserClient,
+                       "[ControlPlane] configuration snapshot rejected: coordinator/scheduler unavailable");
+        return kIOReturnNotReady;
+    }
+    const uint64_t requestId = arguments->scalarInput[0];
+    // These are bounded, driver-owned snapshot copies only. They issue no
+    // FireWire transaction and do not wait for hardware; completing them on
+    // the UserClient queue avoids coupling UI liveness to the driver's general
+    // scheduler (which may legitimately be occupied by transport work).
+    IOUserClientAsyncArgumentsArray data{};
+    data[0] = requestId;
+    std::array<ASFW::Audio::Devices::AudioEndpointId,
+               ASFW::Configuration::kMaxConfigurationSnapshotCapabilities> endpoints{};
+    const uint32_t endpointCount = context->audioCoordinator->CopyConfigurationEndpointIds(endpoints);
+    if (endpointCount == 0 || endpoints[0].value == 0) {
+        ASFW_LOG_ERROR(UserClient,
+                       "[ControlPlane] configuration snapshot unavailable: no configurable endpoint");
+        CompleteAudioControlPlaneAction(&userClient, arguments->completion, kIOReturnNotReady, data, 1);
+        return kIOReturnSuccess;
+    }
+    ASFW::Configuration::DeviceConfigurationSnapshot snapshot{};
+    const kern_return_t status =
+        context->audioCoordinator->CopyDeviceConfigurationSnapshot(endpoints[0], snapshot);
+    if (status != kIOReturnSuccess) {
+        ASFW_LOG_ERROR(UserClient,
+                       "[ControlPlane] configuration snapshot failed endpoint=%llu kr=0x%x",
+                       endpoints[0].value, static_cast<uint32_t>(status));
+        CompleteAudioControlPlaneAction(&userClient, arguments->completion, status, data, 1);
+        return kIOReturnSuccess;
+    }
+    data[1] = snapshot.endpointId;
+    data[2] = PackConfigurationCapability({
+        .configuration = snapshot.committed,
+        .inputChannels = snapshot.inputChannels,
+        .outputChannels = snapshot.outputChannels,
+    });
+    data[3] = snapshot.capabilityCount;
+    for (uint32_t index = 0; index < snapshot.capabilityCount; ++index) {
+        data[4 + index] = PackConfigurationCapability(snapshot.capabilities[index]);
+    }
+    CompleteAudioControlPlaneAction(&userClient, arguments->completion, kIOReturnSuccess, data,
+                                    4 + snapshot.capabilityCount);
+    return kIOReturnSuccess;
+}
+
+kern_return_t HandleGetAudioControlSurfaceAsync(
+    ASFWDriver& driver, ASFWDriverUserClient& userClient,
+    IOUserClientMethodArguments* arguments) {
+    if (!arguments || !arguments->completion || !arguments->scalarInput ||
+        arguments->scalarInputCount != 2) {
+        return kIOReturnBadArgument;
+    }
+    auto* context = static_cast<ServiceContext*>(driver.GetServiceContext());
+    if (!context || !context->audioCoordinator) {
+        return kIOReturnNotReady;
+    }
+    const auto endpoint = ASFW::Audio::Devices::AudioEndpointId{arguments->scalarInput[0]};
+    const uint64_t requestId = arguments->scalarInput[1];
+    IOUserClientAsyncArgumentsArray data{};
+    data[0] = requestId;
+    ASFW::Audio::AudioControlSurfaceSnapshot snapshot{};
+    const kern_return_t status =
+        context->audioCoordinator->CopyAudioControlSurfaceSnapshot(endpoint, snapshot);
+    if (status != kIOReturnSuccess) {
+        CompleteAudioControlPlaneAction(&userClient, arguments->completion, status, data, 1);
+        return kIOReturnSuccess;
+    }
+    data[1] = endpoint.value;
+    data[2] = static_cast<uint64_t>(snapshot.revision) |
+              (static_cast<uint64_t>(snapshot.kind) << 32U);
+    data[3] = snapshot.valueCount;
+    for (uint32_t index = 0; index < snapshot.valueCount; index += 2) {
+        const int32_t high = index + 1 < snapshot.valueCount ? snapshot.values[index + 1].value : 0;
+        data[4 + index / 2] = PackI32Pair(snapshot.values[index].value, high);
+    }
+    CompleteAudioControlPlaneAction(&userClient, arguments->completion, kIOReturnSuccess, data,
+                                    4 + (snapshot.valueCount + 1) / 2);
+    return kIOReturnSuccess;
+}
+
+kern_return_t HandleGetAudioMeterSnapshotAsync(
+    ASFWDriver& driver, ASFWDriverUserClient& userClient,
+    IOUserClientMethodArguments* arguments) {
+    if (!arguments || !arguments->completion || !arguments->scalarInput ||
+        arguments->scalarInputCount != 2) {
+        return kIOReturnBadArgument;
+    }
+    auto* context = static_cast<ServiceContext*>(driver.GetServiceContext());
+    if (!context || !context->audioCoordinator) {
+        return kIOReturnNotReady;
+    }
+    const auto endpoint = ASFW::Audio::Devices::AudioEndpointId{arguments->scalarInput[0]};
+    const uint64_t requestId = arguments->scalarInput[1];
+    IOUserClientAsyncArgumentsArray data{};
+    data[0] = requestId;
+    ASFW::Audio::AudioMeterSnapshot snapshot{};
+    const kern_return_t status = context->audioCoordinator->CopyAudioMeterSnapshot(endpoint, snapshot);
+    if (status != kIOReturnSuccess) {
+        CompleteAudioControlPlaneAction(&userClient, arguments->completion, status, data, 1);
+        return kIOReturnSuccess;
+    }
+    data[1] = endpoint.value;
+    data[2] = static_cast<uint64_t>(snapshot.revision) |
+              (static_cast<uint64_t>(snapshot.detectedSampleRateHz) << 32U);
+    data[3] = static_cast<uint64_t>(snapshot.valueCount) |
+              (static_cast<uint64_t>(snapshot.enabled ? 1U : 0U) << 32U) |
+              (static_cast<uint64_t>(snapshot.clockLocked ? 1U : 0U) << 33U);
+    for (uint32_t index = 0; index < snapshot.valueCount; index += 4) {
+        data[4 + index / 4] = PackI16Quad(
+            std::span<const int16_t>{snapshot.values.data(), snapshot.valueCount}, index);
+    }
+    CompleteAudioControlPlaneAction(&userClient, arguments->completion, kIOReturnSuccess, data,
+                                    4 + (snapshot.valueCount + 3) / 4);
+    return kIOReturnSuccess;
+}
+
+kern_return_t HandleSetAudioMeteringEnabledAsync(
+    ASFWDriver& driver, ASFWDriverUserClient& userClient,
+    IOUserClientMethodArguments* arguments) {
+    if (!arguments || !arguments->completion || !arguments->scalarInput ||
+        arguments->scalarInputCount != 3 || arguments->scalarInput[1] > 1U) {
+        return kIOReturnBadArgument;
+    }
+    auto* context = static_cast<ServiceContext*>(driver.GetServiceContext());
+    if (!context || !context->audioCoordinator) return kIOReturnNotReady;
+
+    const kern_return_t status = context->audioCoordinator->SetAudioMeteringEnabled(
+        ASFW::Audio::Devices::AudioEndpointId{arguments->scalarInput[0]},
+        arguments->scalarInput[1] != 0U);
+    IOUserClientAsyncArgumentsArray data{};
+    data[0] = arguments->scalarInput[2]; // client request ID
+    userClient.AsyncCompletion(arguments->completion, status, data, 1);
+    return kIOReturnSuccess;
+}
+
+kern_return_t HandleRequestAudioConfigurationAsync(
+    ASFWDriver& driver, ASFWDriverUserClient& userClient,
+    IOUserClientMethodArguments* arguments) {
+    if (!arguments || !arguments->completion || !arguments->scalarInput ||
+        arguments->scalarInputCount != 5) {
+        return kIOReturnBadArgument;
+    }
+    auto* context = static_cast<ServiceContext*>(driver.GetServiceContext());
+    if (!context || !context->audioCoordinator) return kIOReturnNotReady;
+
+    const auto decode = [](uint32_t raw)
+        -> std::optional<ASFW::Configuration::OpticalMode> {
+        switch (raw) {
+        case 1: return ASFW::Configuration::OpticalMode::Adat;
+        case 2: return ASFW::Configuration::OpticalMode::Spdif;
+        default: return std::nullopt;
+        }
+    };
+    const auto input = decode(static_cast<uint32_t>(arguments->scalarInput[2]));
+    const auto output = decode(static_cast<uint32_t>(arguments->scalarInput[3]));
+    const kern_return_t status = (!input || !output || arguments->scalarInput[1] == 0)
+        ? kIOReturnBadArgument
+        : context->audioCoordinator->RequestDeviceConfiguration(
+            ASFW::Audio::Devices::AudioEndpointId{arguments->scalarInput[0]},
+            {.sampleRate = static_cast<uint32_t>(arguments->scalarInput[1]),
+             .opticalInput = input,
+             .opticalOutput = output});
+    IOUserClientAsyncArgumentsArray data{};
+    data[0] = arguments->scalarInput[4]; // client request ID
+    userClient.AsyncCompletion(arguments->completion, status, data, 1);
+    return kIOReturnSuccess;
+}
+
+kern_return_t HandleGetAudioMeterSnapshot(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments) {
+    if (!arguments || !arguments->scalarInput || arguments->scalarInputCount != 1) {
+        return kIOReturnBadArgument;
+    }
+    auto* context = static_cast<ServiceContext*>(driver.GetServiceContext());
+    if (!context || !context->audioCoordinator) return kIOReturnNotReady;
+
+    ASFW::Audio::AudioMeterSnapshot snapshot{};
+    const auto endpointId = ASFW::Audio::Devices::AudioEndpointId{arguments->scalarInput[0]};
+    const kern_return_t kr = context->audioCoordinator->CopyAudioMeterSnapshot(endpointId,
+                                                                                snapshot);
+    if (kr != kIOReturnSuccess) return kr;
+    ASFW::UserClient::Wire::AudioMeterSnapshotWire wire{};
+    wire.endpointId = endpointId.value;
+    wire.revision = snapshot.revision;
+    wire.valueCount = snapshot.valueCount;
+    wire.detectedSampleRateHz = snapshot.detectedSampleRateHz;
+    wire.enabled = snapshot.enabled ? 1U : 0U;
+    wire.clockLocked = snapshot.clockLocked ? 1U : 0U;
+    for (uint32_t i = 0; i < snapshot.valueCount; ++i) wire.values[i] = snapshot.values[i];
+    auto* data = OSData::withBytes(&wire, sizeof(wire));
+    if (!data) return kIOReturnNoMemory;
+    arguments->structureOutput = data;
+    arguments->structureOutputDescriptor = nullptr;
+    return kIOReturnSuccess;
+}
+
+kern_return_t HandleSetAudioMeteringEnabled(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments) {
+    if (!arguments || !arguments->scalarInput || arguments->scalarInputCount != 2 ||
+        arguments->scalarInput[1] > 1U) {
+        return kIOReturnBadArgument;
+    }
+    auto* context = static_cast<ServiceContext*>(driver.GetServiceContext());
+    if (!context || !context->audioCoordinator) return kIOReturnNotReady;
+    return context->audioCoordinator->SetAudioMeteringEnabled(
+        ASFW::Audio::Devices::AudioEndpointId{arguments->scalarInput[0]},
+        arguments->scalarInput[1] != 0U);
 }
 
 MethodDispatchResult DispatchDiagnosticsMethods(
@@ -735,7 +1132,7 @@ kern_return_t ASFWDriverUserClient::ExternalMethod(uint64_t selector,
     if (auto result = DispatchAVCMethods(*runtimeState, arguments, selector)) {
         return *result;
     }
-    if (auto result = DispatchDriverControlMethods(*ivars->driver, arguments, selector)) {
+    if (auto result = DispatchDriverControlMethods(*ivars->driver, *this, arguments, selector)) {
         return *result;
     }
     if (auto result = DispatchIsochMethods(*runtimeState, arguments, selector)) {

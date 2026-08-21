@@ -52,7 +52,7 @@ The actionable summary. Detail in the sections referenced.
 | D2 | DBC advanced by 8 across the cadence NO-DATA | **fixed, NOT verified on the wire** (`91f7ad0d`) | every committed capture predates the fix (§3) |
 | D3 | Only the **blank-slate half** of the vendor's clock choreography is performed; the completing pass that ships the mixer levels is never sent | **leading candidate; verified against kext + wire** | `SetClockSourceInternal` `if (!a3)` branch calls `FWSettingsLevels::SendToDevice`, seen on the wire as the `MAUDIO_PARAM` burst after the *second* clock frame (§8.4) |
 | D4 | The `MAUDIO_PARAM` window is never written | **same defect as D3, seen from the other side** | vendor writes 42 registers; FFADO writes the whole `0x00`–`0x9c` block because they are write-only with unknown power-on state (§8.4) |
-| D5 | Device state is never read; health is reported as belief | **blind spot** | `ReadClockHealth` returns cached values; the non-FCP lock byte at `0xffc700600000+82` is never read (§6.4) |
+| D5 | Device state is never read; health is reported as belief | addressed for opt-in metering | `MAudioSpecialProtocol` polls the non-FCP 84-byte meter block only when the user enables metering; `ReadClockHealth` itself remains belief-only (§6.4) |
 | D6 | Rate is asserted, not read back first | **ordering difference vs Linux** | Linux `special_get_rate` then re-applies that value (§8.2) |
 | D7 | No acceptance gate existed for captures | **closed** | `tools/1814/firebug_syt_check.py` + `amdtp_tx_reference.py` |
 
@@ -401,8 +401,11 @@ stream's timing — which sharpens the puzzle rather than explaining it, and rai
 the value of §6.4: if `buf[82] == 0xff` the device has no lock and will produce
 no events no matter what our CIP stream looks like.
 
-That read is the cheapest unused diagnostic available — a plain block read on the
-freeze-prone device's **non**-FCP path.
+That read is a plain block read on the freeze-prone device's **non**-FCP path.
+ASFW now exposes it as opt-in 1814 metering: a generation-pinned, one-in-flight
+20 Hz read, disabled by default and retried after one second on error. The
+snapshot carries the 38 peak values and the vendor-equivalent lock/rate result;
+it remains diagnostic only and never gates stream start.
 
 ---
 
@@ -609,7 +612,8 @@ reports `FDF = 0x02` — but it is a real ordering difference from the reference
 
 ### 8.3 Discriminating tests, cheapest first
 
-1. **Read `0xffc700600000 + 82` while the stream is up.** `0xff` means no clock
+1. **Observe the opt-in meter snapshot while the stream is up.** It reads
+   `0xffc700600000` and exposes the lock/FDF status without FCP traffic.
    lock, and then nothing about our packets matters; any other value is the SFC
    the device is actually running. One block read, no FCP exposure. This splits
    the whole problem in half and should be done before changing anything.
@@ -841,7 +845,8 @@ the struct base register there first.
 
 1. **Re-capture with the current driver.** Every ASFW trace in the repo predates
    `91f7ad0d`. Nothing else is worth doing first.
-2. **Read `0xffc700600000+82` while the stream is up.** One block read, no FCP
+2. **Enable metering and inspect the clock state while the stream is up.** One
+   block read every 50 ms, no FCP traffic.
    exposure. Separates "device has no clock" from "device dislikes our packets" —
    the two halves the investigation cannot currently tell apart.
 3. **Capture the vendor kext with isoch recording enabled.** Settles both the
