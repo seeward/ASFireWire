@@ -14,6 +14,7 @@ final class MAudio1814ConfigurationViewModel: ObservableObject {
     @Published private(set) var isApplying = false
     @Published private(set) var console = MAudio1814ConsoleState()
     @Published private(set) var peakHold = AudioMeterPeakHold()
+    private var lastLevelControllerPosition: Int16?
 
     private let connector: ASFWDriverConnector
     let controlPlane: MAudio1814ControlPlane
@@ -37,8 +38,10 @@ final class MAudio1814ConfigurationViewModel: ObservableObject {
                 // read as live signal that is not there any more.
                 if let meters = state.meters, meters.isEnabled {
                     peakHold.observe(meters)
+                    applyLevelController(meters)
                 } else {
                     peakHold.reset()
+                    lastLevelControllerPosition = nil
                 }
                 if configurationChanged {
                     selectedRateHz = state.configuration.committed.sampleRateHz
@@ -165,6 +168,39 @@ final class MAudio1814ConfigurationViewModel: ObservableObject {
     }
 
     func toggleLink(_ strip: AudioTopologyStrip) { console.toggleLink(strip.id) }
+
+    func isControlled(_ strip: AudioTopologyStrip) -> Bool { console.isControlled(strip.id) }
+
+    func toggleControl(_ strip: AudioTopologyStrip) { console.toggleControl(strip.id) }
+
+    /// Index of the assignable encoder in the meter snapshot. Bytes 1 and 2 of
+    /// the block are the two headphone knobs, which the driver binds itself;
+    /// byte 3 is this one, and its destination is ours to decide.
+    private static let levelControllerRotary = 2
+
+    /// Turns movement of the assignable knob into level writes on whatever
+    /// strips carry `ctrl`.
+    ///
+    /// The driver publishes an integrated position rather than detents, so the
+    /// movement is the difference between successive snapshots. Fast rotation
+    /// can outrun the write pacing and coalesce — the same limit the driver's
+    /// own headphone-knob path has, and the reference implementation's.
+    private func applyLevelController(_ meters: AudioMeterSnapshot) {
+        guard meters.rotaries.indices.contains(Self.levelControllerRotary) else {
+            lastLevelControllerPosition = nil
+            return
+        }
+        let position = meters.rotaries[Self.levelControllerRotary]
+        defer { lastLevelControllerPosition = position }
+        // The first snapshot establishes a reference; it is not a movement.
+        guard let previous = lastLevelControllerPosition, position != previous,
+              let topology else { return }
+
+        let delta = Int32(position) - Int32(previous)
+        for (control, value) in console.applyLevelControllerDelta(delta, to: topology) {
+            applyMixerControl(control, value: value)
+        }
+    }
 
     func toggleMute(_ strip: AudioTopologyStrip) {
         console.toggleMute(strip.id)

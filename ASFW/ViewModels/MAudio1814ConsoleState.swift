@@ -23,6 +23,17 @@ struct MAudio1814ConsoleState: Equatable {
     private(set) var unlinked: Set<String> = []
     private(set) var muted: Set<String> = []
     private(set) var soloed: Set<String> = []
+    /// Strips the front-panel assignable knob drives — the vendor's `ctrl`.
+    ///
+    /// The vendor keeps this as a 64-bit mask in the `MARotaryControlV2`
+    /// property, one bit per channel *pair*, with a fixed base per group:
+    /// SW return 0, input 16, output 32, aux output 50, headphone 56
+    /// (`UserRotatedHardwareKnob` @ 0x21334). Sixteen of those bits are
+    /// meaningful on an 1814. It is registered with a null setter, so the mask
+    /// never reaches the device — it is host state, like mute and solo, and a
+    /// set of strip ids is the same information in a form that cannot go out of
+    /// step with the topology.
+    private(set) var controlled: Set<String> = []
     private var intent: [UInt32: Int32] = [:]
 
     var isSoloActive: Bool { !soloed.isEmpty }
@@ -69,6 +80,48 @@ struct MAudio1814ConsoleState: Equatable {
 
     mutating func toggleSolo(_ stripID: String) {
         if soloed.contains(stripID) { soloed.remove(stripID) } else { soloed.insert(stripID) }
+    }
+
+    func isControlled(_ stripID: String) -> Bool { controlled.contains(stripID) }
+
+    mutating func toggleControl(_ stripID: String) {
+        if controlled.contains(stripID) {
+            controlled.remove(stripID)
+        } else {
+            controlled.insert(stripID)
+        }
+    }
+
+    /// Applies one movement of the assignable knob to every assigned strip.
+    ///
+    /// `delta` is in raw level units, which is the same scale the driver
+    /// integrates the encoder in — one detent is 0x400, and levels are 0x100 per
+    /// decibel, so a detent is 4 dB. The ALSA runtime scales its delta by
+    /// `(vol_max - vol_min) / (rotary_max - rotary_min)`, which for this device
+    /// is 1, so adding it directly matches the reference.
+    ///
+    /// Returns the writes to issue. A suppressed strip still moves — the knob
+    /// sets what the fader will come back to — but nothing is written for it,
+    /// because the device is deliberately holding silence there.
+    mutating func applyLevelControllerDelta(
+        _ delta: Int32, to topology: AudioTopologySnapshot
+    ) -> [(MAudio1814ControlID, Int32)] {
+        guard delta != 0 else { return [] }
+        var writes: [(MAudio1814ControlID, Int32)] = []
+        for strip in topology.strips where controlled.contains(strip.id) {
+            let suppressed = isSuppressed(strip.id, kind: strip.kind)
+            for channel in strip.channels {
+                let current = intent[channel.levelControl.rawValue] ?? channel.levelRaw
+                let next = max(MAudio1814Level.rawMinimum,
+                               min(MAudio1814Level.rawMaximum, current + delta))
+                guard next != current else { continue }
+                intent[channel.levelControl.rawValue] = next
+                if !suppressed {
+                    writes.append((channel.levelControl, next))
+                }
+            }
+        }
+        return writes
     }
 
     /// Tracks the confirmed level of every unsuppressed channel, so a later mute

@@ -48,6 +48,7 @@ struct AudioTopologyConsoleRack: View {
                         isLinked: viewModel.isLinked(strip),
                         isMuted: viewModel.isMuted(strip),
                         isSoloed: viewModel.isSoloed(strip),
+                        isControlled: viewModel.isControlled(strip),
                         isSuppressed: viewModel.isSuppressed(strip),
                         level: { viewModel.displayedLevel(strip, $0) },
                         setLevel: { viewModel.setLevel(strip, $0, position: $1) },
@@ -57,7 +58,8 @@ struct AudioTopologyConsoleRack: View {
                         setSource: viewModel.applyMixerControl,
                         toggleLink: { viewModel.toggleLink(strip) },
                         toggleMute: { viewModel.toggleMute(strip) },
-                        toggleSolo: { viewModel.toggleSolo(strip) })
+                        toggleSolo: { viewModel.toggleSolo(strip) },
+                        toggleControl: { viewModel.toggleControl(strip) })
                 }
             }
         }
@@ -77,6 +79,8 @@ private struct AudioTopologySignalFlowLegend: View {
                  detail: "fader → the two stereo mixes → 1/2 OUT, 3/4 OUT, phones (mon 1/2 / 3/4)")
             flow(tint: .yellow, title: "aux",
                  detail: "aux knob → the AUX bus → AUX OUT, or any output set to Aux")
+            flow(tint: .teal, title: "ctrl",
+                 detail: "the front-panel assignable knob drives every strip marked ctrl")
             Spacer(minLength: 0)
         }
         .padding(.top, 2)

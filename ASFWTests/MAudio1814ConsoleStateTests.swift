@@ -162,6 +162,96 @@ struct MAudio1814ConsoleStateTests {
         #expect(state.pendingLevelWrites(for: silenced).allSatisfy { $0.1 == -2048 })
     }
 
+    // MARK: - Level controller (the vendor's `ctrl`)
+
+    @Test func nothingIsAssignedToTheLevelControllerByDefault() {
+        let state = MAudio1814ConsoleState()
+        #expect(!state.isControlled("analog-0"))
+        #expect(state.controlled.isEmpty)
+    }
+
+    /// One detent is 0x400 in the encoder's units and levels are 0x100 per
+    /// decibel, so a detent is 4 dB and the raw delta applies directly. The ALSA
+    /// runtime scales by (vol range / rotary range), which is 1 here.
+    @Test func theKnobMovesOnlyAssignedStrips() {
+        let model = topology([
+            strip("analog-0", kind: .physicalInput, group: .mixerAnalogGain, pair: 0, level: 0),
+            strip("analog-1", kind: .physicalInput, group: .mixerAnalogGain, pair: 1, level: 0),
+        ])
+        var state = MAudio1814ConsoleState()
+        state.reconcile(with: model)
+        state.toggleControl("analog-0")
+
+        let writes = state.applyLevelControllerDelta(-0x400, to: model)
+        #expect(writes.count == 2)
+        #expect(writes.allSatisfy { $0.1 == -0x400 })
+        #expect(writes.allSatisfy { $0.0.group == .mixerAnalogGain && $0.0.index < 2 })
+        // -0x400 raw is -4 dB.
+        #expect(MAudio1814Level.decibels(raw: writes[0].1) == -4)
+    }
+
+    @Test func theKnobDrivesEveryAssignedStripTogether() {
+        let model = topology([
+            strip("analog-0", kind: .physicalInput, group: .mixerAnalogGain, pair: 0, level: 0),
+            strip("phones-0", kind: .headphone, group: .headphoneVolume, pair: 0, level: 0),
+        ])
+        var state = MAudio1814ConsoleState()
+        state.reconcile(with: model)
+        state.toggleControl("analog-0")
+        state.toggleControl("phones-0")
+
+        let writes = state.applyLevelControllerDelta(-0x400, to: model)
+        #expect(writes.count == 4)
+        #expect(Set(writes.map(\.0.group)) == [.mixerAnalogGain, .headphoneVolume])
+    }
+
+    @Test func theKnobClampsAtTheEndsOfTheRange() {
+        let model = topology([strip("analog-0", kind: .physicalInput,
+                                    group: .mixerAnalogGain, pair: 0, level: 0)])
+        var state = MAudio1814ConsoleState()
+        state.reconcile(with: model)
+        state.toggleControl("analog-0")
+
+        // Already at unity: turning up produces nothing rather than overflowing.
+        #expect(state.applyLevelControllerDelta(0x400, to: model).isEmpty)
+
+        let floored = topology([strip("analog-0", kind: .physicalInput,
+                                      group: .mixerAnalogGain, pair: 0,
+                                      level: MAudio1814Level.rawMinimum)])
+        var atFloor = MAudio1814ConsoleState()
+        atFloor.reconcile(with: floored)
+        atFloor.toggleControl("analog-0")
+        #expect(atFloor.applyLevelControllerDelta(-0x400, to: floored).isEmpty)
+    }
+
+    /// A muted strip still follows the knob — the knob is setting what the fader
+    /// comes back to — but nothing is written while the device holds silence.
+    @Test func theKnobMovesAMutedStripWithoutWritingToIt() {
+        let model = topology([strip("analog-0", kind: .physicalInput,
+                                    group: .mixerAnalogGain, pair: 0, level: 0)])
+        var state = MAudio1814ConsoleState()
+        state.reconcile(with: model)
+        state.toggleControl("analog-0")
+        state.toggleMute("analog-0")
+
+        #expect(state.applyLevelControllerDelta(-0x400, to: model).isEmpty)
+
+        let silenced = topology([strip("analog-0", kind: .physicalInput,
+                                       group: .mixerAnalogGain, pair: 0,
+                                       level: MAudio1814Level.rawMinimum)])
+        state.toggleMute("analog-0")
+        #expect(state.pendingLevelWrites(for: silenced).allSatisfy { $0.1 == -0x400 })
+    }
+
+    @Test func aStationaryKnobWritesNothing() {
+        let model = topology([strip("analog-0", kind: .physicalInput,
+                                    group: .mixerAnalogGain, pair: 0, level: 0)])
+        var state = MAudio1814ConsoleState()
+        state.reconcile(with: model)
+        state.toggleControl("analog-0")
+        #expect(state.applyLevelControllerDelta(0, to: model).isEmpty)
+    }
+
     @Test func linkTogglesIndependentlyPerStrip() {
         var state = MAudio1814ConsoleState()
         state.toggleLink("analog-0")

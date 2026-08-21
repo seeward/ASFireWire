@@ -13,6 +13,7 @@ struct AudioTopologyChannelStrip: View {
     let isLinked: Bool
     let isMuted: Bool
     let isSoloed: Bool
+    let isControlled: Bool
     let isSuppressed: Bool
     let level: (AudioTopologyStripChannel) -> Int32
     let setLevel: (AudioTopologyStripChannel, Double) -> Void
@@ -23,6 +24,7 @@ struct AudioTopologyChannelStrip: View {
     let toggleLink: () -> Void
     let toggleMute: () -> Void
     let toggleSolo: () -> Void
+    let toggleControl: () -> Void
 
     private enum Metrics {
         static let width: CGFloat = 138
@@ -99,11 +101,17 @@ struct AudioTopologyChannelStrip: View {
                     .frame(width: 30)
             }
 
-            HStack(spacing: 4) {
-                toggle("link", isOn: isLinked, tint: .blue, action: toggleLink)
-                toggle("mute", isOn: isMuted, tint: .red, action: toggleMute)
-                if strip.kind.isInput {
-                    toggle("solo", isOn: isSoloed, tint: .yellow, action: toggleSolo)
+            // `ctrl` assigns this strip to the front-panel assignable knob.
+            VStack(spacing: 4) {
+                HStack(spacing: 4) {
+                    toggle("ctrl", isOn: isControlled, tint: .teal, action: toggleControl)
+                    toggle("link", isOn: isLinked, tint: .blue, action: toggleLink)
+                }
+                HStack(spacing: 4) {
+                    toggle("mute", isOn: isMuted, tint: .red, action: toggleMute)
+                    if strip.kind.isInput {
+                        toggle("solo", isOn: isSoloed, tint: .yellow, action: toggleSolo)
+                    }
                 }
             }
 
@@ -130,8 +138,10 @@ struct AudioTopologyChannelStrip: View {
                 .fill(Color(white: 0.13))
                 .overlay {
                     RoundedRectangle(cornerRadius: 9)
-                        .strokeBorder(isSoloed ? Color.yellow : tint.opacity(0.28),
-                                      lineWidth: isSoloed ? 2 : 1)
+                        .strokeBorder(isSoloed ? Color.yellow
+                                        : isControlled ? Color.teal.opacity(0.7)
+                                        : tint.opacity(0.28),
+                                      lineWidth: isSoloed || isControlled ? 2 : 1)
                 }
         )
         .opacity(isSuppressed ? 0.5 : 1)
