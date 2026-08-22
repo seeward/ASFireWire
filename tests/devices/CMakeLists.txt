@@ -74,6 +74,13 @@ add_device_test(BeBoBProtocolTests
     "${ASFW_DRIVER_DIR}/Protocols/AVC/AudioFunctionBlockCommand.cpp"
 )
 
+# The capture channel map recovered from the vendor kext: the exact permutation,
+# the model gate that keeps the 1814's input skew off a ProjectMix, and the
+# decode split that depends on both.
+add_device_test(MAudioCaptureChannelMapTests
+    MAudioCaptureChannelMapTests.cpp
+)
+
 # M-Audio 1814 / ProjectMix blank-slate initialization through the real FCP
 # transport: exact vendor frame, selector command, and both timing boundaries.
 add_device_test(MAudioSpecialInitTests

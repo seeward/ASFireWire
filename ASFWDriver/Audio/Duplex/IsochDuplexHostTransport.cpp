@@ -16,7 +16,8 @@ kern_return_t IsochDuplexHostTransport::AttachReceiveConsumer(
     Encoding::AudioWireFormat wireFormat, uint32_t am824Slots, uint32_t channelOffset,
     uint32_t streamChannels, bool isSecondary,
     bool acceptHeaderOnlyNoDataTransition,
-    bool useTxDerivedPlaybackClock) noexcept {
+    bool useTxDerivedPlaybackClock,
+    const AudioEngine::Direct::Rx::RxCaptureChannelMap& captureChannelMap) noexcept {
     if (streamIndex >= Driver::IsochService::kMaxStreamsPerDirection) {
         return kIOReturnBadArgument;
     }
@@ -30,6 +31,7 @@ kern_return_t IsochDuplexHostTransport::AttachReceiveConsumer(
         .isSecondary = isSecondary,
         .acceptHeaderOnlyNoDataTransition = acceptHeaderOnlyNoDataTransition,
         .useTxDerivedPlaybackClock = useTxDerivedPlaybackClock,
+        .captureChannelMap = captureChannelMap,
     };
     // This is a DriverKit `noexcept` boundary: report allocation failure instead
     // of allowing std::make_unique to terminate the driver process.
@@ -127,12 +129,13 @@ kern_return_t IsochDuplexHostTransport::PrepareReceive(
     ASFW::Audio::Runtime::IDirectAudioBindingSource* bindingSource,
     Encoding::AudioWireFormat wireFormat, uint32_t am824Slots, uint32_t streamChannels,
     bool acceptHeaderOnlyNoDataTransition,
-    bool useTxDerivedPlaybackClock) noexcept {
+    bool useTxDerivedPlaybackClock,
+    const AudioEngine::Direct::Rx::RxCaptureChannelMap& captureChannelMap) noexcept {
     const kern_return_t attached =
         AttachReceiveConsumer(/*streamIndex=*/0, bindingSource, wireFormat, am824Slots,
                               /*channelOffset=*/0, streamChannels, /*isSecondary=*/false,
                               acceptHeaderOnlyNoDataTransition,
-                              useTxDerivedPlaybackClock);
+                              useTxDerivedPlaybackClock, captureChannelMap);
     if (attached != kIOReturnSuccess) {
         return attached;
     }
@@ -157,7 +160,8 @@ kern_return_t IsochDuplexHostTransport::PrepareReceiveStream(
         AttachReceiveConsumer(streamIndex, bindingSource, wireFormat, am824Slots, channelOffset,
                               streamChannels, /*isSecondary=*/true,
                               /*acceptHeaderOnlyNoDataTransition=*/false,
-                              /*useTxDerivedPlaybackClock=*/false);
+                              /*useTxDerivedPlaybackClock=*/false,
+                              /*captureChannelMap=*/{});
     if (attached != kIOReturnSuccess) {
         return attached;
     }

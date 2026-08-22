@@ -1200,7 +1200,8 @@ IOReturn DuplexStartTransaction::Run(const StartRequest& request) noexcept {
                                               streamProfile.captureWireFormat,
                                               masterCapture.am824Slots, masterCapture.pcmChannels,
                                               useMAudioDuplexChoreography,
-                                              useMAudioDuplexChoreography);
+                                              useMAudioDuplexChoreography,
+                                              streamProfile.captureChannelMap);
             if (prepareReceiveStatus != kIOReturnSuccess) {
                 return rollbackToFailure(prepareReceiveStatus,
                                          DuplexRestartPhase::kStartingHostReceive,

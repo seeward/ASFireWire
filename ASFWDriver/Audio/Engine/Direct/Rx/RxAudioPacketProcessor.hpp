@@ -2,6 +2,7 @@
 
 #include "../DirectInputWriter.hpp"
 #include "DirectRxTypes.hpp"
+#include "RxCaptureChannelMap.hpp"
 #include "../../../Wire/AMDTP/AmdtpTypes.hpp"
 
 #include <cstdint>
@@ -19,6 +20,10 @@ struct RxAudioPacketProcessorResult final {
     uint8_t fdf{0};
     uint8_t dbs{0};
     uint8_t dbc{0};
+    /// The capture map did not fit the packet's data block size, so the wire
+    /// order was used instead. A silent permutation failure would look exactly
+    /// like a correct decode, so it is reported rather than inferred.
+    bool mapRejected{false};
 };
 
 class RxAudioPacketProcessor final {
@@ -32,6 +37,11 @@ public:
     // full interleave width (stride) is owned by the writer's binding.
     // `publishTimeline` advances the producer cursor/frame counters — only the
     // master stream does this; secondary slices write PCM only.
+    // `captureMap` reorders wire slots onto channels and may delay a subset of
+    // them; the identity map costs nothing and is the default. `primeDelayLine`
+    // silences the delayed channels of the frames ahead of `absoluteFrame`, and
+    // must be set on the first packet of an epoch so the head of the delay line
+    // cannot expose stale buffer content.
     [[nodiscard]] RxAudioPacketProcessorResult ProcessPacket(const uint8_t* payload,
                                                              size_t length,
                                                              uint64_t absoluteFrame,
@@ -39,7 +49,9 @@ public:
                                                              uint32_t am824Slots,
                                                              ASFW::Encoding::AudioWireFormat format,
                                                              uint32_t channelOffset = 0,
-                                                             bool publishTimeline = true) noexcept;
+                                                             bool publishTimeline = true,
+                                                             const RxCaptureChannelMap& captureMap = {},
+                                                             bool primeDelayLine = false) noexcept;
 
 private:
     DirectInputWriter& writer_;

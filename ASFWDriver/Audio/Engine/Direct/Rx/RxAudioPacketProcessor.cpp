@@ -17,7 +17,9 @@ RxAudioPacketProcessorResult RxAudioPacketProcessor::ProcessPacket(const uint8_t
                                                                    uint32_t am824Slots,
                                                                    ASFW::Encoding::AudioWireFormat format,
                                                                    uint32_t channelOffset,
-                                                                   bool publishTimeline) noexcept {
+                                                                   bool publishTimeline,
+                                                                   const RxCaptureChannelMap& captureMap,
+                                                                   bool primeDelayLine) noexcept {
     RxAudioPacketProcessorResult result{};
 
     if (length < kIsochHeaderSize + 8) {
@@ -74,6 +76,30 @@ RxAudioPacketProcessorResult RxAudioPacketProcessor::ProcessPacket(const uint8_t
         return result;
     }
 
+    // A map sized for a different formation than the packet actually carries
+    // would read past the data blocks. Fall back to the wire order instead:
+    // presenting the device's own channel order is recoverable, reading out of
+    // bounds is not.
+    const bool mapUsable = captureMap.FitsWithin(channels, cip->dataBlockSize);
+    const RxCaptureChannelMap& effectiveMap =
+        mapUsable ? captureMap : RxCaptureChannelMap{};
+    if (!mapUsable) {
+        result.mapRejected = true;
+    }
+    const uint32_t delayFrames = effectiveMap.HasDelay() ? effectiveMap.delayFrames : 0;
+
+    // The head of a delay line has no predecessor to source its channels from.
+    // Silence it once per epoch so a restart cannot replay the previous run's
+    // audio on those channels for the length of the delay.
+    if (primeDelayLine && delayFrames != 0) {
+        for (uint32_t i = 0; i < delayFrames; ++i) {
+            float* frameOut = writer_.Frame(absoluteFrame + i);
+            if (frameOut) {
+                SilenceDelayedChannels(channels, effectiveMap, frameOut + channelOffset);
+            }
+        }
+    }
+
     // If armed: decode quadlets directly to ADK input memory
     const uint32_t* dataBlocks = &quadlets[2];
     for (size_t i = 0; i < eventCount; ++i) {
@@ -86,8 +112,26 @@ RxAudioPacketProcessorResult RxAudioPacketProcessor::ProcessPacket(const uint8_t
         const uint32_t* frameIn = dataBlocks + (i * cip->dataBlockSize);
         // Write this stream's slice at its channel offset into the interleaved
         // frame; the writer stride covers the buffer's full channel width.
-        DecodeDirectRxFrame(frameIn, channels, cip->dataBlockSize, format,
-                            frameOut + channelOffset);
+        if (effectiveMap.IsIdentity()) {
+            DecodeDirectRxFrame(frameIn, channels, cip->dataBlockSize, format,
+                                frameOut + channelOffset);
+            continue;
+        }
+
+        // Delayed channels go to a later frame. The producer cursor still ends
+        // at `absoluteFrame + eventCount`, so those channels trail the frontier
+        // by `delayFrames` until the following packets fill them in — which is
+        // invisible as long as the delay stays well inside the HAL's input
+        // cursor offset, and 16 frames against 128 has ample room.
+        float* delayedOut = nullptr;
+        if (delayFrames != 0) {
+            delayedOut = writer_.Frame(absoluteFrame + i + delayFrames);
+            if (delayedOut) {
+                delayedOut += channelOffset;
+            }
+        }
+        DecodeDirectRxFrameMapped(frameIn, channels, format, effectiveMap,
+                                  frameOut + channelOffset, delayedOut);
     }
 
     // Only the master stream advances the producer cursor/frame counters; a

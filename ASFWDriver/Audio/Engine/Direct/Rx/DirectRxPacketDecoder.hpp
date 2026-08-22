@@ -1,7 +1,11 @@
 #pragma once
 
 #include "DirectRxTypes.hpp"
+#include "RxCaptureChannelMap.hpp"
 #include "../../../Wire/AM824/AM824Decoder.hpp"
+// AudioWireFormat. Previously reached this header only via whoever included it
+// first; naming it here lets the decoder be included on its own.
+#include "../../../Wire/AMDTP/AmdtpTypes.hpp"
 #include <cstdint>
 
 namespace ASFW::AudioEngine::Direct::Rx {
@@ -45,6 +49,55 @@ inline void DecodeDirectRxFrame(const uint32_t* inWireQuadlets,
         } else {
             outPcmFrame[ch] =
                 Detail::DecodeAm824SlotToFloat32(inWireQuadlets[ch]);
+        }
+    }
+}
+
+/// Decodes one wire frame through a capture channel map.
+///
+/// Channels the map marks as delayed are written to `outDelayedFrame` — the
+/// same channel index, but a frame further along the writer's timeline. Because
+/// the writer is addressed by absolute frame, "delay this channel by N frames"
+/// and "write this channel N frames later" are the same operation, so the delay
+/// costs no history buffer and no per-stream state.
+///
+/// `outDelayedFrame` may be null only when the map declares no delay.
+inline void DecodeDirectRxFrameMapped(const uint32_t* inWireQuadlets,
+                                      uint32_t pcmChannels,
+                                      ASFW::Encoding::AudioWireFormat format,
+                                      const RxCaptureChannelMap& map,
+                                      float* outPcmFrame,
+                                      float* outDelayedFrame) noexcept {
+    for (uint32_t ch = 0; ch < pcmChannels; ++ch) {
+        float* destination = outPcmFrame;
+        if (map.IsDelayed(ch)) {
+            if (outDelayedFrame == nullptr) {
+                // The delayed frame fell outside the writer's range. Dropping
+                // the sample keeps the undelayed channels correct rather than
+                // writing this one to the wrong instant.
+                continue;
+            }
+            destination = outDelayedFrame;
+        }
+        const uint32_t quadlet = inWireQuadlets[map.SlotFor(ch)];
+        destination[ch] =
+            format == ASFW::Encoding::AudioWireFormat::kRawPcm24In32
+                ? Detail::DecodeRawSlotAsLabeledMBLAToFloat32(quadlet)
+                : Detail::DecodeAm824SlotToFloat32(quadlet);
+    }
+}
+
+/// Silences the delayed channels of one frame.
+///
+/// Used to prime the head of a delay line: the first `delayFrames` frames of a
+/// stream have no predecessor to source those channels from, so without this
+/// they would expose whatever the shared input buffer held from a previous run.
+inline void SilenceDelayedChannels(uint32_t pcmChannels,
+                                   const RxCaptureChannelMap& map,
+                                   float* outPcmFrame) noexcept {
+    for (uint32_t ch = 0; ch < pcmChannels; ++ch) {
+        if (map.IsDelayed(ch)) {
+            outPcmFrame[ch] = 0.0f;
         }
     }
 }

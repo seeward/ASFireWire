@@ -211,8 +211,11 @@ class FakeIsochDuplexHostTransport final : public IIsochDuplexHostTransport {
         ASFW::Encoding::AudioWireFormat wireFormat = ASFW::Encoding::AudioWireFormat::kAM824,
         uint32_t am824Slots = 0, uint32_t streamChannels = 0,
         bool acceptHeaderOnlyNoDataTransition = false,
-        bool useTxDerivedPlaybackClock = false) noexcept override {
+        bool useTxDerivedPlaybackClock = false,
+        const ASFW::AudioEngine::Direct::Rx::RxCaptureChannelMap& captureChannelMap =
+            {}) noexcept override {
         log_.Add("host.prepare_receive");
+        lastReceiveCaptureChannelMap = captureChannelMap;
         lastReceiveChannel = channel;
         lastReceiveBindingSource = bindingSource;
         lastReceiveWireFormat = wireFormat;
@@ -326,6 +329,7 @@ class FakeIsochDuplexHostTransport final : public IIsochDuplexHostTransport {
     uint32_t lastReceiveStreamChannels{0};
     bool lastReceiveAcceptHeaderOnlyNoDataTransition{false};
     bool lastReceiveUseTxDerivedPlaybackClock{false};
+    ASFW::AudioEngine::Direct::Rx::RxCaptureChannelMap lastReceiveCaptureChannelMap{};
     uint32_t lastScheduledReceiveCycleTimer{0};
     uint8_t lastTransmitChannel{0};
     uint8_t lastTransmitSourceId{0};

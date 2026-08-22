@@ -81,6 +81,8 @@ void DirectAudioReceiveConsumer::OnReceiveActivated() noexcept {
     secondaryAnchorEpoch_ = 0;
     absoluteFrameCursor_ = 0;
     cursorInitialized_ = false;
+    primeCaptureDelayLine_ = true;
+    captureMapRejectedLogBudget_ = kCaptureMapRejectedLogBudget;
     lastDbc_ = 0;
     dbcInitialized_ = false;
     ztsPublishCount_ = 0;
@@ -227,10 +229,23 @@ void DirectAudioReceiveConsumer::ConsumePacket(
     const uint32_t channels = configuration_.streamChannels > 0
         ? configuration_.streamChannels
         : inputView_.memory.inputChannels;
+    const bool primeDelayLine = primeCaptureDelayLine_;
     const auto result = processor_.ProcessPacket(
         packet.payload.data(), packet.payload.size(), absoluteFrameCursor_, channels,
         inputView_.deviceToHostAm824Slots, configuration_.wireFormat,
-        configuration_.channelOffset, !configuration_.isSecondary);
+        configuration_.channelOffset, !configuration_.isSecondary,
+        configuration_.captureChannelMap, primeDelayLine);
+    if (primeDelayLine && result.framesDecoded != 0) {
+        primeCaptureDelayLine_ = false;
+    }
+    if (result.mapRejected && captureMapRejectedLogBudget_ != 0) {
+        --captureMapRejectedLogBudget_;
+        ASFW_LOG_ERROR(DirectAudio,
+                       "[RxChannelMap] rejected: channels=%u dbs=%u mapSize=%zu — "
+                       "decoding in wire order",
+                       channels, result.dbs,
+                       configuration_.captureChannelMap.slotForChannel.size());
+    }
     const bool acceptedHeaderOnlyNoDataTransition =
         IsAcceptedHeaderOnlyNoDataTransition(packet, result);
     if (!configuration_.isSecondary && result.hasValidCip && result.syt != 0xffff) {
@@ -575,6 +590,7 @@ void DirectAudioReceiveConsumer::AnchorCursorToHostClockTimeline(
     absoluteFrameCursor_ =
         static_cast<uint64_t>(projectedFirstFrame) + result.framesDecoded;
     cursorInitialized_ = true;
+    primeCaptureDelayLine_ = true;
 
     // This packet's PCM was written at the pre-anchor cursor and is orphaned,
     // and every frame number published before now belongs to the dead origin.

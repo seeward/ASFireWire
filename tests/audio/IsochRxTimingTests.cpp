@@ -637,3 +637,87 @@ TEST(IsochRxTimingTests, RxAnchoredClockLeavesReceiveCursorAtItsOwnOrigin) {
     EXPECT_EQ(control.inputProducedEndFrame.load(std::memory_order_acquire),
               2u * kFrames);
 }
+
+// The delay half of a capture map is implemented by writing a channel to a
+// later absolute frame rather than by holding a history buffer. This exercises
+// that through the real writer: the permuted undelayed channels must land in
+// the current frame, the delayed one exactly `delayFrames` further on, and the
+// head of the delay line must be silenced rather than inheriting whatever the
+// shared input buffer already held.
+TEST(IsochRxTimingTests, CaptureChannelMapPermutesAndDefersDelayedChannels) {
+    constexpr uint32_t kChannels = 4;
+    constexpr uint32_t kDbs = 4;
+    constexpr uint32_t kDelayFrames = 2;
+    // channel -> slot, with channel 1 fed by slot 2 and deferred.
+    static constexpr std::array<uint8_t, kChannels> kSlots{0, 2, 1, 3};
+
+    alignas(4) std::array<uint8_t, 8 + 8 + (kDbs * 4)> packet{};
+    const uint16_t receiveTimestamp = static_cast<uint16_t>((5u << 13) | 200u);
+    packet[0] = static_cast<uint8_t>(receiveTimestamp & 0xFFu);
+    packet[1] = static_cast<uint8_t>(receiveTimestamp >> 8);
+    WriteBE32(packet.data() + 8, 0x02040000u);   // SID 2, DBS 4, DBC 0
+    WriteBE32(packet.data() + 12, 0x90021000u);  // AM824, 48k, real SYT
+    for (uint32_t slot = 0; slot < kDbs; ++slot) {
+        WriteBE32(packet.data() + 16 + (slot * 4), 0x40000000u | ((slot + 1u) << 8));
+    }
+
+    constexpr uint32_t kFrames = 16;
+    std::array<float, kFrames * kChannels> input{};
+    // Poison the buffer so an unprimed delay head is visible as a failure.
+    input.fill(-1.0f);
+
+    ASFW::Audio::Runtime::AudioTransportControlBlock control{};
+    FixedDirectAudioBindingSource source({
+        .generation = 1,
+        .inputBase = input.data(),
+        .inputBytes = sizeof(input),
+        .inputFrames = kFrames,
+        .inputChannels = kChannels,
+        .control = &control,
+        .sampleRateHz = 48000,
+        .valid = true,
+    });
+
+    ASFW::AudioEngine::Direct::Rx::RxCaptureChannelMap map{};
+    map.slotForChannel = kSlots;
+    map.channelCount = kChannels;
+    map.delayFrames = kDelayFrames;
+    map.delayedChannelMask = 1u << 1;
+
+    ASFW::AudioEngine::Direct::Rx::DirectAudioReceiveConsumer consumer(
+        &source,
+        {
+            .am824Slots = kDbs,
+            .streamChannels = kChannels,
+            .captureChannelMap = map,
+        });
+    const ASFW::Isoch::IsochReceiveBatch batch{
+        .drainCycleTimer = EncodeCycleTimer(13, 200, 0),
+        .drainHostTicks = 1'000'000,
+    };
+    const ASFW::Isoch::IsochReceivePacket isochPacket{
+        .descriptorIndex = 7,
+        .payload = packet,
+    };
+
+    consumer.OnReceiveActivated();
+    consumer.BeginReceiveBatch(batch);
+    consumer.ConsumePacket(batch, isochPacket);
+
+    const auto expectedFor = [](uint32_t slot) {
+        return static_cast<float>((slot + 1u) << 8) / 8388607.0f;
+    };
+
+    // Frame 0 carries the undelayed channels, permuted.
+    EXPECT_FLOAT_EQ(input[0 * kChannels + 0], expectedFor(kSlots[0]));
+    EXPECT_FLOAT_EQ(input[0 * kChannels + 2], expectedFor(kSlots[2]));
+    EXPECT_FLOAT_EQ(input[0 * kChannels + 3], expectedFor(kSlots[3]));
+    // Its delayed channel has no predecessor, so priming must have zeroed it.
+    EXPECT_FLOAT_EQ(input[0 * kChannels + 1], 0.0f);
+    EXPECT_FLOAT_EQ(input[1 * kChannels + 1], 0.0f);
+    // ...and the sample itself lands `delayFrames` later.
+    EXPECT_FLOAT_EQ(input[kDelayFrames * kChannels + 1], expectedFor(kSlots[1]));
+
+    // The producer cursor still ends at the undelayed frontier.
+    EXPECT_EQ(control.inputProducedEndFrame.load(std::memory_order_acquire), 1u);
+}

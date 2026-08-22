@@ -2,6 +2,7 @@
 
 #include "BeBoBProfileBuilder.hpp"
 #include "../Common/CommonProfileBuilder.hpp"
+#include "MAudio/MAudioCaptureChannelMap.hpp"
 #include "../../Protocols/BeBoB/MAudioSpecialFormation.hpp"
 
 #include <array>
@@ -112,6 +113,14 @@ BuildProfile(const Devices::ProfileBuildContext& context) noexcept {
             DeviceProfiles::Audio::ProfileBuilderId::MAudioFireWire1814 ||
         context.staticPlan.profileBuilder ==
             DeviceProfiles::Audio::ProfileBuilderId::MAudioProjectMix;
+    // These two personas do not report their capture channel order and cannot
+    // be asked for it — the BridgeCo channel-position extension their firmware
+    // would have to answer is the same one that freezes them. The order comes
+    // from M-Audio's own driver instead; see MAudioCaptureChannelMap.hpp for the
+    // provenance and for why only the 1814 carries the input skew.
+    profile.captureChannelMap = MAudio::CaptureChannelMapFor(
+        context.staticPlan.profileBuilder, profile.runtimeCaps.hostInputPcmChannels);
+
     if (context.staticPlan.profileBuilder ==
         DeviceProfiles::Audio::ProfileBuilderId::MAudioFireWire1814) {
         // 1814 V1 deliberately exposes only the two base-rate formations. The

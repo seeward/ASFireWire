@@ -11,6 +11,7 @@
 #include "../AudioClockPublisher.hpp"
 #include "../DirectInputWriter.hpp"
 #include "RxAudioPacketProcessor.hpp"
+#include "RxCaptureChannelMap.hpp"
 
 #include <functional>
 
@@ -37,6 +38,10 @@ class DirectAudioReceiveConsumer final : public ::ASFW::Isoch::IIsochReceiveCons
         // callback. RX remains available for capture/replay, but it must not
         // overwrite that playback clock with a late or header-only transition.
         bool useTxDerivedPlaybackClock{false};
+        // How this device's AM824 capture slots land on CoreAudio channels, and
+        // any per-channel skew to undo. Identity for every device that reports
+        // an honest channel order; chosen by the family that knows otherwise.
+        RxCaptureChannelMap captureChannelMap{};
     };
 
     using TimingLossCallback = std::function<void()>;
@@ -124,6 +129,10 @@ class DirectAudioReceiveConsumer final : public ::ASFW::Isoch::IIsochReceiveCons
     uint64_t secondaryAnchorEpoch_{0};
     uint64_t absoluteFrameCursor_{0};
     bool cursorInitialized_{false};
+    // Set whenever the frame cursor gains a new origin (stream start, or the
+    // TX-derived-clock rebase), so the next decoded packet primes the head of
+    // the capture delay line instead of inheriting the previous epoch's audio.
+    bool primeCaptureDelayLine_{true};
     uint64_t ztsPublishCount_{0};
     uint64_t timestampValidCount_{0};
     uint64_t timestampInvalidCount_{0};
@@ -158,6 +167,8 @@ class DirectAudioReceiveConsumer final : public ::ASFW::Isoch::IIsochReceiveCons
     // A packet that decoded fine but wrote no PCM. Bounded per start so a
     // permanently unbound writer names itself once instead of flooding at the
     // 8 kHz packet rate.
+    static constexpr uint32_t kCaptureMapRejectedLogBudget = 2;
+    uint32_t captureMapRejectedLogBudget_{kCaptureMapRejectedLogBudget};
     static constexpr uint32_t kUnwrittenStatusLogBudget = 4;
     uint32_t unwrittenStatusLogBudget_{kUnwrittenStatusLogBudget};
     static constexpr uint32_t kHeaderOnlyNoDataTransitionLogBudget = 4;

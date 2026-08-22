@@ -36,6 +36,7 @@ struct StreamPlan final {
     std::array<PlaybackStreamGeometry, kMaxAudioStreamsPerDirection> playbackStreams{};
     Encoding::AudioWireFormat captureWireFormat{Encoding::AudioWireFormat::kAM824};
     Encoding::AudioWireFormat playbackWireFormat{Encoding::AudioWireFormat::kAM824};
+    AudioEngine::Direct::Rx::RxCaptureChannelMap captureChannelMap{};
     StartPolicy startOrder{};
     StopPolicy stopOrder{};
 };
@@ -157,6 +158,7 @@ private:
             .runtimeCaps = caps,
             .captureWireFormat = profile.captureWireFormat,
             .playbackWireFormat = profile.playbackWireFormat,
+            .captureChannelMap = profile.captureChannelMap,
             .startOrder = profile.startPolicy,
             .stopOrder = profile.stopPolicy,
         };

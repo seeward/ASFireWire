@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "../Engine/Direct/Rx/RxCaptureChannelMap.hpp"
+
 #include "AudioIdentity.hpp"
 #include "../../DeviceProfiles/Audio/AudioDeviceCatalog.hpp"
 #include "../Duplex/DuplexPolicies.hpp"
@@ -121,6 +123,10 @@ struct ResolvedAudioEndpointProfile final {
 
     Encoding::AudioWireFormat captureWireFormat{Encoding::AudioWireFormat::kAM824};
     Encoding::AudioWireFormat playbackWireFormat{Encoding::AudioWireFormat::kAM824};
+    // Set by the family builder for devices whose capture slot order is not the
+    // channel order. Identity everywhere else; the duplex coordinator forwards
+    // it without interpreting it.
+    AudioEngine::Direct::Rx::RxCaptureChannelMap captureChannelMap{};
     uint8_t captureFramesPerDataPacket{8};
     uint8_t playbackFramesPerDataPacket{8};
     uint8_t captureFdf{0x02};
