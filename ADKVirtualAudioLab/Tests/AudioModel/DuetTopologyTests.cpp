@@ -35,6 +35,20 @@ void RunDuetTopologyTests(TestContext& ctx) {
         CHECK(ctx, b.routes.size() == 2);
     }
 
+    // The hardware mixer is a real 4×2 matrix: each of the four sources has
+    // an independent coefficient for both output channels.  Do not collapse
+    // the right-hand coefficients into invented pan/mute/solo controls.
+    auto* mixer = std::get_if<MixerNode>(&duet.nodes[4].body);
+    REQUIRE(ctx, mixer != nullptr);
+    CHECK(ctx, mixer->crosspoints.size() == 8);
+    CHECK(ctx, duet.parameters.size() == 18);
+    for (size_t index = 10; index < duet.parameters.size(); ++index) {
+        const auto* target = std::get_if<CrosspointId>(&duet.parameters[index].target);
+        REQUIRE(ctx, target != nullptr);
+        CHECK(ctx, target->value == index - 9);
+        CHECK(ctx, duet.parameters[index].semantic == ParameterSemantic::Level);
+    }
+
     // Invariant negative tests
     {
         // 1. Duplicate NodeId

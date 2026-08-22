@@ -89,7 +89,7 @@ void RunNamingTests(TestContext& ctx) {
         checkLabel(ctx, t, 11, "XLR In 1");
         checkLabel(ctx, t, 12, "Inst In 1");
         // The output selector's mixer leg is a bus, not a connector.
-        checkLabel(ctx, t, 53, "Mixer Master L/R");
+        checkLabel(ctx, t, 53, "Mixer Output L/R");
     }
 
     {

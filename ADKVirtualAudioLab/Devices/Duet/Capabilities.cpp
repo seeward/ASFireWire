@@ -8,7 +8,10 @@ const Device::DeviceCapabilities& capabilities() {
             .manufacturer = "Apogee",
             .model = "Duet FireWire",
         },
-        .sampleRates = {44100, 48000, 88200, 96000},
+        // These are the rates the current OXFW backend can actually apply and
+        // confirm.  Do not advertise the wider OXFW-chip rate table here: a
+        // topology fixture is also the contract offered to the UI.
+        .sampleRates = {32000, 44100, 48000},
         .optical = std::nullopt,
     };
     return kCaps;

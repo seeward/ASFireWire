@@ -49,11 +49,11 @@ void RunVirtualDeviceRuntimeTests(TestContext& ctx) {
         auto& rt = *rtRes;
 
         // Valid sample rate switch
-        auto cfgRes = rt.setConfiguration(DeviceConfiguration{.sampleRate = 96000});
+        auto cfgRes = rt.setConfiguration(DeviceConfiguration{.sampleRate = 32000});
         CHECK(ctx, cfgRes.has_value());
         CHECK(ctx, rt.revision() == 2);
-        CHECK(ctx, rt.configuration().sampleRate == 96000);
-        CHECK(ctx, rt.resolved().streams.sampleRate == 96000);
+        CHECK(ctx, rt.configuration().sampleRate == 32000);
+        CHECK(ctx, rt.resolved().streams.sampleRate == 32000);
         CHECK(ctx, rt.state().topologyRevision == 2);
 
         // Unsupported sample rate rejected cleanly without bumping revision
