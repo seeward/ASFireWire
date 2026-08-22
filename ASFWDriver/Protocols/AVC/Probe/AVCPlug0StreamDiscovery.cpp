@@ -96,6 +96,11 @@ private:
         for (const PlugDirection direction : {PlugDirection::kInput, PlugDirection::kOutput}) {
             queue_.push_back({ReadOnlyProbeCommand::kIsochPlugType, direction});
             queue_.push_back({ReadOnlyProbeCommand::kStreamFormatList, direction});
+            // BridgeCo exposes the device-facing AM824 order here.  The
+            // resulting map is consumed by BeBoB on both stream directions;
+            // without this request every profile silently falls back to
+            // identity and misroutes devices such as the Phase 88.
+            queue_.push_back({ReadOnlyProbeCommand::kChannelPositions, direction});
         }
     }
 
