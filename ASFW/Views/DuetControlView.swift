@@ -9,39 +9,15 @@ struct DuetControlView: View {
 
     var body: some View {
         Group {
-            if let topology = viewModel.topology, let controls = viewModel.controls {
-                List {
-                    Section("Signal graph") {
-                        LabeledContent("Nodes", value: topology.nodes.count.formatted())
-                        LabeledContent("Fixed links", value: topology.fixedLinks.count.formatted())
-                        LabeledContent("Routes", value: topology.routes.count.formatted())
-                        LabeledContent("Mixer crosspoints", value: topology.crosspoints.count.formatted())
-                    }
-
-                    SemanticParameterSection(
-                        title: "Inputs", parameters: viewModel.inputParameters, controls: controls,
-                        parameterTitle: viewModel.title, isWriting: viewModel.writingParameterIDs.contains,
-                        submit: viewModel.submit
-                    )
-                    SemanticParameterSection(
-                        title: "Output", parameters: viewModel.outputParameters, controls: controls,
-                        parameterTitle: viewModel.title, isWriting: viewModel.writingParameterIDs.contains,
-                        submit: viewModel.submit
-                    )
-                    SemanticParameterSection(
-                        title: "4 × 2 mixer", parameters: viewModel.mixerParameters, controls: controls,
-                        parameterTitle: viewModel.title, isWriting: viewModel.writingParameterIDs.contains,
-                        submit: viewModel.submit
-                    )
-                    SemanticParameterSection(
-                        title: "Other controls", parameters: viewModel.otherParameters, controls: controls,
-                        parameterTitle: viewModel.title, isWriting: viewModel.writingParameterIDs.contains,
-                        submit: viewModel.submit
-                    )
-                }
+            if let console = viewModel.console {
+                DuetConsoleView(
+                    console: console,
+                    isWriting: viewModel.writingParameterIDs.contains,
+                    submit: { control, value in viewModel.submit(control.parameter, value: value) }
+                )
             } else {
                 ContentUnavailableView(
-                    "No driver-owned Duet configuration available",
+                    "Duet console is not ready",
                     systemImage: "slider.horizontal.3",
                     description: Text(viewModel.statusText)
                 )

@@ -30,8 +30,8 @@ struct AudioControlSurfaceSnapshot: Equatable, Sendable {
         value(for: control.rawValue)
     }
 
-    var isMAudioSpecialMixer: Bool { kind == .mAudioSpecialMixer }
-    var isSemanticTopologyBacked: Bool { kind == .apogeeDuet }
+    nonisolated var isMAudioSpecialMixer: Bool { kind == .mAudioSpecialMixer }
+    nonisolated var isSemanticTopologyBacked: Bool { kind == .apogeeDuet }
 }
 
 /// A family of like-typed controls in the 1814's parameter window.
