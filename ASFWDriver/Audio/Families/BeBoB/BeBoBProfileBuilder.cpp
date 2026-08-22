@@ -3,6 +3,7 @@
 #include "BeBoBProfileBuilder.hpp"
 #include "../Common/CommonProfileBuilder.hpp"
 #include "MAudio/MAudioCaptureChannelMap.hpp"
+#include "MAudio/MAudioDuplexPolicy.hpp"
 #include "../../Protocols/BeBoB/MAudioSpecialFormation.hpp"
 
 #include <array>
@@ -17,7 +18,7 @@ namespace {
         : Configuration::OpticalMode::Spdif;
 }
 
-void Add1814ConfigurationCapability(
+void AddSpecialConfigurationCapability(
     Devices::ResolvedAudioEndpointProfile& profile,
     uint32_t rateHz,
     ::ASFW::Audio::BeBoB::MAudioDigitalFormat captureFormat,
@@ -62,7 +63,7 @@ void Add1814ConfigurationCapability(
     caps.hostToDeviceStreams[0].isoChannel = AudioStreamRuntimeCaps::kInvalidIsoChannel;
 }
 
-void Add1814ConfigurationCapabilities(
+void AddSpecialConfigurationCapabilities(
     Devices::ResolvedAudioEndpointProfile& profile) noexcept {
     constexpr std::array<uint32_t, 2> kRates{44100, 48000};
     constexpr std::array<::ASFW::Audio::BeBoB::MAudioDigitalFormat, 2> kFormats{
@@ -72,8 +73,8 @@ void Add1814ConfigurationCapabilities(
     for (const uint32_t rateHz : kRates) {
         for (const auto captureFormat : kFormats) {
             for (const auto playbackFormat : kFormats) {
-                Add1814ConfigurationCapability(profile, rateHz, captureFormat,
-                                                playbackFormat);
+                AddSpecialConfigurationCapability(profile, rateHz, captureFormat,
+                                                  playbackFormat);
             }
         }
     }
@@ -121,14 +122,20 @@ BuildProfile(const Devices::ProfileBuildContext& context) noexcept {
     profile.captureChannelMap = MAudio::CaptureChannelMapFor(
         context.staticPlan.profileBuilder, profile.runtimeCaps.hostInputPcmChannels);
 
-    if (context.staticPlan.profileBuilder ==
-        DeviceProfiles::Audio::ProfileBuilderId::MAudioFireWire1814) {
-        // 1814 V1 deliberately exposes only the two base-rate formations. The
-        // firmware supports more rate bands, but this coordinator/backend does
-        // not yet carry their geometry through the complete control path.
-        // Capture and playback remain independent: that is the device's
-        // dig_in_fmt/dig_out_fmt contract (bebob_maudio.c:166-216, 230-253).
-        Add1814ConfigurationCapabilities(profile);
+    if (MAudio::UsesSpecialDuplexPolicy(context.staticPlan.profileBuilder)) {
+        // Both special personas deliberately expose only the two base-rate
+        // formations for now. The firmware supports more rate bands, but this
+        // coordinator/backend does not yet carry their geometry through the
+        // complete control path. Capture and playback remain independent: that
+        // is the device's dig_in_fmt/dig_out_fmt contract
+        // (bebob_maudio.c:166-216, 230-253).
+        //
+        // The formation table is shared — only the rate *count* differs between
+        // the two (ProjectMix stops after 96 kHz), so the 44.1/48 geometry these
+        // capabilities describe is identical. ProjectMix's own
+        // `SwitchDigitalSignals` calls the 1814's and then repeats one step, so
+        // the switching behaviour is shared too.
+        AddSpecialConfigurationCapabilities(profile);
     }
     profile.facets.push_back({Devices::FacetKind::Clock, 1});
     Common::AddDefaultTiming(profile, 4000);

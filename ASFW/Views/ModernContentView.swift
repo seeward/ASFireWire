@@ -61,7 +61,7 @@ struct ModernContentView: View {
         case audio = "Core Audio"
         case saffire = "Saffire"
         case duet = "Duet"
-        case mAudio1814 = "FireWire 1814"
+        case mAudio1814 = "M-Audio"
         case bebobShell = "BeBoB Shell"
         case diagnostics = "1394 Diagnostics"
         case diceReport = "DICE Report"

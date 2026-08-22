@@ -25,13 +25,13 @@ struct MAudio1814ConfigurationView: View {
                     viewModel: viewModel)
             } else {
                 ContentUnavailableView(
-                    "No FireWire 1814 configuration available",
+                    "No M-Audio configuration available",
                     systemImage: "slider.horizontal.3",
                     description: Text(viewModel.statusText)
                 )
             }
         }
-        .navigationTitle("FireWire 1814")
+        .navigationTitle("M-Audio 1814 / ProjectMix I/O")
         .task { await viewModel.poll() }
     }
 }

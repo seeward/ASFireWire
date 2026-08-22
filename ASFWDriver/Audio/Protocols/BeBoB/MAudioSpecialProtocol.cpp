@@ -134,10 +134,10 @@ bool MAudioSpecialProtocol::GetRuntimeAudioStreamCaps(
 bool MAudioSpecialProtocol::SupportsConfiguration(
     const Configuration::DeviceConfiguration& configuration) const noexcept {
     // The profile deliberately limits the first production coordinator backend
-    // to the two base-rate formations. ProjectMix remains rate-only until it
-    // gets its own capability envelope.
-    return model_ == MAudioSpecialModel::FireWire1814 &&
-           (configuration.sampleRate == 44100 || configuration.sampleRate == 48000) &&
+    // to the two base-rate formations. Both personas carry them: the formation
+    // table is shared and only its rate *count* differs (ProjectMix stops after
+    // 96 kHz), so 44.1/48 geometry is identical for the two.
+    return (configuration.sampleRate == 44100 || configuration.sampleRate == 48000) &&
            configuration.opticalInput.has_value() &&
            configuration.opticalOutput.has_value();
 }
@@ -145,7 +145,14 @@ bool MAudioSpecialProtocol::SupportsConfiguration(
 bool MAudioSpecialProtocol::CopyAudioControlSurfaceSnapshot(
     AudioControlSurfaceSnapshot& outSnapshot) const noexcept {
     outSnapshot = {};
-    if (model_ != MAudioSpecialModel::FireWire1814 || !parameterLock_) return false;
+    // The parameter window and the meter block are shared by both personas, not
+    // 1814-specific: `com_m_audio_FWProjectMixDevice` derives from
+    // `com_m_audio_FW1814Device` and overrides only geometry, the capture
+    // converter, digital-signal switching, factory reset and engine setup —
+    // never the mixer, metering or control-packet path. ALSA agrees, defining
+    // both as `SpecialModel<T>` parameterised solely by the clock protocol
+    // (runtime/bebob/src/maudio/special_model.rs:10-11).
+    if (!parameterLock_) return false;
 
     // Enumerated from the range table rather than a hand-kept list, so a group
     // added there cannot be silently missing from the surface. The whole window
@@ -174,7 +181,7 @@ bool MAudioSpecialProtocol::CopyAudioControlSurfaceSnapshot(
 bool MAudioSpecialProtocol::CopyAudioMeterSnapshot(
     AudioMeterSnapshot& outSnapshot) const noexcept {
     outSnapshot = {};
-    if (model_ != MAudioSpecialModel::FireWire1814 || !meterLock_) return false;
+    if (!meterLock_) return false;
 
     IOLockLock(meterLock_);
     outSnapshot.revision = meterRevision_;
@@ -196,7 +203,7 @@ bool MAudioSpecialProtocol::CopyAudioMeterSnapshot(
 }
 
 IOReturn MAudioSpecialProtocol::SetAudioMeteringEnabled(bool enabled) noexcept {
-    if (model_ != MAudioSpecialModel::FireWire1814 || !meterLock_) {
+    if (!meterLock_) {
         return kIOReturnUnsupported;
     }
 
@@ -382,7 +389,7 @@ void MAudioSpecialProtocol::CompleteMeterRead(
 void MAudioSpecialProtocol::ApplyAudioControlValue(
     uint32_t controlId, int32_t value, IAudioControlSurface::ApplyCallback callback) {
     if (!callback) return;
-    if (model_ != MAudioSpecialModel::FireWire1814 || !parameterLock_) {
+    if (!parameterLock_) {
         callback(kIOReturnUnsupported);
         return;
     }

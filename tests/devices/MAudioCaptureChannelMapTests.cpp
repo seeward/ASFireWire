@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "Audio/Families/BeBoB/MAudio/MAudioCaptureChannelMap.hpp"
+#include "Audio/Families/BeBoB/MAudio/MAudioDuplexPolicy.hpp"
 #include "Audio/Engine/Direct/Rx/DirectRxPacketDecoder.hpp"
 
 #include <array>
@@ -185,5 +186,43 @@ TEST(MAudioCaptureChannelMapTests, ProjectMixMappedDecodeWritesEveryChannelToThe
             static_cast<float>((kExpectedSlots10[ch] + 1u) << 8) / 8388607.0f;
         EXPECT_FLOAT_EQ(now[ch], expected) << "channel " << ch;
         EXPECT_FLOAT_EQ(later[ch], -1.0f) << "channel " << ch << " must not be delayed";
+    }
+}
+
+// ProjectMix I/O is untestable here — no unit available — so the properties that
+// keep it working are pinned as assertions instead. Both reference stacks say
+// the two personas share everything except the clock and the capture converter:
+// the kext's `com_m_audio_FWProjectMixDevice` derives from
+// `com_m_audio_FW1814Device` and overrides only geometry, that converter,
+// digital-signal switching, factory reset and engine setup, while ALSA defines
+// both as `SpecialModel<T>` parameterised solely by the clock protocol.
+TEST(MAudioCaptureChannelMapTests, BothPersonasAreDrivenByTheSameSpecialPolicy) {
+    using ASFW::Audio::Families::BeBoB::MAudio::UsesSpecialDuplexPolicy;
+
+    // The duplex choreography, the cadence-packet policy and the capability
+    // envelope all key off this predicate, so a persona missing from it silently
+    // loses the whole special-firmware stack.
+    EXPECT_TRUE(UsesSpecialDuplexPolicy(ProfileBuilderId::MAudioFireWire1814));
+    EXPECT_TRUE(UsesSpecialDuplexPolicy(ProfileBuilderId::MAudioProjectMix));
+    EXPECT_FALSE(UsesSpecialDuplexPolicy(ProfileBuilderId::TerraTecPhase88));
+
+    // Both get a capture map at both real formations...
+    for (const uint32_t channels : {10U, 16U}) {
+        EXPECT_FALSE(CaptureChannelMapFor(ProfileBuilderId::MAudioFireWire1814,
+                                          channels).IsIdentity())
+            << "1814 at " << channels;
+        EXPECT_FALSE(CaptureChannelMapFor(ProfileBuilderId::MAudioProjectMix,
+                                          channels).IsIdentity())
+            << "ProjectMix at " << channels;
+    }
+
+    // ...and the skew stays 1814-only at every geometry. This is the assertion
+    // that protects hardware we cannot test: applying the delay to a ProjectMix
+    // would introduce a 333 us error on six channels.
+    for (const uint32_t channels : {10U, 16U}) {
+        EXPECT_TRUE(CaptureChannelMapFor(ProfileBuilderId::MAudioFireWire1814,
+                                         channels).HasDelay());
+        EXPECT_FALSE(CaptureChannelMapFor(ProfileBuilderId::MAudioProjectMix,
+                                          channels).HasDelay());
     }
 }

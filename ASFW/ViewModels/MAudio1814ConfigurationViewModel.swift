@@ -10,7 +10,7 @@ final class MAudio1814ConfigurationViewModel: ObservableObject {
     @Published var selectedRateHz: UInt32 = 48_000
     @Published var selectedInputOptical: AudioOpticalMode = .spdif
     @Published var selectedOutputOptical: AudioOpticalMode = .spdif
-    @Published private(set) var statusText = "Looking for a FireWire 1814…"
+    @Published private(set) var statusText = "Looking for an M-Audio 1814 or ProjectMix I/O…"
     @Published private(set) var isApplying = false
     @Published private(set) var console = MAudio1814ConsoleState()
     @Published private(set) var peakHold = AudioMeterPeakHold()
