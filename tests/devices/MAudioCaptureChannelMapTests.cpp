@@ -10,6 +10,8 @@
 
 #include "Audio/Families/BeBoB/MAudio/MAudioCaptureChannelMap.hpp"
 #include "Audio/Families/BeBoB/MAudio/MAudioDuplexPolicy.hpp"
+#include "Audio/Families/BeBoB/MAudio/MAudioSpecialTiming.hpp"
+#include "Audio/Protocols/BeBoB/MAudioSpecialFormation.hpp"
 #include "Audio/Engine/Direct/Rx/DirectRxPacketDecoder.hpp"
 
 #include <array>
@@ -224,5 +226,80 @@ TEST(MAudioCaptureChannelMapTests, BothPersonasAreDrivenByTheSameSpecialPolicy) 
                                          channels).HasDelay());
         EXPECT_FALSE(CaptureChannelMapFor(ProfileBuilderId::MAudioProjectMix,
                                           channels).HasDelay());
+    }
+}
+
+// The vendor keeps reported latency and safety offset as two separate device
+// methods, and `m_audio_b_FWBaseEngine::ResetLatency` splits the round-trip
+// figure in half across the two directions. Pinning both, because these are
+// transcribed tables and a slipped digit lands recordings at the wrong offset
+// (latency) or produces dropouts (safety offset).
+TEST(MAudioCaptureChannelMapTests, VendorLatencyTablesAreReproducedExactly) {
+    using ASFW::Audio::Families::BeBoB::MAudio::SpecialRateTiming;
+    using ASFW::Audio::Families::BeBoB::MAudio::SpecialRateTimingFor;
+
+    struct Expectation {
+        uint32_t rateHz;
+        uint32_t roundTrip;
+        uint32_t safety;
+    };
+    // com_m_audio_FW1814Device::GetRoundTripLatencyForFDF @ 0xcf30
+    // m_audio_b_FWAudioDevice::GetSafetyOffsetForFDF      @ 0x1d58
+    constexpr Expectation k1814[]{
+        {44100, 210, 44}, {48000, 225, 48}, {88200, 358, 88},
+        {96000, 378, 96}, {176400, 642, 176}, {192000, 698, 192},
+    };
+    // com_m_audio_FWProjectMixDevice::GetRoundTripLatencyForFDF @ 0x1a5b0
+    constexpr Expectation kProjectMix[]{
+        {44100, 196, 44}, {48000, 208, 48}, {88200, 342, 88}, {96000, 366, 96},
+    };
+
+    const auto check = [](ProfileBuilderId id, const Expectation& e) {
+        SpecialRateTiming timing{};
+        ASSERT_TRUE(SpecialRateTimingFor(id, e.rateHz, timing)) << e.rateHz;
+        // Input takes the rounded-up half, output the rounded-down half, and the
+        // two must sum back to the vendor's round-trip figure.
+        EXPECT_EQ(timing.inputLatencyFrames, (e.roundTrip + 1U) / 2U) << e.rateHz;
+        EXPECT_EQ(timing.outputLatencyFrames, e.roundTrip / 2U) << e.rateHz;
+        EXPECT_EQ(timing.inputLatencyFrames + timing.outputLatencyFrames,
+                  e.roundTrip) << e.rateHz;
+        EXPECT_EQ(timing.safetyOffsetFrames, e.safety) << e.rateHz;
+    };
+    for (const auto& e : k1814) { check(ProfileBuilderId::MAudioFireWire1814, e); }
+    for (const auto& e : kProjectMix) { check(ProfileBuilderId::MAudioProjectMix, e); }
+
+    // Every safety offset is one millisecond of frames at its rate, which is
+    // almost certainly how the vendor chose the table.
+    for (const auto& e : k1814) {
+        EXPECT_EQ(e.safety, e.rateHz / 1000U) << e.rateHz;
+    }
+
+    // Nothing else gets these tables.
+    SpecialRateTiming ignored{};
+    EXPECT_FALSE(SpecialRateTimingFor(ProfileBuilderId::TerraTecPhase88, 48000, ignored));
+}
+
+// The port count is NOT a slot count. Both personas carry one AM824
+// conformant-data slot, so DBS is identical; only the number of ports muxed
+// through it differs. Getting this wrong would inflate DBS to 12 and make every
+// packet a geometry mismatch.
+TEST(MAudioCaptureChannelMapTests, MidiPortCountDiffersButTheSlotCountDoesNot) {
+    using ASFW::Audio::Families::BeBoB::MAudio::SpecialMidiPortCount;
+
+    EXPECT_EQ(SpecialMidiPortCount(ProfileBuilderId::MAudioFireWire1814), 1U);
+    EXPECT_EQ(SpecialMidiPortCount(ProfileBuilderId::MAudioProjectMix), 2U);
+    EXPECT_EQ(SpecialMidiPortCount(ProfileBuilderId::TerraTecPhase88), 0U);
+
+    // The formation is what decides DBS, and it is one conformant-data block for
+    // both regardless of port count (Linux bebob_maudio.c:249,252).
+    for (const uint32_t rateHz : {44100U, 48000U}) {
+        const auto formation = ::ASFW::Audio::BeBoB::MAudioFormationFor(
+            ::ASFW::Audio::BeBoB::MAudioDigitalFormat::SPDIF,
+            ::ASFW::Audio::BeBoB::MAudioDigitalFormat::SPDIF, rateHz);
+        ASSERT_TRUE(formation.has_value()) << rateHz;
+        EXPECT_EQ(formation->midiDataBlocks, 1U) << rateHz;
+        // 10 PCM + 1 MIDI = DBS 11, the value measured on the wire.
+        EXPECT_EQ(formation->capturePcmChannels + formation->midiDataBlocks, 11U)
+            << rateHz;
     }
 }

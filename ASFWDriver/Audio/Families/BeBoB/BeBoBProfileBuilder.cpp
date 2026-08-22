@@ -4,6 +4,7 @@
 #include "../Common/CommonProfileBuilder.hpp"
 #include "MAudio/MAudioCaptureChannelMap.hpp"
 #include "MAudio/MAudioDuplexPolicy.hpp"
+#include "MAudio/MAudioSpecialTiming.hpp"
 #include "../../Protocols/BeBoB/MAudioSpecialFormation.hpp"
 
 #include <array>
@@ -122,6 +123,7 @@ BuildProfile(const Devices::ProfileBuildContext& context) noexcept {
     profile.captureChannelMap = MAudio::CaptureChannelMapFor(
         context.staticPlan.profileBuilder, profile.runtimeCaps.hostInputPcmChannels);
 
+
     if (MAudio::UsesSpecialDuplexPolicy(context.staticPlan.profileBuilder)) {
         // Both special personas deliberately expose only the two base-rate
         // formations for now. The firmware supports more rate bands, but this
@@ -137,9 +139,39 @@ BuildProfile(const Devices::ProfileBuildContext& context) noexcept {
         // the switching behaviour is shared too.
         AddSpecialConfigurationCapabilities(profile);
     }
+    // MIDI is multiplexed into the single AM824 conformant-data slot both
+    // personas already carry — the port count does NOT change DBS. Linux sets
+    // `.midi = 1` unconditionally for both (bebob_maudio.c:249,252) and the
+    // AM824 layer caps conformant-data channels at one
+    // (`AM824_MAX_CHANNELS_FOR_MIDI`), muxing up to eight ports through it.
+    // Only the number of ports presented differs.
+    if (const uint16_t midiPorts =
+            MAudio::SpecialMidiPortCount(context.staticPlan.profileBuilder);
+        midiPorts != 0) {
+        profile.runtimeCaps.deviceToHostStreams[0].midiPorts = midiPorts;
+        profile.runtimeCaps.hostToDeviceStreams[0].midiPorts = midiPorts;
+        for (uint8_t i = 0; i < profile.configurationCapabilityCount; ++i) {
+            auto& caps = profile.configurationCapabilities[i].runtimeCaps;
+            caps.deviceToHostStreams[0].midiPorts = midiPorts;
+            caps.hostToDeviceStreams[0].midiPorts = midiPorts;
+        }
+    }
     profile.facets.push_back({Devices::FacetKind::Clock, 1});
     Common::AddDefaultTiming(profile, 4000);
     for (uint8_t i = 0; i < profile.timingCount; ++i) {
+        // The special-firmware personas publish their own per-rate figures, and
+        // the vendor keeps reported latency and safety offset as two separate
+        // device methods for a reason — see MAudioSpecialTiming.hpp. Everything
+        // else keeps the family default.
+        MAudio::SpecialRateTiming special{};
+        if (MAudio::SpecialRateTimingFor(context.staticPlan.profileBuilder,
+                                         profile.timing[i].sampleRateHz, special)) {
+            profile.timing[i].inputLatencyFrames = special.inputLatencyFrames;
+            profile.timing[i].outputLatencyFrames = special.outputLatencyFrames;
+            profile.timing[i].inputSafetyFrames = special.safetyOffsetFrames;
+            profile.timing[i].outputSafetyFrames = special.safetyOffsetFrames;
+            continue;
+        }
         profile.timing[i].inputLatencyFrames = 128;
         profile.timing[i].outputLatencyFrames = 128;
         profile.timing[i].inputSafetyFrames = 64;
