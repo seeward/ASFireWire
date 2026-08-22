@@ -124,6 +124,12 @@ BuildProfile(const Devices::ProfileBuildContext& context) noexcept {
     // provenance and for why only the 1814 carries the input skew.
     profile.captureChannelMap = MAudio::CaptureChannelMapFor(
         context.staticPlan.profileBuilder, profile.runtimeCaps.hostInputPcmChannels);
+    if (!MAudio::UsesSpecialDuplexPolicy(context.staticPlan.profileBuilder)) {
+        // Generic BeBoB devices answer BridgeCo channel-position queries during
+        // the safe plug-0 probe. Use that observed permutation; M-Audio special
+        // firmware is excluded because issuing the query freezes it.
+        profile.captureChannelMap = facts->captureChannelMap;
+    }
 
 
     if (MAudio::UsesSpecialDuplexPolicy(context.staticPlan.profileBuilder)) {

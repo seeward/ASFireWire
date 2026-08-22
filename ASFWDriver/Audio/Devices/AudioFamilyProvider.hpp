@@ -35,6 +35,9 @@ struct BeBoBProbeFacts final {
     AudioStreamRuntimeCaps streams{};
     std::vector<uint32_t> supportedRates;
     uint32_t operationPolicyId{0};
+    /// Value-owned BridgeCo plug-0 permutation for capture. Empty means the
+    /// device reported identity order or incomplete evidence, never a guess.
+    AudioEngine::Direct::Rx::RxCaptureChannelMap captureChannelMap{};
 };
 
 struct DiceProbeFacts final {

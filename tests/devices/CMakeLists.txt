@@ -81,6 +81,11 @@ add_device_test(MAudioCaptureChannelMapTests
     MAudioCaptureChannelMapTests.cpp
 )
 
+# Generic BeBoB BridgeCo channel-position / section-type capture mapping.
+add_device_test(BeBoBCaptureChannelMapTests
+    BeBoBCaptureChannelMapTests.cpp
+)
+
 # M-Audio 1814 / ProjectMix blank-slate initialization through the real FCP
 # transport: exact vendor frame, selector command, and both timing boundaries.
 add_device_test(MAudioSpecialInitTests

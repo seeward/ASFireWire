@@ -3,6 +3,7 @@
 
 #include "ExistingFamilyProviders.hpp"
 
+#include "BeBoB/BeBoBCaptureChannelMap.hpp"
 #include "../Protocols/BeBoB/GenericBeBoBProtocol.hpp"
 #include "../Protocols/BeBoB/MAudioSpecialProtocol.hpp"
 #include "../Protocols/BeBoB/Phase88Protocol.hpp"
@@ -652,6 +653,9 @@ private:
                         .streams = caps,
                         .supportedRates = std::move(rates),
                         .operationPolicyId = policy,
+                        .captureChannelMap = BeBoBProbe::CaptureChannelMapFromProbe(
+                            observedModel.output, caps.hostInputPcmChannels,
+                            caps.deviceToHostAm824Slots),
                     });
                 } else {
                     self->Complete(epoch, Devices::OxfwProbeFacts{
