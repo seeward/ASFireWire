@@ -658,7 +658,16 @@ actor MockASFWDriverControl: ASFWDriverControlling {
             zeroDataBlockSize: 0,
             geometryMismatch: 0,
             replayEntries: 7_936,
-            replayEpochResets: 1
+            replayEpochResets: 1,
+            captureReaderActive: true,
+            hasCompletedCaptureInterval: true,
+            captureAvailableFrames: 768,
+            captureCapacityFrames: 1_536,
+            captureStarvationEvents: 0,
+            captureTotalStarvedFrames: 0,
+            captureIntervalStarvationEvents: 0,
+            captureIntervalStarvedFrames: 0,
+            captureOverrunEvents: 0
         )]
     }
 

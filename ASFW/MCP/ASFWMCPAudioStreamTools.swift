@@ -40,6 +40,19 @@ struct ASFWMCPAudioStreamHealth: Equatable {
     let replayEntries: UInt64
     let replayEpochResets: UInt64
 
+    // Capture-ring delivery. Every counter above answers "did packets decode?".
+    // These answer "did the decoded audio reach the reader?" — the seam where a
+    // fully silent capture previously reported nothing but green.
+    let captureReaderActive: Bool
+    let hasCompletedCaptureInterval: Bool
+    let captureAvailableFrames: UInt64
+    let captureCapacityFrames: UInt32
+    let captureStarvationEvents: UInt64
+    let captureTotalStarvedFrames: UInt64
+    let captureIntervalStarvationEvents: UInt64
+    let captureIntervalStarvedFrames: UInt64
+    let captureOverrunEvents: UInt64
+
     var rejectedPackets: UInt64 {
         emptyCompletions &+ shortPackets &+ invalidCipHeaders &+
             zeroDataBlockSize &+ geometryMismatch
@@ -69,6 +82,16 @@ struct ASFWMCPAudioStreamHealth: Equatable {
         if dataPackets > 0 && replayEntries == 0 {
             return "dataNotAccepted"
         }
+        // Cross-layer invariant. Each layer below reports its own job succeeding,
+        // so "packets decoded" and "audio reached CoreAudio" have to be asked
+        // separately: an RX write cursor that shares no origin with the HAL's
+        // read cursor zero-fills every frame while all the counters above stay
+        // perfect. Only claimed when a reader is actually active and a full
+        // interval has completed, so warm-up and idle never trip it.
+        if captureReaderActive && hasCompletedCaptureInterval &&
+            captureIntervalStarvedFrames > 0 {
+            return "framesNotReachingReader"
+        }
         return "receivingData"
     }
 
@@ -86,6 +109,8 @@ struct ASFWMCPAudioStreamHealth: Equatable {
             return "Valid CIP headers arrived carrying SYT 0xFFFF and no audio frames. The device is in NO-DATA. This states what the device sent; it is not evidence about what the device is waiting for."
         case "dataNotAccepted":
             return "Data-bearing packets with valid SYT arrived but no replay entry was published. Inspect the SYT cadence detector rather than the device."
+        case "framesNotReachingReader":
+            return "Packets are decoding and being accepted, but the reader is being zero-filled: decoded audio is not landing where CoreAudio reads. Compare the RX write cursor's origin against the HAL sampleTime (driver ring, [RxRead] and [RxClockRebase]) before suspecting the device or the wire."
         default:
             return "Data-bearing packets are arriving and being accepted."
         }
@@ -115,6 +140,17 @@ struct ASFWMCPAudioStreamHealth: Equatable {
                 "rejectedPackets": .uint64(rejectedPackets),
                 "replayEntries": .uint64(replayEntries),
                 "replayEpochResets": .uint64(replayEpochResets)
+            ]),
+            "capture": .object([
+                "readerActive": .bool(captureReaderActive),
+                "hasCompletedInterval": .bool(hasCompletedCaptureInterval),
+                "availableFrames": .uint64(captureAvailableFrames),
+                "capacityFrames": .int(Int(captureCapacityFrames)),
+                "starvationEvents": .uint64(captureStarvationEvents),
+                "totalStarvedFrames": .uint64(captureTotalStarvedFrames),
+                "intervalStarvationEvents": .uint64(captureIntervalStarvationEvents),
+                "intervalStarvedFrames": .uint64(captureIntervalStarvedFrames),
+                "overrunEvents": .uint64(captureOverrunEvents)
             ])
         ])
     }
@@ -140,7 +176,16 @@ extension AudioTelemetryEndpoint {
             zeroDataBlockSize: rxZeroDataBlockSize,
             geometryMismatch: rxGeometryMismatch,
             replayEntries: rxReplayEntries,
-            replayEpochResets: rxReplayEpochResets
+            replayEpochResets: rxReplayEpochResets,
+            captureReaderActive: isRxCaptureReaderActive,
+            hasCompletedCaptureInterval: hasCompletedRxInterval,
+            captureAvailableFrames: rxCurrentAvailableFrames,
+            captureCapacityFrames: inputFrameCapacityFrames,
+            captureStarvationEvents: rxCaptureStarvationEvents,
+            captureTotalStarvedFrames: rxTotalStarvedFrames,
+            captureIntervalStarvationEvents: rxCompletedIntervalStarvationEvents,
+            captureIntervalStarvedFrames: rxCompletedIntervalStarvedFrames,
+            captureOverrunEvents: rxCaptureOverrunEvents
         )
     }
 }

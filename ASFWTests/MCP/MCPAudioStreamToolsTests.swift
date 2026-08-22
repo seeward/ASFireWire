@@ -123,7 +123,16 @@ struct MCPAudioStreamToolsTests {
             zeroDataBlockSize: 0,
             geometryMismatch: 0,
             replayEntries: 0,
-            replayEpochResets: 1
+            replayEpochResets: 1,
+            captureReaderActive: false,
+            hasCompletedCaptureInterval: false,
+            captureAvailableFrames: 0,
+            captureCapacityFrames: 1_536,
+            captureStarvationEvents: 0,
+            captureTotalStarvedFrames: 0,
+            captureIntervalStarvationEvents: 0,
+            captureIntervalStarvedFrames: 0,
+            captureOverrunEvents: 0
         )
 
         #expect(health.rejectedPackets == 1)
@@ -131,6 +140,67 @@ struct MCPAudioStreamToolsTests {
         #expect(health.explanation.contains("status-only/zero-length"))
         let counters = object(object(health.mcpValue())["counters"])
         #expect(counters["emptyCompletions"] == .uint64(1))
+    }
+
+    // The defect this verdict exists for: every packet counter is perfect and
+    // the old rules returned "receivingData" while CoreAudio got pure silence,
+    // because the RX write cursor and the HAL read cursor had different origins.
+    @Test func decodedFramesThatNeverReachTheReaderAreNamed() {
+        func health(readerActive: Bool,
+                    completedInterval: Bool,
+                    intervalStarvedFrames: UInt64) -> ASFWMCPAudioStreamHealth {
+            ASFWMCPAudioStreamHealth(
+                endpointId: AudioEndpointID(101),
+                deviceInstanceId: DeviceInstanceID(1),
+                observedGuid: 0x0011_2233_4455_6677,
+                bindingReady: true,
+                streaming: true,
+                sampleRateHz: 48_000,
+                inputChannels: 10,
+                outputChannels: 6,
+                packetsSeen: 3_103_932,
+                dataPackets: 2_327_949,
+                noDataPackets: 775_983,
+                emptyCompletions: 0,
+                shortPackets: 0,
+                invalidCipHeaders: 0,
+                zeroDataBlockSize: 0,
+                geometryMismatch: 0,
+                replayEntries: 3_103_932,
+                replayEpochResets: 1,
+                captureReaderActive: readerActive,
+                hasCompletedCaptureInterval: completedInterval,
+                captureAvailableFrames: 0,
+                captureCapacityFrames: 1_536,
+                captureStarvationEvents: 4_096,
+                captureTotalStarvedFrames: 2_097_152,
+                captureIntervalStarvationEvents: 32,
+                captureIntervalStarvedFrames: intervalStarvedFrames,
+                captureOverrunEvents: 0
+            )
+        }
+
+        let starving = health(readerActive: true,
+                              completedInterval: true,
+                              intervalStarvedFrames: 16_384)
+        #expect(starving.verdict == "framesNotReachingReader")
+        #expect(starving.explanation.contains("zero-filled"))
+        let capture = object(object(starving.mcpValue())["capture"])
+        #expect(capture["intervalStarvedFrames"] == .uint64(16_384))
+        #expect(capture["capacityFrames"] == .int(1_536))
+
+        // Same counters, reader healthy: must stay receivingData.
+        #expect(health(readerActive: true,
+                       completedInterval: true,
+                       intervalStarvedFrames: 0).verdict == "receivingData")
+        // No reader attached, or no interval yet: starvation is expected and
+        // must never be reported as a fault.
+        #expect(health(readerActive: false,
+                       completedInterval: true,
+                       intervalStarvedFrames: 16_384).verdict == "receivingData")
+        #expect(health(readerActive: true,
+                       completedInterval: false,
+                       intervalStarvedFrames: 16_384).verdict == "receivingData")
     }
 
     @Test func incompleteBindingIsVisibleAndNamed() {
@@ -152,7 +222,16 @@ struct MCPAudioStreamToolsTests {
             zeroDataBlockSize: 0,
             geometryMismatch: 0,
             replayEntries: 0,
-            replayEpochResets: 0
+            replayEpochResets: 0,
+            captureReaderActive: false,
+            hasCompletedCaptureInterval: false,
+            captureAvailableFrames: 0,
+            captureCapacityFrames: 1_536,
+            captureStarvationEvents: 0,
+            captureTotalStarvedFrames: 0,
+            captureIntervalStarvationEvents: 0,
+            captureIntervalStarvedFrames: 0,
+            captureOverrunEvents: 0
         )
 
         #expect(health.verdict == "bindingNotReady")
