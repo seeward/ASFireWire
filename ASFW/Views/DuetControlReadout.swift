@@ -12,9 +12,15 @@ struct DuetControlReadout: View {
 
     private var valueText: String {
         switch control.parameter.unit {
-        case .decibels: "\(control.value) dB"
-        case .normalized: "\(control.value)"
-        case .none: "\(control.value)"
+        case .decibels:
+            return "\(control.value) dB"
+        case .normalized:
+            let span = control.parameter.maximum - control.parameter.minimum
+            guard span > 0 else { return "0%" }
+            let position = Double(control.value - control.parameter.minimum) / Double(span)
+            return "\(Int((position * 100).rounded()))%"
+        case .none:
+            return "\(control.value)"
         }
     }
 }

@@ -23,10 +23,13 @@ struct AudioTopologyConsoleRack: View {
                           badge: viewModel.isSoloActive ? "Solo active" : "Console") {
             ScrollView(.horizontal, showsIndicators: true) {
                 HStack(alignment: .top, spacing: 14) {
-                    bank("INPUTS", tint: .cyan, strips: inputStrips)
-                    Rectangle().fill(Color.white.opacity(0.08))
-                        .frame(width: 1).frame(maxHeight: .infinity)
-                    bank("OUTPUTS", tint: .orange, strips: outputStrips)
+                    AudioConsoleRackBank(title: "INPUTS", tint: .cyan) {
+                        strips(inputStrips)
+                    }
+                    AudioConsoleRackDivider()
+                    AudioConsoleRackBank(title: "OUTPUTS", tint: .orange) {
+                        strips(outputStrips)
+                    }
                 }
                 .padding(.vertical, 4)
                 .fixedSize(horizontal: false, vertical: true)
@@ -35,33 +38,28 @@ struct AudioTopologyConsoleRack: View {
         }
     }
 
-    private func bank(_ caption: String, tint: Color,
-                      strips: [AudioTopologyStrip]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(caption).font(.system(size: 10).monospaced().bold()).foregroundStyle(tint)
-            HStack(alignment: .top, spacing: 6) {
-                ForEach(strips) { strip in
-                    AudioTopologyChannelStrip(
-                        strip: strip,
-                        meters: meters,
-                        peakHold: peakHold,
-                        isLinked: viewModel.isLinked(strip),
-                        isMuted: viewModel.isMuted(strip),
-                        isSoloed: viewModel.isSoloed(strip),
-                        isControlled: viewModel.isControlled(strip),
-                        isSuppressed: viewModel.isSuppressed(strip),
-                        level: { viewModel.displayedLevel(strip, $0) },
-                        setLevel: { viewModel.setLevel(strip, $0, position: $1) },
-                        setPan: { viewModel.setPan(strip, $0, position: $1) },
-                        setAux: { viewModel.setAux($0, position: $1) },
-                        setSend: viewModel.setTopologySend,
-                        setSource: viewModel.applyMixerControl,
-                        toggleLink: { viewModel.toggleLink(strip) },
-                        toggleMute: { viewModel.toggleMute(strip) },
-                        toggleSolo: { viewModel.toggleSolo(strip) },
-                        toggleControl: { viewModel.toggleControl(strip) })
-                }
-            }
+    @ViewBuilder
+    private func strips(_ strips: [AudioTopologyStrip]) -> some View {
+        ForEach(strips) { strip in
+            AudioTopologyChannelStrip(
+                strip: strip,
+                meters: meters,
+                peakHold: peakHold,
+                isLinked: viewModel.isLinked(strip),
+                isMuted: viewModel.isMuted(strip),
+                isSoloed: viewModel.isSoloed(strip),
+                isControlled: viewModel.isControlled(strip),
+                isSuppressed: viewModel.isSuppressed(strip),
+                level: { viewModel.displayedLevel(strip, $0) },
+                setLevel: { viewModel.setLevel(strip, $0, position: $1) },
+                setPan: { viewModel.setPan(strip, $0, position: $1) },
+                setAux: { viewModel.setAux($0, position: $1) },
+                setSend: viewModel.setTopologySend,
+                setSource: viewModel.applyMixerControl,
+                toggleLink: { viewModel.toggleLink(strip) },
+                toggleMute: { viewModel.toggleMute(strip) },
+                toggleSolo: { viewModel.toggleSolo(strip) },
+                toggleControl: { viewModel.toggleControl(strip) })
         }
     }
 }

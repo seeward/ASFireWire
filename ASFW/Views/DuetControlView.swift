@@ -12,8 +12,14 @@ struct DuetControlView: View {
             if let console = viewModel.console {
                 DuetConsoleView(
                     console: console,
+                    configuration: viewModel.configuration,
+                    selectedRateHz: $viewModel.selectedRateHz,
+                    isApplyingConfiguration: viewModel.isApplyingConfiguration,
+                    applySampleRate: viewModel.applySampleRate,
                     isWriting: viewModel.writingParameterIDs.contains,
-                    submit: { control, value in viewModel.submit(control.parameter, value: value) }
+                    submit: { control, value in viewModel.submit(control.parameter, value: value) },
+                    metersEnabled: viewModel.metersEnabled,
+                    setMetersEnabled: viewModel.setMeteringEnabled
                 )
             } else {
                 ContentUnavailableView(

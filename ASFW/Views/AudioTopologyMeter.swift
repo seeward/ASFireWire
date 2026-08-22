@@ -21,34 +21,13 @@ struct AudioTopologyMeter: View {
     }
 
     var body: some View {
-        GeometryReader { geometry in
-            let height = geometry.size.height
-            let fill = MAudio1814Level.meterPosition(raw: barRaw)
-            let held = MAudio1814Level.meterPosition(raw: heldRaw)
-            ZStack(alignment: .bottom) {
-                RoundedRectangle(cornerRadius: 2).fill(Color(white: 0.05))
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(LinearGradient(
-                        stops: [
-                            .init(color: .green, location: 0),
-                            .init(color: .green, location: 0.72),
-                            .init(color: .yellow, location: 0.88),
-                            .init(color: .red, location: 1),
-                        ],
-                        startPoint: .bottom, endPoint: .top))
-                    .frame(height: max(0, height * fill))
-                if held > 0.002 {
-                    Rectangle()
-                        .fill(held > 0.98 ? Color.red : Color.white)
-                        .frame(height: 2)
-                        .offset(y: -max(0, height * held - 2))
-                }
-            }
-        }
-        .frame(width: 13)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(name) peak meter")
-        .accessibilityValue(index == nil ? "Unavailable"
-                                         : "\(MAudio1814Level.formatMeter(raw: barRaw)) decibels")
+        AudioConsoleMeter(
+            level: MAudio1814Level.meterPosition(raw: barRaw),
+            heldPeak: index == nil ? nil : MAudio1814Level.meterPosition(raw: heldRaw),
+            label: "\(name) peak meter",
+            valueDescription: index == nil
+                ? "Unavailable"
+                : "\(MAudio1814Level.formatMeter(raw: barRaw)) decibels"
+        )
     }
 }
