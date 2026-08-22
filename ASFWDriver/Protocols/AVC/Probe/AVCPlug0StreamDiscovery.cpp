@@ -126,12 +126,18 @@ private:
             HandleFormation(request, response);
             return;
         }
-        if (response.operandLength < 8) {
+        // Section-info replies contain both the one-based section ID echoed at
+        // operand 7 and its type at operand 8. Other extended PLUG_INFO
+        // replies carry their value at operand 7.
+        const size_t minimumOperands =
+            request.command == ReadOnlyProbeCommand::kSectionType ? 9U : 8U;
+        if (response.operandLength < minimumOperands) {
             ASFW_LOG(AVC, "AVCProbe: short %{public}s response (%zu operands) GUID=0x%016llx",
                      RequestName(request.command), response.operandLength, guid_);
             return;
         }
-        const uint8_t value = response.operands[7];
+        const uint8_t value = response.operands[
+            request.command == ReadOnlyProbeCommand::kSectionType ? 8U : 7U];
         switch (request.command) {
             case ReadOnlyProbeCommand::kIsochPlugType:
                 Plug(request.direction).plugType = value;
