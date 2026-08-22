@@ -414,6 +414,25 @@ IOReturn AudioCoordinator::CopyAudioControlSurfaceSnapshot(
     return kIOReturnSuccess;
 }
 
+IOReturn AudioCoordinator::CopyAudioSemanticTopology(
+    EndpointId endpointId, AudioSemanticTopologySnapshot& outSnapshot) noexcept {
+    outSnapshot = {};
+    if (!endpointId || teardownRequested_.load(std::memory_order_acquire)) {
+        return kIOReturnNotReady;
+    }
+    const auto protocol = runtime_.FindShared(endpointId);
+    const auto endpoint = runtime_.FindEndpointRuntime(endpointId);
+    const auto* topology = protocol ? protocol->AsAudioSemanticTopology() : nullptr;
+    if (!topology || !endpoint) return kIOReturnUnsupported;
+    const uint64_t topologyRevision = endpoint->CopyTopologyRevision();
+    if (topologyRevision == 0 || !topology->CopyAudioSemanticTopology(outSnapshot)) {
+        return kIOReturnNotReady;
+    }
+    if (endpoint->CopyTopologyRevision() != topologyRevision) return kIOReturnBusy;
+    outSnapshot.topologyRevision = topologyRevision;
+    return kIOReturnSuccess;
+}
+
 IOReturn AudioCoordinator::RequestAudioControlValue(
     EndpointId endpointId, uint32_t controlId, int32_t value) noexcept {
     // Selector 1019 predates the asynchronous control plane. It deliberately

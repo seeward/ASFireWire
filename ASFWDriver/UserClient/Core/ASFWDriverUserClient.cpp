@@ -19,6 +19,7 @@
 #include "../WireFormats/AudioConfigurationWireFormats.hpp"
 #include "../WireFormats/AudioControlSurfaceWireFormats.hpp"
 #include "../WireFormats/AudioMeterWireFormats.hpp"
+#include "../WireFormats/AudioSemanticTopologyWireFormats.hpp"
 
 #include <DriverKit/IOLib.h>
 #include <DriverKit/OSData.h>
@@ -70,6 +71,7 @@ enum {
     kMethodGetAudioMeterSnapshotAsync = 1025,
     kMethodSetAudioMeteringEnabledAsync = 1026,
     kMethodRequestAudioConfigurationAsync = 1027,
+    kMethodGetAudioSemanticTopology = 1028,
     kMethodSetIsochVerbosity = 40,
     // 41 retired (was the dev TX-verifier toggle)
     kMethodSetAudioAutoStart = 42,
@@ -346,6 +348,8 @@ kern_return_t HandleGetAudioConfigurationEndpoints(
     ASFWDriver& driver, IOUserClientMethodArguments* arguments);
 kern_return_t HandleGetAudioControlSurface(
     ASFWDriver& driver, IOUserClientMethodArguments* arguments);
+kern_return_t HandleGetAudioSemanticTopology(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments);
 kern_return_t HandleRequestAudioControlValue(
     ASFWDriver& driver, IOUserClientMethodArguments* arguments);
 kern_return_t HandleGetAudioMeterSnapshot(
@@ -406,6 +410,8 @@ MethodDispatchResult DispatchDriverControlMethods(ASFWDriver& driver,
         return HandleGetAudioConfigurationEndpoints(driver, arguments);
     case kMethodGetAudioControlSurface:
         return HandleGetAudioControlSurface(driver, arguments);
+    case kMethodGetAudioSemanticTopology:
+        return HandleGetAudioSemanticTopology(driver, arguments);
     case kMethodRequestAudioControlValue:
         return HandleRequestAudioControlValue(driver, arguments);
     case kMethodSubmitAudioControlValue:
@@ -634,6 +640,27 @@ kern_return_t HandleGetAudioControlSurface(
     for (uint32_t i = 0; i < snapshot.valueCount; ++i) {
         wire.values[i] = {.id = snapshot.values[i].id, .value = snapshot.values[i].value};
     }
+    auto* data = OSData::withBytes(&wire, sizeof(wire));
+    if (!data) return kIOReturnNoMemory;
+    arguments->structureOutput = data;
+    arguments->structureOutputDescriptor = nullptr;
+    return kIOReturnSuccess;
+}
+
+kern_return_t HandleGetAudioSemanticTopology(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments) {
+    if (!arguments || !arguments->scalarInput || arguments->scalarInputCount != 1) {
+        return kIOReturnBadArgument;
+    }
+    auto* context = static_cast<ServiceContext*>(driver.GetServiceContext());
+    if (!context || !context->audioCoordinator) return kIOReturnNotReady;
+
+    const auto endpointId = ASFW::Audio::Devices::AudioEndpointId{arguments->scalarInput[0]};
+    ASFW::UserClient::Wire::AudioSemanticTopologySnapshotWire wire{};
+    const kern_return_t kr = context->audioCoordinator->CopyAudioSemanticTopology(
+        endpointId, wire.topology);
+    if (kr != kIOReturnSuccess) return kr;
+    wire.endpointId = endpointId.value;
     auto* data = OSData::withBytes(&wire, sizeof(wire));
     if (!data) return kIOReturnNoMemory;
     arguments->structureOutput = data;

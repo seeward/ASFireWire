@@ -27,6 +27,7 @@ class IDuplexDeviceControl;
 class IAudioConfigurationControl;
 class IAudioControlSurface;
 class IAudioMetering;
+class IAudioSemanticTopology;
 }
 
 namespace ASFW::Audio {
@@ -160,6 +161,17 @@ public:
     }
 
     virtual const IAudioControlSurface* AsAudioControlSurface() const noexcept {
+        return nullptr;
+    }
+
+    /// Optional protocol-neutral signal graph.  The model is immutable for a
+    /// topology revision; volatile control values and meters travel on their
+    /// dedicated surfaces.
+    virtual IAudioSemanticTopology* AsAudioSemanticTopology() noexcept {
+        return nullptr;
+    }
+
+    virtual const IAudioSemanticTopology* AsAudioSemanticTopology() const noexcept {
         return nullptr;
     }
 

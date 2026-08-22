@@ -101,6 +101,10 @@ public:
         kMethodGetAudioMeterSnapshotAsync = 1025,
         kMethodSetAudioMeteringEnabledAsync = 1026,
         kMethodRequestAudioConfigurationAsync = 1027,
+        // Immutable semantic graph for the endpoint's currently committed
+        // topology. Runtime values and meter samples are intentionally not
+        // part of this reply.
+        kMethodGetAudioSemanticTopology = 1028,
         // TODO(ASFW-IRM): Remove temporary IRM test method after dedicated validation tooling exists.
         kMethodTestIRMAllocation       = 26,
         kMethodTestIRMRelease          = 27,

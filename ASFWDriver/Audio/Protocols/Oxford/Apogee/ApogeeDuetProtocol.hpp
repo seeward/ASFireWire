@@ -21,6 +21,7 @@
 #pragma once
 
 #include "ApogeeDuetDuplex.hpp"
+#include "ApogeeDuetSemanticTopology.hpp"
 #include "ApogeeTypes.hpp"
 #include "ApogeeVendorCodec.hpp"
 #include "../OxfordCsr.hpp"
@@ -49,7 +50,8 @@ struct CMPDevice;
 
 namespace ASFW::Audio::Oxford::Apogee {
 
-class ApogeeDuetProtocol final : public IDeviceProtocol {
+class ApogeeDuetProtocol final : public IDeviceProtocol,
+                                 public IAudioSemanticTopology {
 public:
     // The command table and operand encoding moved to ApogeeVendorCodec (FW-126);
     // this alias keeps every existing ApogeeDuetProtocol::VendorCommand use valid.
@@ -87,6 +89,12 @@ public:
     IDuplexDeviceControl* AsDuplexDeviceControl() noexcept override { return &duplex_; }
     [[nodiscard]] const IDuplexDeviceControl* AsDuplexDeviceControl() const noexcept override {
         return &duplex_;
+    }
+    IAudioSemanticTopology* AsAudioSemanticTopology() noexcept override { return this; }
+    const IAudioSemanticTopology* AsAudioSemanticTopology() const noexcept override { return this; }
+    [[nodiscard]] bool CopyAudioSemanticTopology(
+        AudioSemanticTopologySnapshot& outSnapshot) const noexcept override {
+        return BuildApogeeDuetSemanticTopology(outSnapshot);
     }
 
     // IDeviceProtocol members the duplex controller answers. Kept here because
