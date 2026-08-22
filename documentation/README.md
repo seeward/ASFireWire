@@ -7,6 +7,7 @@ entry points.
 ## Design and planning
 
 - [Audio backend controls](AUDIO_BACKENDS_CONTROLS.md)
+- [Draft hardware audio integration and console-tuning guide](HARDWARE_AUDIO_INTEGRATION_DRAFT.md)
 - [Audio TX code-review guide](AUDIO_TX_CODE_REVIEW_GUIDE.md)
 - [BeBoB refactoring plan (historical)](BeBoB_REFACTOR.md)
 - [Existing-family audio device template](../ASFWDriver/Testing/Audio/README.md)
