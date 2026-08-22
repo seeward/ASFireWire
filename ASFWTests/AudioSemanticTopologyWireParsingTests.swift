@@ -70,4 +70,16 @@ struct AudioSemanticTopologyWireParsingTests {
         setLE(UInt32(99), at: 2264, in: &invalid)
         #expect(AudioSemanticTopologyWireDecoder.decode(invalid) == nil)
     }
+
+    @Test func decodesSemanticTopologyEndpointDiscovery() {
+        var wire = Data(repeating: 0, count: 72)
+        setLE(UInt32(1), at: 0, in: &wire)
+        setLE(UInt32(2), at: 4, in: &wire)
+        setLE(UInt64(7), at: 8, in: &wire)
+        setLE(UInt64(11), at: 16, in: &wire)
+
+        #expect(AudioSemanticTopologyWireDecoder.decodeEndpointIDs(wire) == [
+            AudioEndpointID(7), AudioEndpointID(11),
+        ])
+    }
 }

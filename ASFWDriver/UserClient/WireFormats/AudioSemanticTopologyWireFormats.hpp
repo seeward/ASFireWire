@@ -5,11 +5,20 @@
 
 #include "../../Audio/Shared/Topology/IAudioSemanticTopology.hpp"
 
+#include <array>
 #include <cstddef>
 
 namespace ASFW::UserClient::Wire {
 
 inline constexpr uint32_t kAudioSemanticTopologyWireVersion = 1;
+inline constexpr uint32_t kAudioSemanticTopologyEndpointListWireVersion = 1;
+
+struct AudioSemanticTopologyEndpointListWire final {
+    uint32_t version{kAudioSemanticTopologyEndpointListWireVersion};
+    uint32_t endpointCount{0};
+    std::array<uint64_t, ASFW::Audio::kMaxAudioSemanticTopologyEndpoints> endpointIds{};
+};
+static_assert(sizeof(AudioSemanticTopologyEndpointListWire) == 72);
 
 struct AudioSemanticTopologySnapshotWire final {
     uint32_t version{kAudioSemanticTopologyWireVersion};

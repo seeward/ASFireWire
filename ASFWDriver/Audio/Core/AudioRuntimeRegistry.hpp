@@ -9,6 +9,7 @@
 #include "../Devices/ResolvedAudioEndpointProfile.hpp"
 #include "../Runtime/AudioTelemetrySnapshot.hpp"
 #include "../Shared/Configuration/DeviceConfigurationSnapshot.hpp"
+#include "../Shared/Topology/IAudioSemanticTopology.hpp"
 
 #include <DriverKit/IOLib.h>
 
@@ -49,6 +50,12 @@ public:
     [[nodiscard]] uint32_t CopyConfigurationEndpointIds(
         std::array<Devices::AudioEndpointId,
                    Configuration::kMaxConfigurationSnapshotCapabilities>& out) noexcept;
+    /// Lists only endpoints whose protocol publishes a semantic topology. This
+    /// is deliberately separate from configuration-capability discovery: a
+    /// mixer-only device such as Duet need not expose rate/optical controls.
+    [[nodiscard]] uint32_t CopySemanticTopologyEndpointIds(
+        std::array<Devices::AudioEndpointId,
+                   kMaxAudioSemanticTopologyEndpoints>& out) noexcept;
 
     void Remove(Devices::AudioEndpointId endpointId) noexcept;
     void Clear() noexcept;

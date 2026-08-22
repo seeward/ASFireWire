@@ -393,6 +393,11 @@ uint32_t AudioCoordinator::CopyConfigurationEndpointIds(
     return runtime_.CopyConfigurationEndpointIds(out);
 }
 
+uint32_t AudioCoordinator::CopySemanticTopologyEndpointIds(
+    std::array<EndpointId, kMaxAudioSemanticTopologyEndpoints>& out) noexcept {
+    return runtime_.CopySemanticTopologyEndpointIds(out);
+}
+
 IOReturn AudioCoordinator::CopyAudioControlSurfaceSnapshot(
     EndpointId endpointId, AudioControlSurfaceSnapshot& outSnapshot) noexcept {
     outSnapshot = {};

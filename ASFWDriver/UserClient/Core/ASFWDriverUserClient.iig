@@ -105,6 +105,9 @@ public:
         // topology. Runtime values and meter samples are intentionally not
         // part of this reply.
         kMethodGetAudioSemanticTopology = 1028,
+        // Discovery contract for mixer/router-only endpoints. Kept separate
+        // from configuration endpoints, which require rate/optical support.
+        kMethodGetAudioSemanticTopologyEndpoints = 1029,
         // TODO(ASFW-IRM): Remove temporary IRM test method after dedicated validation tooling exists.
         kMethodTestIRMAllocation       = 26,
         kMethodTestIRMRelease          = 27,

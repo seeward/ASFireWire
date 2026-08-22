@@ -243,6 +243,14 @@ extension ASFWDriverConnector {
         return AudioSemanticTopologyWireDecoder.decode(output)
     }
 
+    func getAudioSemanticTopologyEndpointIDs() -> [AudioEndpointID] {
+        guard isConnected,
+              let data = callStruct(.getAudioSemanticTopologyEndpoints, initialCap: 72) else {
+            return []
+        }
+        return AudioSemanticTopologyWireDecoder.decodeEndpointIDs(data)
+    }
+
     func requestAudioControlValue(endpointID: AudioEndpointID,
                                   controlID: MAudio1814ControlID,
                                   value: Int32) -> kern_return_t {
@@ -362,6 +370,19 @@ enum AudioSemanticTopologyWireDecoder {
     nonisolated private static let crosspointOffset = 1956
     nonisolated private static let parameterOffset = 2244
     nonisolated private static let meterOffset = 3204
+
+    nonisolated static func decodeEndpointIDs(_ data: Data) -> [AudioEndpointID] {
+        guard data.count == 72,
+              let version = data.u32(at: 0), version == 1,
+              let count = data.u32(at: 4), count <= 8 else {
+            return []
+        }
+        let endpointIDs = (0..<Int(count)).compactMap { index -> AudioEndpointID? in
+            guard let raw = data.u64(at: 8 + index * 8), raw != 0 else { return nil }
+            return AudioEndpointID(rawValue: raw)
+        }
+        return endpointIDs.count == Int(count) ? endpointIDs : []
+    }
 
     nonisolated static func decode(_ data: Data) -> AudioSemanticTopologySnapshot? {
         guard data.count == wireSize,

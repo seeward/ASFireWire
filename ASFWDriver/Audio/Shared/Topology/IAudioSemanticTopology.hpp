@@ -144,6 +144,7 @@ struct AudioSemanticMeter final {
 static_assert(sizeof(AudioSemanticMeter) == 24);
 
 inline constexpr uint32_t kAudioSemanticTopologyVersion = 1;
+inline constexpr size_t kMaxAudioSemanticTopologyEndpoints = 8;
 inline constexpr size_t kMaxAudioSemanticNodes = 16;
 inline constexpr size_t kMaxAudioSemanticPorts = 40;
 inline constexpr size_t kMaxAudioSemanticFixedLinks = 40;

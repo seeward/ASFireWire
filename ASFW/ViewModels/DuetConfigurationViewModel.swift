@@ -32,7 +32,7 @@ final class DuetConfigurationViewModel: ObservableObject {
             return
         }
 
-        let endpointIDs = connector.getAudioConfigurationEndpointIDs()
+        let endpointIDs = connector.getAudioSemanticTopologyEndpointIDs()
         for endpointID in endpointIDs {
             guard let candidateTopology = connector.getAudioSemanticTopology(endpointID: endpointID) else {
                 continue
