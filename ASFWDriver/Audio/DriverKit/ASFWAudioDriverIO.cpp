@@ -11,6 +11,7 @@
 
 #include <DriverKit/DriverKit.h>
 
+#include <atomic>
 #include <cstring>
 
 namespace ASFW::Audio::DriverKit {
@@ -58,6 +59,45 @@ void ZeroInputFrameIfMissing(ASFW::Audio::Runtime::AudioGraphBinding& graph,
                 static_cast<size_t>(graph.memory.inputChannels) * sizeof(int32_t));
 }
 
+// A fixed budget spent from the first BeginRead is the wrong instrument here.
+// On a device whose stream warms up with NO-DATA the entire budget burns during
+// the warm-up window, every record reads `write=0`, and the steady state — the
+// only state that says whether capture works — is never sampled. Report the
+// *verdict* instead and log only when it changes, so a run costs a couple of
+// lines and any transition into or out of starvation is always captured.
+enum class CaptureReadVerdict : uint8_t {
+    kUnknown = 0,
+    kHealthy,        ///< Every requested frame came from the writer.
+    kPartialStarve,  ///< Some frames were zero-filled.
+    kTotalStarve,    ///< Nothing overlapped the writer's range.
+};
+
+[[nodiscard]] const char* CaptureReadVerdictName(CaptureReadVerdict verdict) noexcept {
+    switch (verdict) {
+        case CaptureReadVerdict::kHealthy:       return "healthy";
+        case CaptureReadVerdict::kPartialStarve: return "partial-starve";
+        case CaptureReadVerdict::kTotalStarve:   return "total-starve";
+        case CaptureReadVerdict::kUnknown:       break;
+    }
+    return "unknown";
+}
+
+std::atomic<uint32_t> gCaptureReadVerdict{
+    static_cast<uint32_t>(CaptureReadVerdict::kUnknown)};
+
+// Transitions are rare by construction, but a stream oscillating on the edge of
+// the ring could still flap at the IO rate. Cap the total so it can never
+// become a hot-path log source.
+constexpr uint32_t kCaptureReadTransitionBudget = 24;
+std::atomic<uint32_t> gCaptureReadTransitionBudget{kCaptureReadTransitionBudget};
+
+// Entry-level evidence. An absent [RxRead] record has four indistinguishable
+// causes: the HAL never calls us, `running` is false, `skeletonBound` is false,
+// or BeginRead is rejected by the ring-capacity guard before any work happens.
+// Logging at the top of the handler, before every gate, separates them.
+constexpr uint32_t kIoCallbackLogBudget = 24;
+std::atomic<uint32_t> gIoCallbackLogBudget{kIoCallbackLogBudget};
+
 bool PrepareCaptureRingForBeginRead(ASFW::Audio::Runtime::AudioGraphBinding& graph,
                                     ASFW::Audio::Runtime::AudioTransportControlBlock& control,
                                     uint64_t sampleTime,
@@ -84,6 +124,34 @@ bool PrepareCaptureRingForBeginRead(ASFW::Audio::Runtime::AudioGraphBinding& gra
         }
     }
 
+    // The HAL reads at `sampleTime`, which comes from the ZTS timeline; the RX
+    // consumer writes at its own absolute frame cursor. If those two numbering
+    // schemes do not share an origin, almost every requested frame falls
+    // outside [oldest, write) and is zero-filled, and capture presents as
+    // silence broken by isolated samples wherever the ranges happen to overlap.
+    // `delta` is the whole diagnosis: 0 means the writer is exactly at the read
+    // point, a large or drifting value means the two timelines are unrelated.
+    const CaptureReadVerdict verdict =
+        starvedFrames == 0          ? CaptureReadVerdict::kHealthy
+        : starvedFrames < frameCount ? CaptureReadVerdict::kPartialStarve
+                                     : CaptureReadVerdict::kTotalStarve;
+    const auto previousVerdict = static_cast<CaptureReadVerdict>(
+        gCaptureReadVerdict.exchange(static_cast<uint32_t>(verdict),
+                                     std::memory_order_relaxed));
+    if (verdict != previousVerdict &&
+        gCaptureReadTransitionBudget.load(std::memory_order_relaxed) != 0) {
+        gCaptureReadTransitionBudget.fetch_sub(1, std::memory_order_relaxed);
+        ASFW_LOG(DirectAudio,
+                 "[RxRead] %{public}s -> %{public}s sampleTime=%llu frames=%u "
+                 "write=%llu oldest=%llu delta=%lld starvedFrames=%u capacity=%u",
+                 CaptureReadVerdictName(previousVerdict),
+                 CaptureReadVerdictName(verdict),
+                 sampleTime, frameCount, write, oldest,
+                 static_cast<long long>(static_cast<int64_t>(write) -
+                                        static_cast<int64_t>(sampleTime)),
+                 starvedFrames, capacity);
+    }
+
     const uint64_t readEnd = sampleTime + frameCount;
     const uint64_t previousRead =
         control.captureRingReadFrame.load(std::memory_order_acquire);
@@ -103,6 +171,11 @@ bool PrepareCaptureRingForBeginRead(ASFW::Audio::Runtime::AudioGraphBinding& gra
 
 kern_return_t InstallIOOperationHandler(IOUserAudioDevice& audioDevice,
                                         ASFWAudioDriver_IVars& ivars) noexcept {
+    gCaptureReadVerdict.store(static_cast<uint32_t>(CaptureReadVerdict::kUnknown),
+                              std::memory_order_relaxed);
+    gCaptureReadTransitionBudget.store(kCaptureReadTransitionBudget,
+                                       std::memory_order_relaxed);
+    gIoCallbackLogBudget.store(kIoCallbackLogBudget, std::memory_order_relaxed);
     auto* driverIvars = &ivars;
     const kern_return_t error = audioDevice.SetIOOperationHandler(
         ^kern_return_t(IOUserAudioObjectID           objectID,
@@ -155,6 +228,17 @@ kern_return_t InstallIOOperationHandler(IOUserAudioDevice& audioDevice,
         const bool running = driverIvars->runtime.isRunning.load(std::memory_order_acquire);
         const bool skeletonBound =
             driverIvars->runtime.directAudioSkeletonBound.load(std::memory_order_acquire);
+
+        if (gIoCallbackLogBudget.load(std::memory_order_relaxed) != 0) {
+            gIoCallbackLogBudget.fetch_sub(1, std::memory_order_relaxed);
+            ASFW_LOG(DirectAudio,
+                     "[IoCall] op=%u frames=%u sampleTime=%llu running=%d "
+                     "skeletonBound=%d control=%d inCap=%u",
+                     static_cast<uint32_t>(operation), ioBufferFrameSize,
+                     sampleTime, running ? 1 : 0, skeletonBound ? 1 : 0,
+                     graphControl != nullptr ? 1 : 0,
+                     driverIvars->runtime.directAudioGraph.memory.inputFrameCapacity);
+        }
 
         if (!running) {
             driverIvars->runtime.ioCallbacksOutsideRun.fetch_add(

@@ -48,6 +48,8 @@ const char* DirectAudioReceiveConsumer::ReplayResetReasonName(
             return "syt-cadence-rejected";
         case ReplayResetReason::kClockAnchorRejected:
             return "clock-anchor-rejected";
+        case ReplayResetReason::kTxDerivedClockRebase:
+            return "tx-derived-clock-rebase";
     }
     return "unknown";
 }
@@ -91,6 +93,8 @@ void DirectAudioReceiveConsumer::OnReceiveActivated() noexcept {
     zeroDataBlockSizeCaptureLogBudget_ = kZeroDataBlockSizeCaptureLogBudget;
     zeroDataBlockSizeCaptureCount_ = 0;
     headerOnlyNoDataTransitionLogBudget_ = kHeaderOnlyNoDataTransitionLogBudget;
+    receivedWirePayloadLogBudget_ = kReceivedWirePayloadLogBudget;
+    unwrittenStatusLogBudget_ = kUnwrittenStatusLogBudget;
     ztsTelemetry_.Reset();
     ztsTelemetryLogGate_.Reset();
     prevLoggedAnchorFrame_ = 0;
@@ -106,6 +110,16 @@ void DirectAudioReceiveConsumer::OnReceiveQuiesced() noexcept {
     clockPublisher_.Unbind();
     inputView_ = {};
     replayResetForStart_ = false;
+    // The cached generation described the view we just dropped, so it must not
+    // survive the quiesce. The audio side only bumps its generation when the
+    // *binding* changes, not per stream start: across a stop/start of the same
+    // endpoint it republishes the same generation. Leaving the cache set makes
+    // the next BeginReceiveBatch() take its "nothing changed" early return, so
+    // the writer is never rebound and every packet then decodes down the
+    // kInvalidBinding path — which drops PCM while advancing the frame cursor
+    // and incrementing no reject counter. Capture goes silent with completely
+    // healthy telemetry.
+    lastBindingGeneration_ = 0;
 }
 
 void DirectAudioReceiveConsumer::BeginReceiveBatch(
@@ -219,6 +233,9 @@ void DirectAudioReceiveConsumer::ConsumePacket(
         configuration_.channelOffset, !configuration_.isSecondary);
     const bool acceptedHeaderOnlyNoDataTransition =
         IsAcceptedHeaderOnlyNoDataTransition(packet, result);
+    if (!configuration_.isSecondary && result.hasValidCip && result.syt != 0xffff) {
+        LogReceivedWirePayload(packet, result);
+    }
     if (result.status == DirectRxWriteStatus::kZeroDataBlockSize &&
         !acceptedHeaderOnlyNoDataTransition) {
         LogZeroDataBlockSizeEvidence(batch, packet, result);
@@ -255,6 +272,22 @@ void DirectAudioReceiveConsumer::ConsumePacket(
 
     if (result.status == DirectRxWriteStatus::kAvailable ||
         result.status == DirectRxWriteStatus::kInvalidBinding) {
+        // kInvalidBinding advances the cursor deliberately — the timeline must
+        // stay continuous across an unbound window — but it wrote no PCM. Folded
+        // into the success branch unattributed it is indistinguishable from
+        // "wrote everything", which is how a fully silent capture kept reporting
+        // green counters. Name it; the cursor behaviour is unchanged.
+        if (!configuration_.isSecondary &&
+            result.status == DirectRxWriteStatus::kInvalidBinding &&
+            unwrittenStatusLogBudget_ != 0) {
+            --unwrittenStatusLogBudget_;
+            ASFW_LOG_ERROR(DirectAudio,
+                           "[RxUnwritten] status=invalid-binding frame=%llu "
+                           "frames=%u writerBound=%d budgetLeft=%u",
+                           absoluteFrameCursor_, result.framesDecoded,
+                           inputWriter_.IsBound() ? 1 : 0,
+                           unwrittenStatusLogBudget_);
+        }
         absoluteFrameCursor_ += result.framesDecoded;
     } else if (acceptedHeaderOnlyNoDataTransition) {
         ObserveAcceptedHeaderOnlyNoDataTransition(batch, packet, result);
@@ -308,6 +341,31 @@ void DirectAudioReceiveConsumer::ConsumePacket(
     }
 
     ++timestampValidCount_;
+
+    // Derived before any frame-numbered bookkeeping is published, because the
+    // TX-derived-clock anchoring below re-bases the frame cursor and every
+    // record built after it must already carry the corrected numbering.
+    uint64_t packetHostTicks = batch.drainHostTicks;
+    if (timestamp.ageTicks >= 0) {
+        const uint64_t ageHostTicks = ::ASFW::Timing::nanosToHostTicks(
+            ::ASFW::Isoch::Rx::FireWireTicksToNanos(
+                static_cast<uint64_t>(timestamp.ageTicks)));
+        packetHostTicks = batch.drainHostTicks > ageHostTicks
+            ? batch.drainHostTicks - ageHostTicks
+            : batch.drainHostTicks;
+    } else {
+        ++negativeAgeCount_;
+        if (-timestamp.ageTicks >=
+            static_cast<int64_t>(::ASFW::Timing::kTicksPerCycle)) {
+            ++largeNegativeAgeCount_;
+        }
+        packetHostTicks += ::ASFW::Timing::nanosToHostTicks(
+            ::ASFW::Isoch::Rx::FireWireTicksToNanos(
+                static_cast<uint64_t>(-timestamp.ageTicks)));
+    }
+
+    AnchorCursorToHostClockTimeline(packet, result, packetHostTicks);
+
     const auto cycleFields = ::ASFW::Timing::decodeCycleTimer(timestamp.cycleTimer);
     const uint32_t cycleOrdinal = cycleFields.seconds * ::ASFW::Timing::kCyclesPerSecond +
         cycleFields.cycle;
@@ -368,25 +426,6 @@ void DirectAudioReceiveConsumer::ConsumePacket(
         if (!inputView_.control->rxSequenceReplay.IsEstablished()) {
             (void)inputView_.control->rxSequenceReplay.MarkEstablished();
         }
-    }
-
-    uint64_t packetHostTicks = batch.drainHostTicks;
-    if (timestamp.ageTicks >= 0) {
-        const uint64_t ageHostTicks = ::ASFW::Timing::nanosToHostTicks(
-            ::ASFW::Isoch::Rx::FireWireTicksToNanos(
-                static_cast<uint64_t>(timestamp.ageTicks)));
-        packetHostTicks = batch.drainHostTicks > ageHostTicks
-            ? batch.drainHostTicks - ageHostTicks
-            : batch.drainHostTicks;
-    } else {
-        ++negativeAgeCount_;
-        if (-timestamp.ageTicks >=
-            static_cast<int64_t>(::ASFW::Timing::kTicksPerCycle)) {
-            ++largeNegativeAgeCount_;
-        }
-        packetHostTicks += ::ASFW::Timing::nanosToHostTicks(
-            ::ASFW::Isoch::Rx::FireWireTicksToNanos(
-                static_cast<uint64_t>(-timestamp.ageTicks)));
     }
 
     const uint64_t packetFirstFrame = absoluteFrameCursor_ - result.framesDecoded;
@@ -476,6 +515,168 @@ void DirectAudioReceiveConsumer::ObserveAcceptedHeaderOnlyNoDataTransition(
              "syt=0x%04x remaining=%u",
              packet.descriptorIndex, packet.payload.size(), batch.drainCycleTimer,
              result.receiveCycleTimestamp, result.syt, headerOnlyNoDataTransitionLogBudget_);
+}
+
+void DirectAudioReceiveConsumer::AnchorCursorToHostClockTimeline(
+    const ::ASFW::Isoch::IsochReceivePacket& packet,
+    const RxAudioPacketProcessorResult& result,
+    uint64_t packetHostTicks) noexcept {
+    // Only the TX-derived-clock families need this. Everywhere else RX itself
+    // publishes the host clock anchor a few lines below, using this very
+    // cursor as the anchor's sampleFrame — so the HAL's read timeline is
+    // *defined* by the cursor and the two cannot disagree by construction.
+    if (!configuration_.useTxDerivedPlaybackClock || configuration_.isSecondary ||
+        cursorInitialized_ || inputView_.control == nullptr) {
+        return;
+    }
+    if (!result.hasValidCip || result.syt == 0xffff || result.framesDecoded == 0 ||
+        packetHostTicks == 0) {
+        return;
+    }
+
+    // On this path the profile deliberately suppresses the RX anchor and lets
+    // TX own the HAL timeline (ASFWAudioDriverZts.cpp: "RX is separately
+    // prevented from publishing a competing anchor by its profile policy").
+    // Nothing then reconciled the two origins: TX arms its epoch at StartIO
+    // while OnReceiveActivated() resets this cursor to 0, and the device only
+    // begins sending DATA after a NO-DATA warm-up, so the first decoded frame
+    // lands at cursor 0 while the HAL is already reading at the ZTS frame for
+    // "now" — measured at ~21400 frames (446 ms) apart on the M-Audio 1814.
+    // With a 1536-frame capture ring, [sampleTime, sampleTime+frames) then
+    // never intersects [write-capacity, write), so every input frame is
+    // zero-filled: capture is silent on every channel while packet counters,
+    // labels and payload peaks all stay perfectly healthy.
+    ::ASFW::Audio::Runtime::HostClockAnchorSample anchor{};
+    if (!inputView_.control->hostClockAnchor.TryReadLatest(0, anchor) ||
+        anchor.hostNanosPerSampleQ8 == 0 || anchor.hostTicks == 0) {
+        // TX has not published yet. Stay unanchored and retry on a later
+        // packet rather than committing to an origin we cannot justify.
+        return;
+    }
+
+    // Project this packet's arrival onto the anchor's timeline. Q8 nanos per
+    // sample keeps the division exact enough at 44.1 kHz, where there is no
+    // integer nanosecond period.
+    const int64_t deltaTicks = static_cast<int64_t>(packetHostTicks) -
+                               static_cast<int64_t>(anchor.hostTicks);
+    const int64_t deltaNanos = deltaTicks >= 0
+        ? static_cast<int64_t>(::ASFW::Timing::hostTicksToNanos(
+              static_cast<uint64_t>(deltaTicks)))
+        : -static_cast<int64_t>(::ASFW::Timing::hostTicksToNanos(
+              static_cast<uint64_t>(-deltaTicks)));
+    const int64_t deltaFrames =
+        (deltaNanos << 8) / static_cast<int64_t>(anchor.hostNanosPerSampleQ8);
+    const int64_t projectedFirstFrame =
+        static_cast<int64_t>(anchor.sampleFrame) + deltaFrames;
+    if (projectedFirstFrame < 0) {
+        return;
+    }
+
+    absoluteFrameCursor_ =
+        static_cast<uint64_t>(projectedFirstFrame) + result.framesDecoded;
+    cursorInitialized_ = true;
+
+    // This packet's PCM was written at the pre-anchor cursor and is orphaned,
+    // and every frame number published before now belongs to the dead origin.
+    // Drop the replay epoch so no consumer mixes the two numberings. Fires
+    // exactly once per start.
+    ResetReplayEpochForDiscontinuity(
+        ReplayResetReason::kTxDerivedClockRebase,
+        {
+            .descriptorIndex = packet.descriptorIndex,
+            .payloadBytes = static_cast<uint32_t>(packet.payload.size()),
+            .receiveCycleTimestamp = result.receiveCycleTimestamp,
+            .syt = result.syt,
+            .sampleFrame = absoluteFrameCursor_,
+        });
+
+    ASFW_LOG(DirectAudio,
+             "[RxClockRebase] cursor=%llu projected=%lld anchorSample=%llu "
+             "anchorHost=%llu packetHost=%llu deltaFrames=%lld nsPerSampleQ8=%u",
+             absoluteFrameCursor_,
+             static_cast<long long>(projectedFirstFrame),
+             anchor.sampleFrame,
+             anchor.hostTicks,
+             packetHostTicks,
+             static_cast<long long>(deltaFrames),
+             anchor.hostNanosPerSampleQ8);
+}
+
+void DirectAudioReceiveConsumer::LogReceivedWirePayload(
+    const ::ASFW::Isoch::IsochReceivePacket& packet,
+    const RxAudioPacketProcessorResult& result) noexcept {
+    constexpr size_t kHeaderBytes = kIsochReceivePrefixBytes + kCipHeaderBytes;
+    if (receivedWirePayloadLogBudget_ == 0 || result.dbs == 0 ||
+        packet.payload.size() <= kHeaderBytes) {
+        return;
+    }
+
+    const size_t dbs = result.dbs;
+    const size_t payloadBytes = packet.payload.size() - kHeaderBytes;
+    if (payloadBytes < dbs * sizeof(uint32_t)) {
+        return;
+    }
+    const uint32_t channels = configuration_.streamChannels != 0
+        ? configuration_.streamChannels
+        : inputView_.memory.inputChannels;
+    if (channels == 0 || channels > dbs) {
+        return;
+    }
+    --receivedWirePayloadLogBudget_;
+
+    const auto* blocks = packet.payload.data() + kHeaderBytes;
+    const size_t events = payloadBytes / (dbs * sizeof(uint32_t));
+
+    // Full label byte per slot of the first data block, slot 0 in the least
+    // significant byte. A nibble is not enough: 0x40 (MBLA, accepted), 0x00 (raw
+    // unlabelled) and 0x80 (MIDI) all share the low nibble 0, and telling them
+    // apart is the entire point. Two words cover the 11-slot geometry.
+    uint64_t labelsLow = 0;
+    uint32_t labelsHigh = 0;
+    for (size_t slot = 0; slot < dbs && slot < 12; ++slot) {
+        const uint32_t label =
+            (LoadBigEndianQuadlet(blocks + slot * sizeof(uint32_t)) >> 24U) & 0xFFU;
+        if (slot < 8) {
+            labelsLow |= static_cast<uint64_t>(label) << (slot * 8U);
+        } else {
+            labelsHigh |= label << ((slot - 8U) * 8U);
+        }
+    }
+
+    // Peak magnitude taken WITHOUT consulting the label, exactly as Linux's
+    // read_pcm_s32 does. If this is non-zero while the decoded audio is silent,
+    // the label gate is eating real samples rather than the device sending none.
+    uint32_t maxAbs24 = 0;
+    uint32_t contentMask = 0;
+    for (size_t event = 0; event < events; ++event) {
+        const auto* block = blocks + event * dbs * sizeof(uint32_t);
+        for (uint32_t ch = 0; ch < channels; ++ch) {
+            const uint32_t quadlet = LoadBigEndianQuadlet(
+                block + ch * sizeof(uint32_t));
+            const uint32_t raw = quadlet & 0x00FFFFFFu;
+            if (raw != 0) {
+                contentMask |= 1U << ch;
+            }
+            int32_t sample = static_cast<int32_t>(raw);
+            if ((sample & 0x800000) != 0) {
+                sample |= static_cast<int32_t>(0xFF000000u);
+            }
+            const uint32_t magnitude = sample < 0
+                ? static_cast<uint32_t>(-static_cast<int64_t>(sample))
+                : static_cast<uint32_t>(sample);
+            maxAbs24 = magnitude > maxAbs24 ? magnitude : maxAbs24;
+        }
+    }
+
+    // `contentMask` bit N set means slot N carried a non-zero 24-bit value in
+    // this packet. Cross it against the label of the same slot: a slot with
+    // content whose label is not 0x40 is audio this decoder is discarding.
+    ASFW_LOG(DirectAudio,
+             "[RxWire] dbs=%u ch=%u events=%zu labels=0x%08x%016llx "
+             "contentMask=0x%03x maxAbs24=%u syt=0x%04x",
+             result.dbs, channels, events, labelsHigh,
+             static_cast<unsigned long long>(labelsLow), contentMask, maxAbs24,
+             result.syt);
 }
 
 void DirectAudioReceiveConsumer::LogZeroDataBlockSizeEvidence(

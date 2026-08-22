@@ -70,6 +70,7 @@ class DirectAudioReceiveConsumer final : public ::ASFW::Isoch::IIsochReceiveCons
         kReceiveCycleGap,
         kSytCadenceRejected,
         kClockAnchorRejected,
+        kTxDerivedClockRebase,
     };
 
     struct ReplayResetContext final {
@@ -98,6 +99,16 @@ class DirectAudioReceiveConsumer final : public ::ASFW::Isoch::IIsochReceiveCons
         const ::ASFW::Isoch::IsochReceiveBatch& batch,
         const ::ASFW::Isoch::IsochReceivePacket& packet,
         const RxAudioPacketProcessorResult& result) noexcept;
+    void LogReceivedWirePayload(
+        const ::ASFW::Isoch::IsochReceivePacket& packet,
+        const RxAudioPacketProcessorResult& result) noexcept;
+    // Gives the frame cursor the same origin as the HAL's read timeline on the
+    // families where TX, not RX, publishes the host clock anchor. No-op after
+    // the first successful anchor and on every RX-anchored family.
+    void AnchorCursorToHostClockTimeline(
+        const ::ASFW::Isoch::IsochReceivePacket& packet,
+        const RxAudioPacketProcessorResult& result,
+        uint64_t packetHostTicks) noexcept;
     void DrainReceiveTelemetry(uint32_t maxRecords);
     void LogTransmitTimingTrace();
 
@@ -135,6 +146,20 @@ class DirectAudioReceiveConsumer final : public ::ASFW::Isoch::IIsochReceiveCons
     uint32_t zeroDataBlockSizeCaptureLogBudget_{
         kZeroDataBlockSizeCaptureLogBudget};
     uint32_t zeroDataBlockSizeCaptureCount_{0};
+    // Bring-up evidence for "every channel decodes to exact silence". The AM824
+    // reader accepts only the 0x40 MBLA label and yields 0.0f for anything else,
+    // while Linux's reader ignores the label entirely (amdtp-am824.c:203). Those
+    // two failures — the device really sending silence, and us discarding real
+    // audio carrying an unexpected label — are indistinguishable downstream, so
+    // record the labels actually on the wire alongside a label-independent peak.
+    // Bounded per bring-up: a healthy stream logs this a few times and stops.
+    static constexpr uint32_t kReceivedWirePayloadLogBudget = 4;
+    uint32_t receivedWirePayloadLogBudget_{kReceivedWirePayloadLogBudget};
+    // A packet that decoded fine but wrote no PCM. Bounded per start so a
+    // permanently unbound writer names itself once instead of flooding at the
+    // 8 kHz packet rate.
+    static constexpr uint32_t kUnwrittenStatusLogBudget = 4;
+    uint32_t unwrittenStatusLogBudget_{kUnwrittenStatusLogBudget};
     static constexpr uint32_t kHeaderOnlyNoDataTransitionLogBudget = 4;
     uint32_t headerOnlyNoDataTransitionLogBudget_{
         kHeaderOnlyNoDataTransitionLogBudget};
