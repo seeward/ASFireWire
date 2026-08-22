@@ -18,10 +18,19 @@ nonisolated enum DuetConsoleProjector {
         let gains = parameters.filter(isInputGain).sorted { $0.targetID < $1.targetID }
         guard gains.count == 2 else { return nil }
 
-        let inputs = gains.enumerated().compactMap { offset, gain -> DuetConsoleSnapshot.InputStrip? in
-            guard let phantom = parameter(.phantomPower, on: gain.targetID, in: parameters),
-                  let phase = parameter(.phaseInvert, on: gain.targetID, in: parameters),
-                  let nominal = parameter(.nominalLevel, on: gain.targetID, in: parameters),
+        let phantomPowers = portParameters(of: .phantomPower, in: parameters)
+        let phaseInverts = portParameters(of: .phaseInvert, in: parameters)
+        let nominalLevels = portParameters(of: .nominalLevel, in: parameters)
+        guard phantomPowers.count == 2, phaseInverts.count == 2, nominalLevels.count == 2 else {
+            return nil
+        }
+
+        let inputs = gains.indices.compactMap { offset -> DuetConsoleSnapshot.InputStrip? in
+            let gain = gains[offset]
+            let phantom = phantomPowers[offset]
+            let phase = phaseInverts[offset]
+            let nominal = nominalLevels[offset]
+            guard
                   let gainControl = control(for: gain, in: controls),
                   let phantomControl = control(for: phantom, in: controls),
                   let phaseControl = control(for: phase, in: controls),
@@ -95,6 +104,13 @@ nonisolated enum DuetConsoleProjector {
         in parameters: [AudioSemanticTopologySnapshot.Parameter]
     ) -> AudioSemanticTopologySnapshot.Parameter? {
         parameters.first { $0.targetKind == .port && $0.targetID == portID && $0.kind == kind }
+    }
+
+    private static func portParameters(
+        of kind: AudioSemanticTopologySnapshot.ParameterKind,
+        in parameters: [AudioSemanticTopologySnapshot.Parameter]
+    ) -> [AudioSemanticTopologySnapshot.Parameter] {
+        parameters.filter { $0.targetKind == .port && $0.kind == kind }.sorted { $0.targetID < $1.targetID }
     }
 
     private static func control(

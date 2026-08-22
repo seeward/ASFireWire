@@ -52,7 +52,7 @@ struct DuetConsoleProjectorTests {
     private func topologyFixture() -> AudioSemanticTopologySnapshot {
         let inputParameters = [1, 2].flatMap { portID in
             [
-                parameter(portID, .level, .scalar, .decibels, 10, 75, .fader, id: portID),
+                parameter(portID + 20, .level, .scalar, .decibels, 10, 75, .fader, id: portID),
                 parameter(portID, .phantomPower, .boolean, .none, 0, 1, .toggle, id: portID + 2),
                 parameter(portID, .phaseInvert, .boolean, .none, 0, 1, .toggle, id: portID + 4),
                 parameter(portID, .nominalLevel, .enumeration, .none, 0, 2, .selector, id: portID + 6),

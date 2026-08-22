@@ -24,15 +24,6 @@ struct DuetControlView: View {
             }
         }
         .navigationTitle("Duet")
-        .safeAreaInset(edge: .bottom) {
-            Text(viewModel.statusText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal)
-                .padding(.vertical, 8)
-                .background(.bar)
-        }
         .task { await viewModel.poll() }
     }
 
