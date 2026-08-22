@@ -534,6 +534,7 @@ kern_return_t HandleGetAudioConfiguration(
 
     ASFW::UserClient::Wire::AudioConfigurationSnapshotWire wire{};
     wire.endpointId = snapshot.endpointId;
+    wire.topologyRevision = snapshot.topologyRevision;
     wire.capabilityCount = snapshot.capabilityCount;
     const auto encode = [](const auto& source,
                            ASFW::UserClient::Wire::AudioConfigurationCapabilityWire& target) {
@@ -627,7 +628,8 @@ kern_return_t HandleGetAudioControlSurface(
     ASFW::UserClient::Wire::AudioControlSurfaceSnapshotWire wire{};
     wire.kind = static_cast<uint32_t>(snapshot.kind);
     wire.endpointId = endpointId.value;
-    wire.revision = snapshot.revision;
+    wire.topologyRevision = snapshot.topologyRevision;
+    wire.stateRevision = snapshot.stateRevision;
     wire.valueCount = snapshot.valueCount;
     for (uint32_t i = 0; i < snapshot.valueCount; ++i) {
         wire.values[i] = {.id = snapshot.values[i].id, .value = snapshot.values[i].value};
@@ -720,34 +722,56 @@ kern_return_t HandleGetAudioConfigurationAsync(
     std::array<ASFW::Audio::Devices::AudioEndpointId,
                ASFW::Configuration::kMaxConfigurationSnapshotCapabilities> endpoints{};
     const uint32_t endpointCount = context->audioCoordinator->CopyConfigurationEndpointIds(endpoints);
-    if (endpointCount == 0 || endpoints[0].value == 0) {
+    if (endpointCount == 0) {
         ASFW_LOG_ERROR(UserClient,
                        "[ControlPlane] configuration snapshot unavailable: no configurable endpoint");
         CompleteAudioControlPlaneAction(&userClient, arguments->completion, kIOReturnNotReady, data, 1);
         return kIOReturnSuccess;
     }
+    // This is the M-Audio special-family control plane, not a generic
+    // "first configurable device" UI.  A bus can publish multiple audio
+    // endpoints, so choose only the endpoint whose semantic surface declares
+    // the required family capability.
+    ASFW::Audio::Devices::AudioEndpointId endpoint{};
+    for (uint32_t index = 0; index < endpointCount; ++index) {
+        ASFW::Audio::AudioControlSurfaceSnapshot surface{};
+        if (endpoints[index].value != 0 &&
+            context->audioCoordinator->CopyAudioControlSurfaceSnapshot(endpoints[index], surface) ==
+                kIOReturnSuccess &&
+            surface.kind == ASFW::Audio::AudioControlSurfaceKind::MAudio1814Mixer) {
+            endpoint = endpoints[index];
+            break;
+        }
+    }
+    if (!endpoint) {
+        ASFW_LOG_ERROR(UserClient,
+                       "[ControlPlane] configuration snapshot unavailable: no M-Audio special surface");
+        CompleteAudioControlPlaneAction(&userClient, arguments->completion, kIOReturnNoDevice, data, 1);
+        return kIOReturnSuccess;
+    }
     ASFW::Configuration::DeviceConfigurationSnapshot snapshot{};
     const kern_return_t status =
-        context->audioCoordinator->CopyDeviceConfigurationSnapshot(endpoints[0], snapshot);
+        context->audioCoordinator->CopyDeviceConfigurationSnapshot(endpoint, snapshot);
     if (status != kIOReturnSuccess) {
         ASFW_LOG_ERROR(UserClient,
                        "[ControlPlane] configuration snapshot failed endpoint=%llu kr=0x%x",
-                       endpoints[0].value, static_cast<uint32_t>(status));
+                       endpoint.value, static_cast<uint32_t>(status));
         CompleteAudioControlPlaneAction(&userClient, arguments->completion, status, data, 1);
         return kIOReturnSuccess;
     }
     data[1] = snapshot.endpointId;
-    data[2] = PackConfigurationCapability({
+    data[2] = snapshot.topologyRevision;
+    data[3] = PackConfigurationCapability({
         .configuration = snapshot.committed,
         .inputChannels = snapshot.inputChannels,
         .outputChannels = snapshot.outputChannels,
     });
-    data[3] = snapshot.capabilityCount;
+    data[4] = snapshot.capabilityCount;
     for (uint32_t index = 0; index < snapshot.capabilityCount; ++index) {
-        data[4 + index] = PackConfigurationCapability(snapshot.capabilities[index]);
+        data[5 + index] = PackConfigurationCapability(snapshot.capabilities[index]);
     }
     CompleteAudioControlPlaneAction(&userClient, arguments->completion, kIOReturnSuccess, data,
-                                    4 + snapshot.capabilityCount);
+                                    5 + snapshot.capabilityCount);
     return kIOReturnSuccess;
 }
 
@@ -777,15 +801,16 @@ kern_return_t HandleGetAudioControlSurfaceAsync(
     // kIOUserClientAsyncArgumentsCountMax (16) scalars, which is nowhere near a
     // whole control surface — the 1814's is 78 values — and packing values here
     // would overrun `data`. This selector is therefore a *change notification*:
-    // the client compares `revision` and pulls the full surface with
+    // the client compares `stateRevision` and pulls the full surface with
     // kMethodGetAudioControlSurface, whose struct output has room for it.
-    static_assert(4 <= kIOUserClientAsyncArgumentsCountMax,
+    static_assert(5 <= kIOUserClientAsyncArgumentsCountMax,
                   "async control-surface header must fit the async argument array");
     data[1] = endpoint.value;
-    data[2] = static_cast<uint64_t>(snapshot.revision) |
+    data[2] = snapshot.topologyRevision;
+    data[3] = static_cast<uint64_t>(snapshot.stateRevision) |
               (static_cast<uint64_t>(snapshot.kind) << 32U);
-    data[3] = snapshot.valueCount;
-    CompleteAudioControlPlaneAction(&userClient, arguments->completion, kIOReturnSuccess, data, 4);
+    data[4] = snapshot.valueCount;
+    CompleteAudioControlPlaneAction(&userClient, arguments->completion, kIOReturnSuccess, data, 5);
     return kIOReturnSuccess;
 }
 
@@ -811,9 +836,10 @@ kern_return_t HandleGetAudioMeterSnapshotAsync(
         return kIOReturnSuccess;
     }
     data[1] = endpoint.value;
-    data[2] = static_cast<uint64_t>(snapshot.revision) |
+    data[2] = snapshot.topologyRevision;
+    data[3] = static_cast<uint64_t>(snapshot.telemetrySequence) |
               (static_cast<uint64_t>(snapshot.detectedSampleRateHz) << 32U);
-    data[3] = static_cast<uint64_t>(snapshot.valueCount) |
+    data[4] = static_cast<uint64_t>(snapshot.valueCount) |
               (static_cast<uint64_t>(snapshot.enabled ? 1U : 0U) << 32U) |
               (static_cast<uint64_t>(snapshot.clockLocked ? 1U : 0U) << 33U) |
               (static_cast<uint64_t>(snapshot.externalSync ? 1U : 0U) << 34U) |
@@ -821,10 +847,10 @@ kern_return_t HandleGetAudioMeterSnapshotAsync(
               (static_cast<uint64_t>(snapshot.rotaryCount & 0xFFU) << 36U);
     // Peaks pack four to a scalar, then one scalar carries the encoders. The
     // whole reply must stay inside kIOUserClientAsyncArgumentsCountMax.
-    static_assert(4 + (ASFW::Audio::kMaxAudioMeterValues + 3) / 4 + 1 <=
+    static_assert(5 + (ASFW::Audio::kMaxAudioMeterValues + 3) / 4 + 1 <=
                       kIOUserClientAsyncArgumentsCountMax,
                   "async meter reply no longer fits the async argument array");
-    uint32_t used = 4;
+    uint32_t used = 5;
     for (uint32_t index = 0; index < snapshot.valueCount; index += 4) {
         data[used++] = PackI16Quad(
             std::span<const int16_t>{snapshot.values.data(), snapshot.valueCount}, index);
@@ -903,7 +929,8 @@ kern_return_t HandleGetAudioMeterSnapshot(
     if (kr != kIOReturnSuccess) return kr;
     ASFW::UserClient::Wire::AudioMeterSnapshotWire wire{};
     wire.endpointId = endpointId.value;
-    wire.revision = snapshot.revision;
+    wire.topologyRevision = snapshot.topologyRevision;
+    wire.telemetrySequence = snapshot.telemetrySequence;
     wire.valueCount = snapshot.valueCount;
     wire.detectedSampleRateHz = snapshot.detectedSampleRateHz;
     wire.enabled = snapshot.enabled ? 1U : 0U;

@@ -62,6 +62,8 @@ void AddSpecialConfigurationCapability(
     caps.hostToDeviceStreams[0].am824Slots =
         static_cast<uint16_t>(caps.hostToDeviceAm824Slots);
     caps.hostToDeviceStreams[0].isoChannel = AudioStreamRuntimeCaps::kInvalidIsoChannel;
+    capability.captureChannelMap = MAudio::CaptureChannelMapFor(
+        profile.profileBuilder, formation->capturePcmChannels);
 }
 
 void AddSpecialConfigurationCapabilities(

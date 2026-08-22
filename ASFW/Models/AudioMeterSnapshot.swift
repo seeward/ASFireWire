@@ -2,7 +2,8 @@ import Foundation
 
 struct AudioMeterSnapshot: Equatable, Sendable {
     let endpointID: AudioEndpointID
-    let revision: UInt32
+    let topologyRevision: UInt64
+    let telemetrySequence: UInt32
     let detectedSampleRateHz: UInt32
     let isEnabled: Bool
     let isClockLocked: Bool
@@ -11,8 +12,8 @@ struct AudioMeterSnapshot: Equatable, Sendable {
     let isExternallySynced: Bool
     /// Latched state of the front-panel toggle.
     let hardwareSwitch: Bool
-    /// Integrated positions of the front-panel encoders, a running total since
-    /// metering was enabled rather than a readback — the device sends detents.
+    /// Wrapping front-panel detent counters. These are not knob positions; use
+    /// the modular difference between successive snapshots to recover motion.
     let rotaries: [Int16]
     let values: [Int16]
 

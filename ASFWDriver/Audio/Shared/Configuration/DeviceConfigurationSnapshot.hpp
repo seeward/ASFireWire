@@ -10,7 +10,7 @@
 
 namespace ASFW::Configuration {
 
-inline constexpr uint32_t kDeviceConfigurationSnapshotVersion = 1;
+inline constexpr uint32_t kDeviceConfigurationSnapshotVersion = 2;
 inline constexpr size_t kMaxConfigurationSnapshotCapabilities = 8;
 
 // Value-only query contract for the app/user-client boundary.  It carries no
@@ -24,6 +24,7 @@ struct DeviceConfigurationCapabilitySnapshot final {
 struct DeviceConfigurationSnapshot final {
     uint32_t version{kDeviceConfigurationSnapshotVersion};
     uint64_t endpointId{0};
+    uint64_t topologyRevision{0};
     DeviceConfiguration committed{};
     uint32_t inputChannels{0};
     uint32_t outputChannels{0};

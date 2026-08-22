@@ -44,6 +44,11 @@ final class MAudio1814ConfigurationViewModel: ObservableObject {
                     lastLevelControllerPosition = nil
                 }
                 if configurationChanged {
+                    // A topology revision describes a new control/meter
+                    // geometry.  Neither peak history nor an integrated
+                    // front-panel encoder position can be carried across it.
+                    peakHold.reset()
+                    lastLevelControllerPosition = nil
                     selectedRateHz = state.configuration.committed.sampleRateHz
                     selectedInputOptical = state.configuration.committed.inputOptical
                     selectedOutputOptical = state.configuration.committed.outputOptical
@@ -181,10 +186,10 @@ final class MAudio1814ConfigurationViewModel: ObservableObject {
     /// Turns movement of the assignable knob into level writes on whatever
     /// strips carry `ctrl`.
     ///
-    /// The driver publishes an integrated position rather than detents, so the
-    /// movement is the difference between successive snapshots. Fast rotation
-    /// can outrun the write pacing and coalesce — the same limit the driver's
-    /// own headphone-knob path has, and the reference implementation's.
+    /// The driver publishes a wrapping event counter rather than a fictional
+    /// physical position. Movement is the modular difference between adjacent
+    /// snapshots. Fast rotation can outrun the write pacing and coalesce — the
+    /// same limit the driver's own headphone-knob path has.
     private func applyLevelController(_ meters: AudioMeterSnapshot) {
         guard meters.rotaries.indices.contains(Self.levelControllerRotary) else {
             lastLevelControllerPosition = nil
@@ -196,7 +201,7 @@ final class MAudio1814ConfigurationViewModel: ObservableObject {
         guard let previous = lastLevelControllerPosition, position != previous,
               let topology else { return }
 
-        let delta = Int32(position) - Int32(previous)
+        let delta = MAudio1814FrontPanel.rotaryDelta(current: position, previous: previous)
         for (control, value) in console.applyLevelControllerDelta(delta, to: topology) {
             applyMixerControl(control, value: value)
         }

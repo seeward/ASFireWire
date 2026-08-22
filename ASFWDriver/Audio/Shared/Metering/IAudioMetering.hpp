@@ -19,7 +19,10 @@ inline constexpr size_t kMaxAudioMeterValues = 40;
 inline constexpr size_t kMaxAudioMeterRotaries = 3;
 
 struct AudioMeterSnapshot final {
-    uint32_t revision{0};
+    /// The resolved meter-definition table this frame indexes.
+    uint64_t topologyRevision{0};
+    /// High-rate telemetry sequence; distinct from topology and control state.
+    uint32_t telemetrySequence{0};
     uint32_t valueCount{0};
     uint32_t detectedSampleRateHz{0};
     bool enabled{false};
@@ -31,9 +34,9 @@ struct AudioMeterSnapshot final {
     /// rather than position.
     bool hardwareSwitch{false};
     uint32_t rotaryCount{0};
-    /// Integrated positions of relative encoders. Meaningful only as a running
-    /// total since metering was enabled — the device sends detents, not a
-    /// position, so this is not a readback.
+    /// Bit-preserving 16-bit wrapping counters for relative encoder detents.
+    /// Meaningful only as a modular delta since the preceding snapshot; the
+    /// device sends events, not a physical position.
     std::array<int16_t, kMaxAudioMeterRotaries> rotaries{};
     std::array<int16_t, kMaxAudioMeterValues> values{};
 };

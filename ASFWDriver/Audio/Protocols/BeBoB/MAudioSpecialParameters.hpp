@@ -236,6 +236,16 @@ public:
                static_cast<uint32_t>(bytes_[offset + 3]);
     }
 
+    /// Replaces one whole quadlet with an already validated wire value. This is
+    /// deliberately narrower than exposing the byte image: the protocol uses it
+    /// only to advance its confirmed write-only belief after the matching async
+    /// write has acknowledged.
+    [[nodiscard]] bool SetQuadlet(size_t index, uint32_t value) noexcept {
+        if (index >= kQuadletCount) return false;
+        SetQuadletAt(index, value);
+        return true;
+    }
+
     /// Applies one semantic control. On success `outChangedIndex` names the
     /// single quadlet that changed, which is the unit the device is written in —
     /// every range in this window is quadlet-aligned and every level field is

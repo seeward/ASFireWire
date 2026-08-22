@@ -13,6 +13,7 @@
 #include "../../../Logging/Logging.hpp"
 
 #include <array>
+#include <bit>
 #include <cstring>
 #include <span>
 #include <utility>
@@ -162,14 +163,14 @@ bool MAudioSpecialProtocol::CopyAudioControlSurfaceSnapshot(
 
     IOLockLock(parameterLock_);
     outSnapshot.kind = AudioControlSurfaceKind::MAudio1814Mixer;
-    outSnapshot.revision = parameterRevision_;
+    outSnapshot.stateRevision = parameterRevision_;
     size_t emitted = 0;
     for (const auto& group : kMAudio1814ControlGroups) {
         for (uint32_t index = 0; index < group.count; ++index) {
             const uint32_t id = MakeMAudio1814ControlId(group.group, index);
             outSnapshot.values[emitted++] = {
                 .id = id,
-                .value = parameterImage_.ControlValue(id),
+                .value = confirmedParameterImage_.ControlValue(id),
             };
         }
     }
@@ -184,7 +185,7 @@ bool MAudioSpecialProtocol::CopyAudioMeterSnapshot(
     if (!meterLock_) return false;
 
     IOLockLock(meterLock_);
-    outSnapshot.revision = meterRevision_;
+    outSnapshot.telemetrySequence = meterRevision_;
     outSnapshot.valueCount = static_cast<uint32_t>(meterState_.peaks.size());
     outSnapshot.detectedSampleRateHz = meterState_.detectedSampleRateHz;
     outSnapshot.enabled = meterEnabled_;
@@ -193,7 +194,7 @@ bool MAudioSpecialProtocol::CopyAudioMeterSnapshot(
     outSnapshot.hardwareSwitch = meterState_.hardwareSwitch;
     outSnapshot.rotaryCount = static_cast<uint32_t>(meterState_.rotaries.size());
     for (size_t i = 0; i < meterState_.rotaries.size(); ++i) {
-        outSnapshot.rotaries[i] = meterState_.rotaries[i];
+        outSnapshot.rotaries[i] = std::bit_cast<int16_t>(meterState_.rotaries[i]);
     }
     for (size_t i = 0; i < meterState_.peaks.size(); ++i) {
         outSnapshot.values[i] = meterState_.peaks[i];
@@ -402,13 +403,14 @@ void MAudioSpecialProtocol::ApplyAudioControlValue(
         callback(kIOReturnBusy);
         return;
     }
-    MAudioSpecialParameterImage proposed = parameterImage_;
+    MAudioSpecialParameterImage proposed = desiredParameterImage_;
     if (!proposed.Apply(controlId, value, changedIndex)) {
         IOLockUnlock(parameterLock_);
         callback(kIOReturnBadArgument);
         return;
     }
     changedValue = proposed.QuadletAt(changedIndex);
+    desiredParameterImage_ = proposed;
     parameterWriteInFlight_ = true;
     IOLockUnlock(parameterLock_);
 
@@ -425,14 +427,23 @@ void MAudioSpecialProtocol::ApplyAudioControlValue(
                 IOLockLock(parameterLock_);
                 parameterWriteInFlight_ = false;
                 if (status == kIOReturnSuccess) {
-                    // Apply exactly the acknowledged quadlet to the belief
-                    // image. A failed write must not be reflected in UI state.
-                    size_t confirmedIndex = 0;
-                    (void)parameterImage_.Apply(controlId, value, confirmedIndex);
-                    if (confirmedIndex == changedIndex &&
-                        parameterImage_.QuadletAt(confirmedIndex) == changedValue) {
+                    // Advance exactly the quadlet the device acknowledged. A
+                    // rotary may have changed the desired image since this
+                    // write was issued, so do not copy that later value here.
+                    if (confirmedParameterImage_.QuadletAt(changedIndex) != changedValue) {
+                        (void)confirmedParameterImage_.SetQuadlet(changedIndex, changedValue);
                         ++parameterRevision_;
                     }
+                    if (desiredParameterImage_.QuadletAt(changedIndex) != changedValue) {
+                        pendingParameterQuadlets_ |= (1ULL << changedIndex);
+                    }
+                } else if (desiredParameterImage_.QuadletAt(changedIndex) == changedValue) {
+                    // No later desired value superseded this failed request, so
+                    // discard it rather than letting a rejected UI action turn
+                    // into an invisible retry. A newer rotary value remains
+                    // pending and will still be flushed below.
+                    (void)desiredParameterImage_.SetQuadlet(
+                        changedIndex, confirmedParameterImage_.QuadletAt(changedIndex));
                 }
                 IOLockUnlock(parameterLock_);
             }
@@ -765,7 +776,7 @@ void MAudioSpecialProtocol::ApplyRotaryDetents(
         for (uint32_t offset = 0; offset < 2; ++offset) {
             const uint32_t id = MakeMAudio1814ControlId(
                 MAudio1814ControlGroup::HeadphoneVolume, binding.firstChannel + offset);
-            int32_t level = parameterImage_.ControlValue(id) +
+            int32_t level = desiredParameterImage_.ControlValue(id) +
                             detents * MAudioSpecialMeterState::kRotaryStep;
             if (level > MAudioSpecialParameterImage::kLevelMax) {
                 level = MAudioSpecialParameterImage::kLevelMax;
@@ -773,14 +784,13 @@ void MAudioSpecialProtocol::ApplyRotaryDetents(
                 level = MAudioSpecialParameterImage::kLevelMin;
             }
             size_t changedIndex = 0;
-            // Applied to the image first and unconditionally: the knob has
-            // already physically moved, so dropping the detent because a write
-            // is in flight would silently desynchronise us from the user.
-            if (parameterImage_.Apply(id, level, changedIndex)) {
+            // Apply to desired state immediately so a physical detent is never
+            // lost while a write is in flight. The confirmed image remains
+            // untouched until FlushPendingParameterWrites receives an ACK.
+            if (desiredParameterImage_.Apply(id, level, changedIndex)) {
                 pendingParameterQuadlets_ |= (1ULL << changedIndex);
             }
         }
-        ++parameterRevision_;
         ASFW_LOG(Audio, "[MAudioControl] knob %zu moved %d detent(s) -> headphone %u/%u",
                  binding.rotaryIndex, detents, binding.firstChannel + 1,
                  binding.firstChannel + 2);
@@ -804,17 +814,28 @@ void MAudioSpecialProtocol::FlushPendingParameterWrites() noexcept {
     // quadlet is independent.
     while ((pendingParameterQuadlets_ & (1ULL << index)) == 0) ++index;
     pendingParameterQuadlets_ &= ~(1ULL << index);
-    value = parameterImage_.QuadletAt(index);
+    value = desiredParameterImage_.QuadletAt(index);
     parameterWriteInFlight_ = true;
     IOLockUnlock(parameterLock_);
 
-    SendParameterQuadlet(index, value, [this, index](IOReturn status) {
+    SendParameterQuadlet(index, value, [this, index, value](IOReturn status) {
         if (parameterLock_) {
             IOLockLock(parameterLock_);
             parameterWriteInFlight_ = false;
-            if (status != kIOReturnSuccess) {
-                // Re-arm rather than drop: the image already carries the new
-                // value, so leaving it unwritten would make our belief a lie.
+            if (status == kIOReturnSuccess) {
+                if (confirmedParameterImage_.QuadletAt(index) != value) {
+                    (void)confirmedParameterImage_.SetQuadlet(index, value);
+                    ++parameterRevision_;
+                }
+                // A newer detent may have changed the same quadlet while this
+                // request was on the wire. Keep that newer value queued.
+                if (desiredParameterImage_.QuadletAt(index) != value) {
+                    pendingParameterQuadlets_ |= (1ULL << index);
+                }
+            } else {
+                // Re-arm rather than drop: desired state is intentionally kept
+                // separate from confirmed belief, and the poller is the bounded
+                // retry path for physical controls.
                 pendingParameterQuadlets_ |= (1ULL << index);
             }
             IOLockUnlock(parameterLock_);
@@ -841,7 +862,7 @@ void MAudioSpecialProtocol::SendParameterBlock(
     std::array<uint8_t, MAudioSpecialParameterImage::kImageBytes> payload{};
     if (parameterLock_) {
         IOLockLock(parameterLock_);
-        const auto bytes = parameterImage_.Bytes();
+        const auto bytes = desiredParameterImage_.Bytes();
         std::memcpy(payload.data(), bytes.data(), payload.size());
         // This write carries every quadlet, so anything a knob queued is now
         // covered and must not be re-sent behind it.

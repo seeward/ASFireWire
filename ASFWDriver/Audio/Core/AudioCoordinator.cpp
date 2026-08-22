@@ -357,10 +357,13 @@ IOReturn AudioCoordinator::CopyDeviceConfigurationSnapshot(
     uint32_t sampleRateHz = 0;
     uint32_t inputChannels = 0;
     uint32_t outputChannels = 0;
-    if (!endpoint->CopyActiveConfiguration(sampleRateHz, inputChannels, outputChannels)) {
+    uint64_t topologyRevision = 0;
+    if (!endpoint->CopyActiveConfiguration(sampleRateHz, inputChannels, outputChannels,
+                                           topologyRevision)) {
         return kIOReturnNotReady;
     }
     outSnapshot.endpointId = endpointId.value;
+    outSnapshot.topologyRevision = topologyRevision;
     outSnapshot.inputChannels = inputChannels;
     outSnapshot.outputChannels = outputChannels;
     const uint8_t count = std::min(
@@ -397,10 +400,18 @@ IOReturn AudioCoordinator::CopyAudioControlSurfaceSnapshot(
         return kIOReturnNotReady;
     }
     const auto protocol = runtime_.FindShared(endpointId);
+    const auto endpoint = runtime_.FindEndpointRuntime(endpointId);
     auto* surface = protocol ? protocol->AsAudioControlSurface() : nullptr;
-    if (!surface) return kIOReturnUnsupported;
-    return surface->CopyAudioControlSurfaceSnapshot(outSnapshot)
-        ? kIOReturnSuccess : kIOReturnNotReady;
+    if (!surface || !endpoint) return kIOReturnUnsupported;
+    const uint64_t topologyRevision = endpoint->CopyTopologyRevision();
+    if (topologyRevision == 0 || !surface->CopyAudioControlSurfaceSnapshot(outSnapshot)) {
+        return kIOReturnNotReady;
+    }
+    // A concurrent configuration commit changes the interpretation of the
+    // surface. Reject instead of publishing a mixed-revision snapshot.
+    if (endpoint->CopyTopologyRevision() != topologyRevision) return kIOReturnBusy;
+    outSnapshot.topologyRevision = topologyRevision;
+    return kIOReturnSuccess;
 }
 
 IOReturn AudioCoordinator::RequestAudioControlValue(
@@ -435,10 +446,16 @@ IOReturn AudioCoordinator::CopyAudioMeterSnapshot(
         return kIOReturnNotReady;
     }
     const auto protocol = runtime_.FindShared(endpointId);
+    const auto endpoint = runtime_.FindEndpointRuntime(endpointId);
     auto* metering = protocol ? protocol->AsAudioMetering() : nullptr;
-    if (!metering) return kIOReturnUnsupported;
-    return metering->CopyAudioMeterSnapshot(outSnapshot)
-        ? kIOReturnSuccess : kIOReturnNotReady;
+    if (!metering || !endpoint) return kIOReturnUnsupported;
+    const uint64_t topologyRevision = endpoint->CopyTopologyRevision();
+    if (topologyRevision == 0 || !metering->CopyAudioMeterSnapshot(outSnapshot)) {
+        return kIOReturnNotReady;
+    }
+    if (endpoint->CopyTopologyRevision() != topologyRevision) return kIOReturnBusy;
+    outSnapshot.topologyRevision = topologyRevision;
+    return kIOReturnSuccess;
 }
 
 IOReturn AudioCoordinator::SetAudioMeteringEnabled(

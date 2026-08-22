@@ -241,10 +241,10 @@ void DirectAudioReceiveConsumer::ConsumePacket(
     if (result.mapRejected && captureMapRejectedLogBudget_ != 0) {
         --captureMapRejectedLogBudget_;
         ASFW_LOG_ERROR(DirectAudio,
-                       "[RxChannelMap] rejected: channels=%u dbs=%u mapSize=%zu — "
+                       "[RxChannelMap] rejected: channels=%u dbs=%u mapSize=%u — "
                        "decoding in wire order",
                        channels, result.dbs,
-                       configuration_.captureChannelMap.slotForChannel.size());
+                       configuration_.captureChannelMap.slotCount);
     }
     const bool acceptedHeaderOnlyNoDataTransition =
         IsAcceptedHeaderOnlyNoDataTransition(packet, result);

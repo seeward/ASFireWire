@@ -11,6 +11,7 @@
 #include "Audio/Families/BeBoB/MAudio/MAudioCaptureChannelMap.hpp"
 #include "Audio/Families/BeBoB/MAudio/MAudioDuplexPolicy.hpp"
 #include "Audio/Families/BeBoB/MAudio/MAudioSpecialTiming.hpp"
+#include "Audio/Devices/ResolvedAudioEndpointProfile.hpp"
 #include "Audio/Protocols/BeBoB/MAudioSpecialFormation.hpp"
 #include "Audio/Engine/Direct/Rx/DirectRxPacketDecoder.hpp"
 
@@ -33,7 +34,7 @@ constexpr std::array<uint8_t, 10> kExpectedSlots10{0, 4, 1, 5, 2, 6, 3, 7, 8, 9}
 TEST(MAudioCaptureChannelMapTests, FireWire1814TenChannelMapMatchesTheVendorDriver) {
     const auto map = CaptureChannelMapFor(ProfileBuilderId::MAudioFireWire1814, 10);
 
-    ASSERT_EQ(map.slotForChannel.size(), kExpectedSlots10.size());
+    ASSERT_EQ(map.slotCount, kExpectedSlots10.size());
     for (uint32_t ch = 0; ch < kExpectedSlots10.size(); ++ch) {
         EXPECT_EQ(map.SlotFor(ch), kExpectedSlots10[ch]) << "channel " << ch;
     }
@@ -48,8 +49,8 @@ TEST(MAudioCaptureChannelMapTests, ProjectMixSharesThePermutationButHasNoInputSk
     const auto fw1814 = CaptureChannelMapFor(ProfileBuilderId::MAudioFireWire1814, 10);
     const auto projectMix = CaptureChannelMapFor(ProfileBuilderId::MAudioProjectMix, 10);
 
-    ASSERT_EQ(fw1814.slotForChannel.size(), projectMix.slotForChannel.size());
-    for (uint32_t ch = 0; ch < projectMix.slotForChannel.size(); ++ch) {
+    ASSERT_EQ(fw1814.slotCount, projectMix.slotCount);
+    for (uint32_t ch = 0; ch < projectMix.slotCount; ++ch) {
         EXPECT_EQ(projectMix.SlotFor(ch), fw1814.SlotFor(ch)) << "channel " << ch;
     }
 
@@ -81,7 +82,7 @@ TEST(MAudioCaptureChannelMapTests, FireWire1814DelaysExactlyTheSixLineInputs) {
 TEST(MAudioCaptureChannelMapTests, AdatGeometryKeepsAnalogOrderAndPassesAdatThrough) {
     const auto map = CaptureChannelMapFor(ProfileBuilderId::MAudioFireWire1814, 16);
 
-    ASSERT_EQ(map.slotForChannel.size(), 16u);
+    ASSERT_EQ(map.slotCount, 16u);
     for (uint32_t ch = 0; ch < 10; ++ch) {
         EXPECT_EQ(map.SlotFor(ch), kExpectedSlots10[ch]) << "channel " << ch;
     }
@@ -126,6 +127,37 @@ TEST(MAudioCaptureChannelMapTests, MapBuiltForOneFormationIsRejectedByTheOther) 
 
     EXPECT_TRUE(adat.FitsWithin(16, 17));
     EXPECT_FALSE(adat.FitsWithin(10, 11));
+}
+
+TEST(MAudioCaptureChannelMapTests, ConfigurationScopedMapFollowsTheLiveFormation) {
+    ASFW::Audio::Devices::ResolvedAudioEndpointProfile profile{};
+    profile.configurationCapabilityCount = 2;
+
+    auto spdifCaps = ASFW::Audio::AudioStreamRuntimeCaps{};
+    spdifCaps.sampleRateHz = 48000;
+    spdifCaps.hostInputPcmChannels = 10;
+    spdifCaps.hostOutputPcmChannels = 10;
+    spdifCaps.deviceToHostAm824Slots = 11;
+    spdifCaps.hostToDeviceAm824Slots = 11;
+    profile.configurationCapabilities[0].runtimeCaps = spdifCaps;
+    profile.configurationCapabilities[0].captureChannelMap =
+        CaptureChannelMapFor(ProfileBuilderId::MAudioFireWire1814, 10);
+
+    auto adatCaps = spdifCaps;
+    adatCaps.hostInputPcmChannels = 16;
+    adatCaps.hostOutputPcmChannels = 16;
+    adatCaps.deviceToHostAm824Slots = 17;
+    adatCaps.hostToDeviceAm824Slots = 17;
+    profile.configurationCapabilities[1].runtimeCaps = adatCaps;
+    profile.configurationCapabilities[1].captureChannelMap =
+        CaptureChannelMapFor(ProfileBuilderId::MAudioFireWire1814, 16);
+
+    const auto spdifMap = profile.CaptureChannelMapForRuntimeCaps(spdifCaps);
+    const auto adatMap = profile.CaptureChannelMapForRuntimeCaps(adatCaps);
+    EXPECT_EQ(spdifMap.channelCount, 10u);
+    EXPECT_EQ(adatMap.channelCount, 16u);
+    EXPECT_TRUE(spdifMap.FitsWithin(10, 11));
+    EXPECT_TRUE(adatMap.FitsWithin(16, 17));
 }
 
 // The decoder half: a mapped frame must land each slot on its channel, and send

@@ -24,8 +24,8 @@ struct MAudio1814ConsoleStateTests {
             sends: [], source: nil)
     }
 
-    private func topology(_ strips: [AudioTopologyStrip]) -> AudioTopologySnapshot {
-        AudioTopologySnapshot(revision: 1, strips: strips, routes: [])
+    private func topology(_ strips: [AudioTopologyStrip], revision: UInt64 = 1) -> AudioTopologySnapshot {
+        AudioTopologySnapshot(topologyRevision: revision, strips: strips, routes: [])
     }
 
     @Test func stripsAreLinkedByDefault() {
@@ -33,6 +33,30 @@ struct MAudio1814ConsoleStateTests {
         #expect(state.isLinked("analog-0"))
         #expect(!state.isMuted("analog-0"))
         #expect(!state.isSoloActive)
+    }
+
+    @Test func topologyChangePrunesHostOnlyStateForRemovedStrips() {
+        var state = MAudio1814ConsoleState()
+        let original = topology([
+            strip("analog-0", kind: .physicalInput, group: .mixerAnalogGain, pair: 0, level: 0),
+            strip("analog-1", kind: .physicalInput, group: .mixerAnalogGain, pair: 1, level: 0),
+        ])
+        state.reconcile(with: original)
+        state.toggleMute("analog-1")
+        state.toggleSolo("analog-1")
+        state.toggleControl("analog-1")
+        state.setIntendedLevel(MAudio1814ControlID(.mixerAnalogGain, 2), -1024)
+
+        let changed = topology([
+            strip("analog-0", kind: .physicalInput, group: .mixerAnalogGain, pair: 0, level: 0),
+        ], revision: 2)
+        state.reconcile(with: changed)
+
+        #expect(!state.isMuted("analog-1"))
+        #expect(!state.isSoloed("analog-1"))
+        #expect(!state.isControlled("analog-1"))
+        #expect(!state.isSoloActive)
+        #expect(state.pendingLevelWrites(for: changed).isEmpty)
     }
 
     @Test func muteWritesSilenceAndUnmuteRestoresTheFader() {

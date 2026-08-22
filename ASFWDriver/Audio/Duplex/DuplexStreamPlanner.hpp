@@ -158,7 +158,7 @@ private:
             .runtimeCaps = caps,
             .captureWireFormat = profile.captureWireFormat,
             .playbackWireFormat = profile.playbackWireFormat,
-            .captureChannelMap = profile.captureChannelMap,
+            .captureChannelMap = profile.CaptureChannelMapForRuntimeCaps(caps),
             .startOrder = profile.startPolicy,
             .stopOrder = profile.stopPolicy,
         };

@@ -94,9 +94,9 @@ CaptureChannelMapFor(DeviceProfiles::Audio::ProfileBuilderId profileBuilder,
     Map map{};
     map.channelCount = capturePcmChannels;
     if (capturePcmChannels == kSpecialCaptureSlots10.size()) {
-        map.slotForChannel = kSpecialCaptureSlots10;
+        (void)map.SetSlots(kSpecialCaptureSlots10);
     } else if (capturePcmChannels == kSpecialCaptureSlots16.size()) {
-        map.slotForChannel = kSpecialCaptureSlots16;
+        (void)map.SetSlots(kSpecialCaptureSlots16);
     } else {
         // An unexpected geometry — including the 2-channel high-rate mode,
         // where the vendor driver installs plain stereo

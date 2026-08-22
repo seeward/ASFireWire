@@ -207,16 +207,18 @@ private:
     // its rate across a host restart and guessing wrong mis-shapes the stream.
     uint32_t currentRateHz_{48000};
 
-    // The special firmware's parameter window is write-only. This is the
-    // authoritative host belief; it changes only after the corresponding
-    // direct async write is acknowledged.
+    // The special firmware's parameter window is write-only. Keep the value we
+    // have actually written separately from the latest desired image: rotary
+    // detents may arrive while a quadlet write is outstanding. Only the
+    // confirmed image is ever published as driver belief.
     IOLock* parameterLock_{nullptr};
-    MAudioSpecialParameterImage parameterImage_{};
+    MAudioSpecialParameterImage confirmedParameterImage_{};
+    MAudioSpecialParameterImage desiredParameterImage_{};
     uint32_t parameterRevision_{1};
     bool parameterWriteInFlight_{false};
-    /// Quadlets changed by a knob and not yet written. A detent is applied to
-    /// the image immediately so none is lost while a write is outstanding; this
-    /// mask is what remembers that the device has not caught up yet.
+    /// Quadlets where the desired image has advanced beyond the confirmed image.
+    /// A detent is recorded immediately so none is lost while a write is
+    /// outstanding, but it is not presented as confirmed until its write ACK.
     uint64_t pendingParameterQuadlets_{0};
     static_assert(MAudioSpecialParameterImage::kQuadletCount <= 64,
                   "pendingParameterQuadlets_ is a 64-bit mask over the window");

@@ -60,14 +60,24 @@ public:
 
     [[nodiscard]] bool CopyActiveConfiguration(uint32_t& outSampleRateHz,
                                                uint32_t& outInputChannels,
-                                               uint32_t& outOutputChannels) const noexcept {
+                                               uint32_t& outOutputChannels,
+                                               uint64_t& outTopologyRevision) const noexcept {
         if (!lock_) return false;
         IOLockLock(lock_);
         outSampleRateHz = currentSampleRateHz_;
         outInputChannels = configuredInputChannels_;
         outOutputChannels = configuredOutputChannels_;
+        outTopologyRevision = topologyRevision_;
         IOLockUnlock(lock_);
         return outSampleRateHz != 0 && outInputChannels != 0 && outOutputChannels != 0;
+    }
+
+    [[nodiscard]] uint64_t CopyTopologyRevision() const noexcept {
+        if (!lock_) return 0;
+        IOLockLock(lock_);
+        const uint64_t revision = topologyRevision_;
+        IOLockUnlock(lock_);
+        return revision;
     }
 
     // Update only the current sample rate. The DICE clock can change (Audio MIDI
@@ -94,7 +104,11 @@ public:
         if (lock_) {
             IOLockLock(lock_);
         }
+        const bool changed = currentSampleRateHz_ != sampleRateHz;
         currentSampleRateHz_ = sampleRateHz;
+        if (changed) {
+            ++topologyRevision_;
+        }
         if (directSampleRateHz_ != 0 && directSampleRateHz_ != sampleRateHz) {
             directSampleRateHz_ = sampleRateHz;
             ++directGeneration_;
@@ -127,6 +141,9 @@ public:
         currentSampleRateHz_ = runtimeCaps.sampleRateHz;
         configuredOutputChannels_ = outputChannels;
         configuredInputChannels_ = inputChannels;
+        if (changed) {
+            ++topologyRevision_;
+        }
         if (HasCompleteDirectAudioMemoryLocked() && changed) {
             directOutputChannels_ = outputChannels;
             directInputChannels_ = inputChannels;
@@ -669,6 +686,9 @@ private:
     uint32_t configuredOutputChannels_{0};
     uint32_t configuredInputChannels_{0};
     uint32_t currentSampleRateHz_{0};
+    /// Structural configuration revision. Control and meter frames must name
+    /// this exact resolved stream/topology shape before the UI combines them.
+    uint64_t topologyRevision_{1};
     mutable IOLock* lock_{nullptr};
     std::atomic<bool> streaming_{false};
 

@@ -11,7 +11,7 @@ import Foundation
 /// two pans, two aux sends per strip, with a link button to gang them. Folding a
 /// pair behind one fader loses the balance the hardware can actually do.
 struct AudioTopologySnapshot {
-    let revision: UInt32
+    let topologyRevision: UInt64
     let strips: [AudioTopologyStrip]
     let routes: [AudioTopologyRoute]
 }
@@ -79,7 +79,12 @@ struct AudioTopologyRouteChoice: Identifiable {
 
 enum MAudio1814TopologyProjector {
     static func make(configuration: AudioConfigurationSnapshot,
-                     controls: AudioControlSurfaceSnapshot) -> AudioTopologySnapshot {
+                     controls: AudioControlSurfaceSnapshot) -> AudioTopologySnapshot? {
+        guard configuration.endpointID == controls.endpointID,
+              configuration.topologyRevision == controls.topologyRevision,
+              controls.isMAudioSpecialMixer else {
+            return nil
+        }
         let opticalIsADAT = configuration.committed.inputOptical == .adat
 
         var strips: [AudioTopologyStrip] = []
@@ -141,7 +146,7 @@ enum MAudio1814TopologyProjector {
                           controls, ["1/2", "3/4", "Aux"])))
 
         return AudioTopologySnapshot(
-            revision: controls.revision,
+            topologyRevision: configuration.topologyRevision,
             strips: strips,
             routes: strips.compactMap(\.source))
     }

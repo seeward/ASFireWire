@@ -8,7 +8,7 @@
 
 namespace ASFW::UserClient::Wire {
 
-inline constexpr uint32_t kAudioConfigurationWireVersion = 1;
+inline constexpr uint32_t kAudioConfigurationWireVersion = 2;
 inline constexpr uint32_t kAudioConfigurationMaxCapabilities = 8;
 
 // opticalInput / opticalOutput: 0 = none, 1 = ADAT, 2 = S/PDIF.
@@ -26,11 +26,12 @@ struct AudioConfigurationSnapshotWire final {
     uint32_t version{kAudioConfigurationWireVersion};
     uint32_t capabilityCount{0};
     uint64_t endpointId{0};
+    uint64_t topologyRevision{0};
     AudioConfigurationCapabilityWire committed{};
     std::array<AudioConfigurationCapabilityWire,
                kAudioConfigurationMaxCapabilities> capabilities{};
 };
-static_assert(sizeof(AudioConfigurationSnapshotWire) == 160);
+static_assert(sizeof(AudioConfigurationSnapshotWire) == 168);
 
 // This is deliberately a separate discovery contract from telemetry. An audio
 // endpoint can accept configuration changes without a streaming telemetry view.

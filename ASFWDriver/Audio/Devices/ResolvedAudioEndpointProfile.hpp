@@ -85,6 +85,10 @@ struct ClockPolicy final {
 struct ConfigurationCapabilityRecord final {
     Configuration::DeviceConfiguration configuration{};
     AudioStreamRuntimeCaps runtimeCaps{};
+    /// Capture presentation can change with the selected formation.  Most
+    /// devices leave this identity, while the M-Audio special firmware uses a
+    /// 10- or 16-channel planar-slot map depending on its optical input mode.
+    AudioEngine::Direct::Rx::RxCaptureChannelMap captureChannelMap{};
 };
 
 // Immutable output of static catalog resolution plus a safe family probe.
@@ -174,6 +178,30 @@ struct ResolvedAudioEndpointProfile final {
             }
         }
         return nullptr;
+    }
+
+    /// Returns the map whose declared geometry exactly matches the active
+    /// runtime caps.  This is intentionally capability-owned rather than a
+    /// profile-wide constant: a formation change may change capture width and
+    /// therefore which fixed slot table is safe to apply.
+    [[nodiscard]] AudioEngine::Direct::Rx::RxCaptureChannelMap
+    CaptureChannelMapForRuntimeCaps(const AudioStreamRuntimeCaps& caps) const noexcept {
+        const uint8_t count = std::min(configurationCapabilityCount,
+                                       static_cast<uint8_t>(configurationCapabilities.size()));
+        for (uint8_t i = 0; i < count; ++i) {
+            const auto& candidate = configurationCapabilities[i].runtimeCaps;
+            if (candidate.sampleRateHz == caps.sampleRateHz &&
+                candidate.hostInputPcmChannels == caps.hostInputPcmChannels &&
+                candidate.hostOutputPcmChannels == caps.hostOutputPcmChannels &&
+                candidate.deviceToHostAm824Slots == caps.deviceToHostAm824Slots &&
+                candidate.hostToDeviceAm824Slots == caps.hostToDeviceAm824Slots) {
+                return configurationCapabilities[i].captureChannelMap;
+            }
+        }
+        // Non-configurable devices and a failed/unknown configuration retain
+        // the safe initial map. The decoder still validates it against live DBS
+        // before using it.
+        return captureChannelMap;
     }
 };
 

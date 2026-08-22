@@ -10,7 +10,7 @@
 
 namespace ASFW::UserClient::Wire {
 
-inline constexpr uint32_t kAudioControlSurfaceWireVersion = 2;
+inline constexpr uint32_t kAudioControlSurfaceWireVersion = 3;
 
 struct AudioControlValueWire final {
     uint32_t id{0};
@@ -22,10 +22,11 @@ struct AudioControlSurfaceSnapshotWire final {
     uint32_t version{kAudioControlSurfaceWireVersion};
     uint32_t kind{0};
     uint64_t endpointId{0};
-    uint32_t revision{0};
+    uint64_t topologyRevision{0};
+    uint32_t stateRevision{0};
     uint32_t valueCount{0};
     std::array<AudioControlValueWire, ASFW::Audio::kMaxAudioControlSurfaceValues> values{};
 };
-static_assert(sizeof(AudioControlSurfaceSnapshotWire) == 664);
+static_assert(sizeof(AudioControlSurfaceSnapshotWire) == 672);
 
 } // namespace ASFW::UserClient::Wire

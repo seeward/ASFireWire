@@ -117,7 +117,7 @@ extension ASFWDriverConnector {
     func getAudioConfiguration(endpointID: AudioEndpointID) -> AudioConfigurationSnapshot? {
         guard isConnected, connection != 0, endpointID.rawValue != 0 else { return nil }
         var scalarInput = endpointID.rawValue
-        var output = Data(count: 160)
+        var output = Data(count: 168)
         var outputLength = output.count
         let result = output.withUnsafeMutableBytes { outputBytes in
             IOConnectCallMethod(
@@ -200,7 +200,7 @@ extension ASFWDriverConnector {
     func getAudioControlSurface(endpointID: AudioEndpointID) -> AudioControlSurfaceSnapshot? {
         guard isConnected, connection != 0, endpointID.rawValue != 0 else { return nil }
         var scalarInput = endpointID.rawValue
-        var output = Data(count: 664)
+        var output = Data(count: 672)
         var outputLength = output.count
         let result = output.withUnsafeMutableBytes { outputBytes in
             IOConnectCallMethod(
@@ -240,14 +240,14 @@ extension ASFWDriverConnector {
 }
 
 private enum AudioConfigurationWireDecoder {
-    private static let wireSize = 160
+    private static let wireSize = 168
     private static let capabilitySize = 16
     private static let endpointListSize = 72
     private static let maximumEndpointCount = 8
 
     static func decodeEndpointIDs(_ data: Data) -> [AudioEndpointID] {
         guard data.count == endpointListSize,
-              let version = data.u32(at: 0), version == 1,
+              let version = data.u32(at: 0), version == 2,
               let count = data.u32(at: 4), count <= maximumEndpointCount else {
             return []
         }
@@ -260,17 +260,19 @@ private enum AudioConfigurationWireDecoder {
     static func decode(_ data: Data) -> AudioConfigurationSnapshot? {
         guard data.count == wireSize,
               let endpointRaw = data.u64(at: 8),
+              let topologyRevision = data.u64(at: 16), topologyRevision != 0,
               let count = data.u32(at: 4),
               count <= 8,
-              let committed = decodeCapability(data, at: 16) else {
+              let committed = decodeCapability(data, at: 24) else {
             return nil
         }
         let capabilities = (0..<Int(count)).compactMap {
-            decodeCapability(data, at: 32 + ($0 * capabilitySize))
+            decodeCapability(data, at: 40 + ($0 * capabilitySize))
         }
         guard capabilities.count == Int(count) else { return nil }
         return AudioConfigurationSnapshot(
             endpointID: AudioEndpointID(rawValue: endpointRaw),
+            topologyRevision: topologyRevision,
             committed: committed,
             capabilities: capabilities
         )
@@ -295,20 +297,22 @@ private enum AudioConfigurationWireDecoder {
 }
 
 private enum AudioControlSurfaceWireDecoder {
-    private static let wireSize = 664
+    private static let wireSize = 672
     private static let maximumValueCount = 80
 
     static func decode(_ data: Data) -> AudioControlSurfaceSnapshot? {
         guard data.count == wireSize,
-              let version = data.u32(at: 0), version == 2,
-              let kind = data.u32(at: 4), kind == 0x4D41_3134,
+              let version = data.u32(at: 0), version == 3,
+              let rawKind = data.u32(at: 4),
+              let kind = AudioControlSurfaceKind(rawValue: rawKind),
               let endpointRaw = data.u64(at: 8), endpointRaw != 0,
-              let revision = data.u32(at: 16),
-              let count = data.u32(at: 20), count <= maximumValueCount else {
+              let topologyRevision = data.u64(at: 16), topologyRevision != 0,
+              let stateRevision = data.u32(at: 24),
+              let count = data.u32(at: 28), count <= maximumValueCount else {
             return nil
         }
         let values = (0..<Int(count)).compactMap { index -> AudioControlSurfaceValue? in
-            let offset = 24 + index * 8
+            let offset = 32 + index * 8
             guard let id = data.u32(at: offset), let value = data.i32(at: offset + 4) else {
                 return nil
             }
@@ -317,7 +321,7 @@ private enum AudioControlSurfaceWireDecoder {
         guard values.count == Int(count) else { return nil }
         return AudioControlSurfaceSnapshot(
             endpointID: AudioEndpointID(rawValue: endpointRaw), kind: kind,
-            revision: revision, values: values)
+            topologyRevision: topologyRevision, stateRevision: stateRevision, values: values)
     }
 }
 
@@ -326,42 +330,44 @@ private enum AudioControlSurfaceWireDecoder {
 /// transports a pointer or allocates a variable-size reply.
 private enum AudioAsyncSnapshotDecoder {
     static func configuration(_ values: [UInt64]) -> AudioConfigurationSnapshot? {
-        guard values.count >= 4, values[1] != 0,
-              let committed = capability(values[2]) else { return nil }
-        let count = Int(values[3])
-        guard count <= 8, values.count == 4 + count else { return nil }
-        let capabilities = values.dropFirst(4).compactMap { capability($0) }
+        guard values.count >= 5, values[1] != 0, values[2] != 0,
+              let committed = capability(values[3]) else { return nil }
+        let count = Int(values[4])
+        guard count <= 8, values.count == 5 + count else { return nil }
+        let capabilities = values.dropFirst(5).compactMap { capability($0) }
         guard capabilities.count == count else { return nil }
         return AudioConfigurationSnapshot(
-            endpointID: AudioEndpointID(rawValue: values[1]),
+            endpointID: AudioEndpointID(rawValue: values[1]), topologyRevision: values[2],
             committed: committed, capabilities: capabilities)
     }
 
     struct ControlsHeader {
         let endpointID: AudioEndpointID
+        let topologyRevision: UInt64
         let kind: UInt32
-        let revision: UInt32
+        let stateRevision: UInt32
         let valueCount: Int
     }
 
     /// The async control-surface reply is a header only — see
     /// `HandleGetAudioControlSurfaceAsync`. Values come from the struct selector.
     static func controlsHeader(_ values: [UInt64]) -> ControlsHeader? {
-        guard values.count == 4, values[1] != 0 else { return nil }
-        let header = values[2]
+        guard values.count == 5, values[1] != 0, values[2] != 0 else { return nil }
+        let header = values[3]
         return ControlsHeader(
             endpointID: AudioEndpointID(rawValue: values[1]),
+            topologyRevision: values[2],
             kind: UInt32(truncatingIfNeeded: header >> 32),
-            revision: UInt32(truncatingIfNeeded: header),
-            valueCount: Int(values[3]))
+            stateRevision: UInt32(truncatingIfNeeded: header),
+            valueCount: Int(values[4]))
     }
 
     static func meters(_ values: [UInt64]) -> AudioMeterSnapshot? {
-        guard values.count >= 4, values[1] != 0 else { return nil }
-        let rateAndRevision = values[2]
-        let flagsAndCount = values[3]
-        let revision = UInt32(truncatingIfNeeded: rateAndRevision)
-        let rate = UInt32(truncatingIfNeeded: rateAndRevision >> 32)
+        guard values.count >= 5, values[1] != 0, values[2] != 0 else { return nil }
+        let rateAndSequence = values[3]
+        let flagsAndCount = values[4]
+        let telemetrySequence = UInt32(truncatingIfNeeded: rateAndSequence)
+        let rate = UInt32(truncatingIfNeeded: rateAndSequence >> 32)
         let count = Int(UInt32(truncatingIfNeeded: flagsAndCount))
         let enabled = ((flagsAndCount >> 32) & 1) != 0
         let locked = ((flagsAndCount >> 33) & 1) != 0
@@ -370,22 +376,23 @@ private enum AudioAsyncSnapshotDecoder {
         let rotaryCount = Int((flagsAndCount >> 36) & 0xFF)
         let quadletCount = (count + 3) / 4
         // One trailing scalar carries the encoders, packed four to a scalar.
-        guard count <= 40, rotaryCount <= 3, values.count == 4 + quadletCount + 1 else {
+        guard count <= 40, rotaryCount <= 3, values.count == 5 + quadletCount + 1 else {
             return nil
         }
         var peaks: [Int16] = []
         peaks.reserveCapacity(count)
         for index in 0..<count {
-            let packed = values[4 + index / 4]
+            let packed = values[5 + index / 4]
             let raw = UInt16(truncatingIfNeeded: packed >> ((index % 4) * 16))
             peaks.append(Int16(bitPattern: raw))
         }
-        let packedRotaries = values[4 + quadletCount]
+        let packedRotaries = values[5 + quadletCount]
         let rotaries = (0..<rotaryCount).map { index -> Int16 in
             Int16(bitPattern: UInt16(truncatingIfNeeded: packedRotaries >> (index * 16)))
         }
         return AudioMeterSnapshot(
-            endpointID: AudioEndpointID(rawValue: values[1]), revision: revision,
+            endpointID: AudioEndpointID(rawValue: values[1]), topologyRevision: values[2],
+            telemetrySequence: telemetrySequence,
             detectedSampleRateHz: rate, isEnabled: enabled, isClockLocked: locked,
             isExternallySynced: external, hardwareSwitch: hardwareSwitch,
             rotaries: rotaries, values: peaks)

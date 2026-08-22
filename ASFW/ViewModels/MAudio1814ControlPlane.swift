@@ -39,6 +39,9 @@ final class MAudio1814ControlPlane: ObservableObject {
     private var nextRequestID: UInt64 = 1
     private var lastDispatch = Date.distantPast
     private var configurationRequestToken: UInt64 = 0
+    /// Invalidates every completion from a prior start/stop cycle. DriverKit
+    /// async actions cannot be cancelled after submission.
+    private var sessionEpoch: UInt64 = 0
 
     private let minimumWriteSpacing: TimeInterval = 0.050
     private let writeTimeout: TimeInterval = 2.0
@@ -59,17 +62,21 @@ final class MAudio1814ControlPlane: ObservableObject {
 
     func start() {
         guard pollingTask == nil else { return }
-        refresh()
-        pollingTask = Task { [weak self] in
+        sessionEpoch &+= 1
+        let epoch = sessionEpoch
+        pollingTask = Task { [weak self, epoch] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(20))
                 guard !Task.isCancelled else { return }
-                self?.refresh()
+                self?.refresh(epoch: epoch)
             }
         }
+        refresh(epoch: epoch)
     }
 
     func stop() {
+        sessionEpoch &+= 1
+        configurationRequestToken &+= 1
         pollingTask?.cancel()
         pollingTask = nil
         pumpTask?.cancel()
@@ -85,9 +92,11 @@ final class MAudio1814ControlPlane: ObservableObject {
         cachedMeters = nil
         nextConfigurationRefresh = .distantPast
         nextControlsRefresh = .distantPast
+        refreshInFlight = false
         meterRefreshInFlight = false
         controlsRefreshInFlight = false
         isWriteInFlight = false
+        latest = nil
     }
 
     func submit(control: MAudio1814ControlID, value: Int32) {
@@ -96,23 +105,25 @@ final class MAudio1814ControlPlane: ObservableObject {
     }
 
     func setMeteringEnabled(_ enabled: Bool) {
+        let epoch = sessionEpoch
         guard let endpointID = latest?.configuration.endpointID else { return }
         connector.setAudioMeteringAsync(endpointID: endpointID, enabled: enabled) { [weak self] result in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, self.sessionEpoch == epoch else { return }
                 self.status = result == KERN_SUCCESS
                     ? (enabled ? "Metering enabled." : "Metering disabled.")
                     : "Metering request rejected: \(self.connector.interpretIOReturn(result))"
-                self.refresh()
+                self.refresh(epoch: epoch)
             }
         }
     }
 
-    private func refresh() {
+    private func refresh(epoch: UInt64) {
+        guard sessionEpoch == epoch else { return }
         guard !refreshInFlight else { return }
         refreshInFlight = true
         if let cachedConfiguration, Date() < nextConfigurationRefresh {
-            refreshLiveState(configuration: cachedConfiguration)
+            refreshLiveState(configuration: cachedConfiguration, epoch: epoch)
             return
         }
         configurationRequestToken &+= 1
@@ -121,6 +132,7 @@ final class MAudio1814ControlPlane: ObservableObject {
         configurationSnapshotTimeoutTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(self?.configurationSnapshotTimeout ?? 2))
             guard !Task.isCancelled, let self,
+                  self.sessionEpoch == epoch,
                   self.refreshInFlight,
                   self.configurationRequestToken == requestToken else { return }
             self.refreshInFlight = false
@@ -130,7 +142,8 @@ final class MAudio1814ControlPlane: ObservableObject {
         }
         connector.requestAudioConfigurationSnapshotAsync { [weak self] configuration, result in
             guard let self else { return }
-            guard self.configurationRequestToken == requestToken else { return }
+            guard self.sessionEpoch == epoch,
+                  self.configurationRequestToken == requestToken else { return }
             self.configurationSnapshotTimeoutTask?.cancel()
             self.configurationSnapshotTimeoutTask = nil
             guard let configuration else {
@@ -142,7 +155,7 @@ final class MAudio1814ControlPlane: ObservableObject {
             }
             self.cachedConfiguration = configuration
             self.nextConfigurationRefresh = Date().addingTimeInterval(self.configurationRefreshInterval)
-            self.refreshLiveState(configuration: configuration)
+            self.refreshLiveState(configuration: configuration, epoch: epoch)
         }
     }
 
@@ -154,17 +167,24 @@ final class MAudio1814ControlPlane: ObservableObject {
     /// header reply plus a struct read. Metering is the thing that has to look
     /// live; the control surface only changes when we write or somebody turns a
     /// knob, so it polls at a quarter of the rate and never holds meters up.
-    private func refreshLiveState(configuration: AudioConfigurationSnapshot) {
+    private func refreshLiveState(configuration: AudioConfigurationSnapshot, epoch: UInt64) {
+        guard sessionEpoch == epoch else { return }
         refreshInFlight = false
 
         if !meterRefreshInFlight {
             meterRefreshInFlight = true
             connector.requestAudioMeterSnapshotAsync(endpointID: configuration.endpointID) {
                 [weak self] meters in
-                guard let self else { return }
+                guard let self, self.sessionEpoch == epoch else { return }
                 self.meterRefreshInFlight = false
-                if let meters { self.cachedMeters = meters }
-                self.publish(configuration: configuration)
+                if let meters,
+                   meters.endpointID == configuration.endpointID,
+                   meters.topologyRevision == configuration.topologyRevision {
+                    self.cachedMeters = meters
+                } else {
+                    self.cachedMeters = nil
+                }
+                self.publish(configuration: configuration, epoch: epoch)
             }
         }
 
@@ -172,25 +192,40 @@ final class MAudio1814ControlPlane: ObservableObject {
         controlsRefreshInFlight = true
         connector.requestAudioControlSurfaceSnapshotAsync(endpointID: configuration.endpointID) {
             [weak self] controls in
-            guard let self else { return }
+            guard let self, self.sessionEpoch == epoch else { return }
             self.controlsRefreshInFlight = false
             self.nextControlsRefresh = Date().addingTimeInterval(self.controlsRefreshInterval)
-            if let controls { self.cachedControls = controls }
-            self.publish(configuration: configuration)
+            if let controls,
+               controls.endpointID == configuration.endpointID,
+               controls.topologyRevision == configuration.topologyRevision {
+                self.cachedControls = controls
+            } else {
+                self.cachedControls = nil
+            }
+            self.publish(configuration: configuration, epoch: epoch)
         }
     }
 
-    /// Publishes whatever is currently known. Meters may be absent; the control
-    /// surface may not, because every fader position comes from it.
-    private func publish(configuration: AudioConfigurationSnapshot) {
-        guard let controls = cachedControls else {
+    /// Publishes a coherent definition/state pair. Meter telemetry remains
+    /// independent, but is attached only when it names the same topology.
+    private func publish(configuration: AudioConfigurationSnapshot, epoch: UInt64) {
+        guard sessionEpoch == epoch,
+              cachedConfiguration?.endpointID == configuration.endpointID,
+              cachedConfiguration?.topologyRevision == configuration.topologyRevision,
+              let controls = cachedControls,
+              controls.endpointID == configuration.endpointID,
+              controls.topologyRevision == configuration.topologyRevision else {
             if !controlsRefreshInFlight {
                 self.status = "FireWire 1814 control surface is not ready."
             }
             return
         }
+        let meters = cachedMeters.flatMap { meter in
+            meter.endpointID == configuration.endpointID &&
+            meter.topologyRevision == configuration.topologyRevision ? meter : nil
+        }
         latest = MAudio1814ControlPlaneSnapshot(
-            configuration: configuration, controls: controls, meters: cachedMeters)
+            configuration: configuration, controls: controls, meters: meters)
         if !isWriteInFlight, pending.isEmpty {
             status = "Confirmed: \(configuration.committed.sampleRateHz.formatted()) Hz · \(configuration.committed.inputChannels) in / \(configuration.committed.outputChannels) out"
         }
@@ -215,6 +250,7 @@ final class MAudio1814ControlPlane: ObservableObject {
     }
 
     private func dispatchNext() {
+        let epoch = sessionEpoch
         guard !isWriteInFlight,
               let endpointID = latest?.configuration.endpointID,
               let control = pending.keys.sorted(by: { $0.rawValue < $1.rawValue }).first,
@@ -230,18 +266,20 @@ final class MAudio1814ControlPlane: ObservableObject {
         status = "Applying \(control.label)…"
         connector.submitAudioControlValue(
             endpointID: endpointID, controlID: control, value: value) { [weak self] result in
-                Task { @MainActor in self?.complete(requestID: requestID, result: result) }
+                Task { @MainActor in
+                    self?.complete(epoch: epoch, requestID: requestID, result: result)
+                }
             }
         watchdogTask?.cancel()
         watchdogTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(self?.writeTimeout ?? 2))
             guard !Task.isCancelled else { return }
-            self?.timeout(requestID: requestID)
+            self?.timeout(epoch: epoch, requestID: requestID)
         }
     }
 
-    private func complete(requestID: UInt64, result: kern_return_t) {
-        guard inFlightRequestID == requestID else { return }
+    private func complete(epoch: UInt64, requestID: UInt64, result: kern_return_t) {
+        guard sessionEpoch == epoch, inFlightRequestID == requestID else { return }
         watchdogTask?.cancel()
         watchdogTask = nil
         inFlightRequestID = nil
@@ -250,16 +288,16 @@ final class MAudio1814ControlPlane: ObservableObject {
             ? "Hardware write confirmed."
             : "Hardware write failed: \(connector.interpretIOReturn(result))"
         invalidateControlsCache()
-        refresh()
+        refresh(epoch: epoch)
         schedulePump()
     }
 
-    private func timeout(requestID: UInt64) {
-        guard inFlightRequestID == requestID else { return }
+    private func timeout(epoch: UInt64, requestID: UInt64) {
+        guard sessionEpoch == epoch, inFlightRequestID == requestID else { return }
         inFlightRequestID = nil
         isWriteInFlight = false
         status = "Hardware write timed out; later intent remains queued."
-        refresh()
+        refresh(epoch: epoch)
         schedulePump()
     }
 }

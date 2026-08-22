@@ -35,6 +35,11 @@ struct MAudio1814ConsoleState: Equatable {
     /// step with the topology.
     private(set) var controlled: Set<String> = []
     private var intent: [UInt32: Int32] = [:]
+    /// The console's host-only state is meaningful only for the topology from
+    /// which its strip/control identities came.  Keep compatible state across
+    /// ordinary meter/control refreshes, but remove identities that disappear
+    /// when the driver commits a new geometry.
+    private var lastTopologyRevision: UInt64?
 
     var isSoloActive: Bool { !soloed.isEmpty }
 
@@ -129,6 +134,17 @@ struct MAudio1814ConsoleState: Equatable {
     /// rather than us. A suppressed channel is skipped: its confirmed value is
     /// the silence we wrote, and copying that in would make unmute a no-op.
     mutating func reconcile(with topology: AudioTopologySnapshot) {
+        if lastTopologyRevision != topology.topologyRevision {
+            lastTopologyRevision = topology.topologyRevision
+            let stripIDs = Set(topology.strips.map(\.id))
+            let controlIDs = Set(topology.strips.flatMap(\.channels)
+                .map { $0.levelControl.rawValue })
+            unlinked.formIntersection(stripIDs)
+            muted.formIntersection(stripIDs)
+            soloed.formIntersection(stripIDs)
+            controlled.formIntersection(stripIDs)
+            intent = intent.filter { controlIDs.contains($0.key) }
+        }
         for strip in topology.strips where !isSuppressed(strip.id, kind: strip.kind) {
             for channel in strip.channels {
                 intent[channel.levelControl.rawValue] = channel.levelRaw

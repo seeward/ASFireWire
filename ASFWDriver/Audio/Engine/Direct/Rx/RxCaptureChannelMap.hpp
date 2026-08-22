@@ -15,6 +15,9 @@
 
 #pragma once
 
+#include "../../../Wire/AMDTP/AmdtpRateGeometry.hpp"
+
+#include <array>
 #include <cstdint>
 #include <span>
 
@@ -22,9 +25,10 @@ namespace ASFW::AudioEngine::Direct::Rx {
 
 struct RxCaptureChannelMap final {
     /// `slotForChannel[ch]` is the AM824 slot that feeds CoreAudio channel `ch`.
-    /// Empty means identity. Entries must be < the packet's data block size;
+    /// slotCount == 0 means identity. Entries must be < the packet's data block size;
     /// the decoder drops the map rather than read out of bounds if they are not.
-    std::span<const uint8_t> slotForChannel{};
+    std::array<uint8_t, ASFW::Encoding::kMaxPcmChannels> slotForChannel{};
+    uint32_t slotCount{0};
 
     /// The capture width this table was built for. A device that changes its
     /// formation (the 1814 switches between a 10-channel S/PDIF and a
@@ -40,8 +44,28 @@ struct RxCaptureChannelMap final {
     /// Bit N set means CoreAudio channel N is delayed by `delayFrames`.
     uint32_t delayedChannelMask{0};
 
+    template <size_t Count>
+    [[nodiscard]] constexpr bool SetSlots(
+        const std::array<uint8_t, Count>& slots) noexcept {
+        static_assert(Count <= ASFW::Encoding::kMaxPcmChannels);
+        slotCount = static_cast<uint32_t>(Count);
+        for (size_t index = 0; index < Count; ++index) {
+            slotForChannel[index] = slots[index];
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool SetSlots(std::span<const uint8_t> slots) noexcept {
+        if (slots.size() > slotForChannel.size()) return false;
+        slotCount = static_cast<uint32_t>(slots.size());
+        for (size_t index = 0; index < slots.size(); ++index) {
+            slotForChannel[index] = slots[index];
+        }
+        return true;
+    }
+
     [[nodiscard]] constexpr bool IsIdentity() const noexcept {
-        return slotForChannel.empty() && delayFrames == 0;
+        return slotCount == 0 && delayFrames == 0;
     }
 
     [[nodiscard]] constexpr bool HasDelay() const noexcept {
@@ -54,10 +78,10 @@ struct RxCaptureChannelMap final {
     /// otherwise read past the data blocks.
     [[nodiscard]] constexpr bool FitsWithin(uint32_t channels,
                                             uint32_t dataBlockSize) const noexcept {
-        if (slotForChannel.empty()) {
+        if (slotCount == 0) {
             return true;
         }
-        if (channelCount != channels || slotForChannel.size() < channels) {
+        if (channelCount != channels || slotCount < channels) {
             return false;
         }
         for (uint32_t ch = 0; ch < channels; ++ch) {
@@ -69,7 +93,7 @@ struct RxCaptureChannelMap final {
     }
 
     [[nodiscard]] constexpr uint32_t SlotFor(uint32_t channel) const noexcept {
-        return slotForChannel.empty() ? channel : slotForChannel[channel];
+        return slotCount == 0 ? channel : slotForChannel[channel];
     }
 
     [[nodiscard]] constexpr bool IsDelayed(uint32_t channel) const noexcept {

@@ -115,19 +115,17 @@ struct MAudioSpecialMeterState final {
     static constexpr size_t kPeakCount = 38;
     static constexpr size_t kRotaryCount = 3;
 
-    /// Accumulated rotary bounds. The knobs are relative encoders, so a position
-    /// exists only because this decoder integrates the detent events; it starts
-    /// at the top and is not a readback of anything.
-    static constexpr int16_t kRotaryMin = -32768;
-    static constexpr int16_t kRotaryMax = 0;
-    static constexpr int16_t kRotaryStep = 0x400;
+    /// One detent in the vendor's level units. The public rotary value is a
+    /// wrapping event counter, not a bounded position: the hardware has no
+    /// position to read back and clamping would eventually hide real turns.
+    static constexpr uint16_t kRotaryStep = 0x400;
 
     std::array<int16_t, kPeakCount> peaks{};
     uint32_t detectedSampleRateHz{0};
     bool clockLocked{false};
     bool externalSync{false};
     bool hardwareSwitch{false};
-    std::array<int16_t, kRotaryCount> rotaries{};
+    std::array<uint16_t, kRotaryCount> rotaries{};
 
     /// Previous block's event bytes, kept so the next decode can find the edges.
     /// `hasPreviousEvents` suppresses the first block, where every byte looks
@@ -156,7 +154,8 @@ struct MAudioSpecialMeterState final {
 /// The switch and rotaries are integrated from edge events: a byte that changed
 /// since the previous block and now reads 0x01 or 0x02 is one detent. Both
 /// reference implementations agree on that encoding; only the crate implements
-/// it, and this follows the crate's step and clamping.
+/// it. The published rotary counter wraps modulo 2^16 so a consumer can recover
+/// movement from the modular difference between adjacent snapshots.
 [[nodiscard]] constexpr bool DecodeMAudioSpecialMeter(
     std::span<const uint8_t> payload, MAudioSpecialMeterState& inOut,
     MAudio1814RotaryDelta* outDeltas = nullptr) noexcept {
@@ -209,14 +208,10 @@ struct MAudioSpecialMeterState final {
             }
             if (outDeltas) outDeltas->detents[i] = detents;
 
-            int32_t position =
-                inOut.rotaries[i] + detents * MAudioSpecialMeterState::kRotaryStep;
-            if (position > MAudioSpecialMeterState::kRotaryMax) {
-                position = MAudioSpecialMeterState::kRotaryMax;
-            } else if (position < MAudioSpecialMeterState::kRotaryMin) {
-                position = MAudioSpecialMeterState::kRotaryMin;
-            }
-            inOut.rotaries[i] = static_cast<int16_t>(position);
+            const uint16_t delta = detents > 0
+                ? MAudioSpecialMeterState::kRotaryStep
+                : static_cast<uint16_t>(0U - MAudioSpecialMeterState::kRotaryStep);
+            inOut.rotaries[i] = static_cast<uint16_t>(inOut.rotaries[i] + delta);
         }
     }
 

@@ -35,7 +35,9 @@ inline constexpr size_t kMaxAudioControlSurfaceValues = 80;
 // the M-Audio special firmware, intentionally have no safe readback path.
 struct AudioControlSurfaceSnapshot final {
     AudioControlSurfaceKind kind{AudioControlSurfaceKind::None};
-    uint32_t revision{0};
+    /// The resolved structure this state was copied against.
+    uint64_t topologyRevision{0};
+    uint32_t stateRevision{0};
     uint32_t valueCount{0};
     std::array<AudioControlValue, kMaxAudioControlSurfaceValues> values{};
 };

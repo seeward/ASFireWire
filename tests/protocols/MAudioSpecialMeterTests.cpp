@@ -93,11 +93,11 @@ TEST(MAudioSpecialMeterTests, IntegratesRotaryDetentsInBothDirections) {
     down[1] = 0x02; // headphone knob 1, one detent down
     ASSERT_TRUE(DecodeMAudioSpecialMeter(down, state, &deltas));
     EXPECT_EQ(deltas.detents[0], -1);
-    EXPECT_EQ(state.rotaries[0], -MAudioSpecialMeterState::kRotaryStep);
+    EXPECT_EQ(state.rotaries[0], 0xFC00U);
 
     ASSERT_TRUE(DecodeMAudioSpecialMeter(idle, state, &deltas));
     EXPECT_FALSE(deltas.Any());
-    EXPECT_EQ(state.rotaries[0], -MAudioSpecialMeterState::kRotaryStep);
+    EXPECT_EQ(state.rotaries[0], 0xFC00U);
 
     Block up{};
     up[1] = 0x01;
@@ -106,17 +106,19 @@ TEST(MAudioSpecialMeterTests, IntegratesRotaryDetentsInBothDirections) {
     EXPECT_EQ(state.rotaries[0], 0);
 }
 
-TEST(MAudioSpecialMeterTests, ClampsRotariesAndHoldsSteadyStateSilent) {
+TEST(MAudioSpecialMeterTests, RotaryEventCountersWrapAndHoldSteadyStateSilent) {
     MAudioSpecialMeterState state{};
     Block idle{};
     ASSERT_TRUE(DecodeMAudioSpecialMeter(idle, state));
 
+    // An event counter must not clamp at a fictional physical maximum.
+    state.rotaries[2] = 0xFC00U;
     Block up{};
-    up[3] = 0x01; // assignable knob, already at maximum
+    up[3] = 0x01; // assignable knob, wraps after 0xffff
     MAudio1814RotaryDelta deltas{};
     ASSERT_TRUE(DecodeMAudioSpecialMeter(up, state, &deltas));
     EXPECT_EQ(deltas.detents[2], 1);
-    EXPECT_EQ(state.rotaries[2], MAudioSpecialMeterState::kRotaryMax);
+    EXPECT_EQ(state.rotaries[2], 0U);
 
     // Holding the same field across polls is one event, not one per poll.
     ASSERT_TRUE(DecodeMAudioSpecialMeter(up, state, &deltas));

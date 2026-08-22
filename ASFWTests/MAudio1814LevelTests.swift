@@ -130,6 +130,13 @@ struct MAudio1814LevelTests {
         #expect(MAudio1814Level.formatPan(raw: 32_640) == "L127")
         #expect(MAudio1814Level.formatPan(raw: -32_640) == "R127")
     }
+
+    @Test func frontPanelRotaryCounterKeepsMovementAcrossWrap() {
+        // 0xfc00 + one 0x400 detent wraps to zero. The UI must still observe
+        // that as one positive detent rather than a large negative jump.
+        #expect(MAudio1814FrontPanel.rotaryDelta(current: 0, previous: -1024) == 0x400)
+        #expect(MAudio1814FrontPanel.rotaryDelta(current: -1024, previous: 0) == -0x400)
+    }
 }
 
 /// The device already maintains an envelope — two reads 22 ms apart come back
@@ -137,7 +144,7 @@ struct MAudio1814LevelTests {
 struct AudioMeterPeakHoldTests {
     private func snapshot(_ values: [Int16]) -> AudioMeterSnapshot {
         AudioMeterSnapshot(
-            endpointID: AudioEndpointID(rawValue: 1), revision: 1,
+            endpointID: AudioEndpointID(rawValue: 1), topologyRevision: 1, telemetrySequence: 1,
             detectedSampleRateHz: 48_000, isEnabled: true, isClockLocked: true,
             isExternallySynced: false, hardwareSwitch: false, rotaries: [],
             values: values)

@@ -5,10 +5,18 @@ struct AudioControlSurfaceValue: Equatable, Sendable {
     let value: Int32
 }
 
+/// The family-owned semantic surface carried by `AudioControlSurfaceSnapshot`.
+/// A raw control ID is meaningful only after this discriminator has been
+/// checked; it is never a cross-family UI identifier.
+enum AudioControlSurfaceKind: UInt32, Sendable {
+    case mAudioSpecialMixer = 0x4D41_3134 // "MA14"
+}
+
 struct AudioControlSurfaceSnapshot: Equatable, Sendable {
     let endpointID: AudioEndpointID
-    let kind: UInt32
-    let revision: UInt32
+    let kind: AudioControlSurfaceKind
+    let topologyRevision: UInt64
+    let stateRevision: UInt32
     let values: [AudioControlSurfaceValue]
 
     func value(for id: UInt32) -> Int32 {
@@ -18,6 +26,8 @@ struct AudioControlSurfaceSnapshot: Equatable, Sendable {
     func value(for control: MAudio1814ControlID) -> Int32 {
         value(for: control.rawValue)
     }
+
+    var isMAudioSpecialMixer: Bool { kind == .mAudioSpecialMixer }
 }
 
 /// A family of like-typed controls in the 1814's parameter window.

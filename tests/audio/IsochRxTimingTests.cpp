@@ -679,7 +679,7 @@ TEST(IsochRxTimingTests, CaptureChannelMapPermutesAndDefersDelayedChannels) {
     });
 
     ASFW::AudioEngine::Direct::Rx::RxCaptureChannelMap map{};
-    map.slotForChannel = kSlots;
+    ASSERT_TRUE(map.SetSlots(kSlots));
     map.channelCount = kChannels;
     map.delayFrames = kDelayFrames;
     map.delayedChannelMask = 1u << 1;

@@ -60,7 +60,7 @@ private struct AudioTopologyHeader: View {
                 .shadow(color: clockLocked == true ? .green.opacity(0.8) :
                         clockLocked == false ? .orange.opacity(0.8) : .gray.opacity(0.4), radius: 4)
             VStack(alignment: .leading, spacing: 3) {
-                Text("M-Audio FireWire 1814")
+                Text("M-Audio FireWire 1814 / ProjectMix I/O")
                     .font(.title2.bold())
                 Text("CONFIRMED HARDWARE TOPOLOGY PROJECTION")
                     .font(.caption.monospaced())
@@ -152,8 +152,8 @@ private struct AudioTopologyTelemetry: View {
 }
 
 /// The front-panel encoders are relative: the device sends detents and the
-/// driver integrates them, so these are a running total since metering was
-/// enabled rather than a readback of a knob position.
+/// driver exposes a wrapping event counter. Deliberately do not render a knob
+/// position here; the hardware provides none.
 private struct AudioTopologyEncoderRow: View {
     let meters: AudioMeterSnapshot
 
@@ -166,10 +166,9 @@ private struct AudioTopologyEncoderRow: View {
                     Text(index < Self.names.count ? Self.names[index] : "ENCODER \(index + 1)")
                         .font(.system(size: 9).monospaced())
                         .foregroundStyle(.secondary)
-                    ProgressView(value: Double(Int(value) + 32_768) / 32_768)
-                        .progressViewStyle(.linear)
-                        .tint(.yellow)
-                        .frame(width: 110)
+                    Text("EVENT COUNTER  \(UInt16(bitPattern: value))")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.yellow)
                 }
             }
             Spacer()
