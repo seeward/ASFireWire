@@ -498,19 +498,148 @@ void DICETcatProtocol::EnsureRuntimeCapsLoaded(VoidCallback callback) {
 
                                 state->rx = rx;
                                 LogStreamConfigSummary("RX", state->rx);
-                                CacheRuntimeCaps(state->global, state->tx, state->rx);
-                                AudioStreamRuntimeCaps caps{};
-                                (void)GetRuntimeAudioStreamCaps(caps);
-                                LogRuntimeCaps("standard-dice", caps);
-                                if (!HasUsableRuntimeCaps(caps)) {
-                                    ASFW_LOG(DICE,
-                                             "DICETcatProtocol: standard DICE discovery produced zero or partial caps; audio publication should fail closed");
+                                if (runtimePolicy_.preferExtensionStreamGeometry) {
+                                    CacheRuntimeCapsPreferringExtension(
+                                        state->global, state->tx, state->rx,
+                                        std::move(callback));
+                                    return;
                                 }
+                                PublishRuntimeCaps("standard-dice", state->global,
+                                                   state->tx, state->rx);
                                 callback(kIOReturnSuccess);
                             });
                     });
             });
     });
+}
+
+void DICETcatProtocol::PublishRuntimeCaps(const char* source,
+                                          const GlobalState& global,
+                                          const StreamConfig& tx,
+                                          const StreamConfig& rx) {
+    CacheRuntimeCaps(global, tx, rx);
+    AudioStreamRuntimeCaps caps{};
+    (void)GetRuntimeAudioStreamCaps(caps);
+    LogRuntimeCaps(source, caps);
+    if (!HasUsableRuntimeCaps(caps)) {
+        ASFW_LOG(DICE,
+                 "DICETcatProtocol: handshake '%{public}s' produced zero or partial caps; audio publication should fail closed",
+                 source);
+    }
+}
+
+// Second of the two DICE stream-geometry handshakes. Linux tries the TCAT
+// protocol extension first and falls back to the plain TX/RX sections when the
+// device does not implement it; we take the same branch, but only for profiles
+// that opt in, so a model whose geometry is already hardware-validated through
+// the plain sections cannot change behaviour.
+// cross-validated with Linux sound/firewire/dice/dice-stream.c:609-621
+// (snd_dice_stream_detect_current_formats).
+//
+// Every exit from this chain logs a distinct "[DiceExt]" line: with no hardware
+// on hand, a user-supplied log is the only way to tell which handshake ran and
+// where it gave up.
+void DICETcatProtocol::CacheRuntimeCapsPreferringExtension(const GlobalState& global,
+                                                           const StreamConfig& tx,
+                                                           const StreamConfig& rx,
+                                                           VoidCallback callback) {
+    struct PlainGeometry {
+        GlobalState global;
+        StreamConfig tx;
+        StreamConfig rx;
+    };
+    auto plain = std::make_shared<PlainGeometry>(PlainGeometry{global, tx, rx});
+
+    auto fallback = [this, plain, callback](const char* why) {
+        ASFW_LOG(DICE,
+                 "[DiceExt] handshake=plain (extension unusable: %{public}s)", why);
+        PublishRuntimeCaps("plain-tcat-fallback", plain->global, plain->tx, plain->rx);
+        callback(kIOReturnSuccess);
+    };
+
+    // Everything we stream is <= kDiceMaxSupportedRateHz, so the block that
+    // matters is always the low rate mode's -- whatever rate the device happens
+    // to be running when we probe it. That independence is the whole point of
+    // preferring this handshake.
+    DiceRateMode mode{};
+    if (!DiceRateModeForRate(kDiceMaxSupportedRateHz, mode)) {
+        fallback("no DICE rate mode covers the host's maximum rate");
+        return;
+    }
+
+    ASFW_LOG(DICE,
+             "[DiceExt] profile prefers the extension handshake; reading the pointer table at 0x%llx "
+             "(probe-time device rate=%u Hz, target mode=%u)",
+             static_cast<unsigned long long>(DICEAbsoluteAddress(kDICEExtensionOffset)),
+             plain->global.sampleRate, static_cast<unsigned>(mode));
+
+    diceReader_.ReadExtensionSections(
+        [this, plain, mode, fallback, callback](IOReturn status, ExtensionSections ext) mutable {
+            if (status != kIOReturnSuccess) {
+                ASFW_LOG(DICE, "[DiceExt] pointer table read failed: 0x%x", status);
+                fallback("pointer table read failed");
+                return;
+            }
+
+            // A device without the extension answers this space with a
+            // degenerate table instead of failing, so a successful read proves
+            // nothing on its own.
+            if (!HasDistinctExtensionSectionOffsets(ext)) {
+                ASFW_LOG(DICE,
+                         "[DiceExt] pointer table is degenerate (repeating offsets) -> device does NOT implement the "
+                         "TCAT extension: caps=%u/%u cmd=%u/%u mixer=%u/%u peak=%u/%u router=%u/%u "
+                         "streamFmt=%u/%u current=%u/%u standalone=%u/%u app=%u/%u",
+                         ext.caps.offset, ext.caps.size,
+                         ext.command.offset, ext.command.size,
+                         ext.mixer.offset, ext.mixer.size,
+                         ext.peak.offset, ext.peak.size,
+                         ext.router.offset, ext.router.size,
+                         ext.streamFormat.offset, ext.streamFormat.size,
+                         ext.currentConfig.offset, ext.currentConfig.size,
+                         ext.standalone.offset, ext.standalone.size,
+                         ext.application.offset, ext.application.size);
+                fallback("pointer table offsets are not pairwise distinct");
+                return;
+            }
+
+            ASFW_LOG(DICE,
+                     "[DiceExt] extension present: currentConfig=+%u size=%u, reading the mode-%u stream block",
+                     ext.currentConfig.offset, ext.currentConfig.size,
+                     static_cast<unsigned>(mode));
+
+            diceReader_.ReadExtensionStreamConfig(
+                ext, mode,
+                [this, plain, fallback, callback](IOReturn extStatus,
+                                                  ExtensionStreamGeometry geometry) mutable {
+                    if (extStatus != kIOReturnSuccess) {
+                        ASFW_LOG(DICE, "[DiceExt] CURRENT_CONFIG stream block read failed: 0x%x", extStatus);
+                        fallback("CURRENT_CONFIG stream block read failed");
+                        return;
+                    }
+                    if (geometry.tx.numStreams == 0 && geometry.rx.numStreams == 0) {
+                        fallback("CURRENT_CONFIG stream block reported no streams");
+                        return;
+                    }
+
+                    const StreamConfig mergedTx =
+                        MergeExtensionStreamGeometry(plain->tx, geometry.tx);
+                    const StreamConfig mergedRx =
+                        MergeExtensionStreamGeometry(plain->rx, geometry.rx);
+                    ASFW_LOG(DICE,
+                             "[DiceExt] handshake=extension: TX streams %u->%u pcm %u->%u midi %u->%u | "
+                             "RX streams %u->%u pcm %u->%u midi %u->%u",
+                             plain->tx.numStreams, mergedTx.numStreams,
+                             plain->tx.TotalPcmChannels(), mergedTx.TotalPcmChannels(),
+                             plain->tx.TotalMidiPorts(), mergedTx.TotalMidiPorts(),
+                             plain->rx.numStreams, mergedRx.numStreams,
+                             plain->rx.TotalPcmChannels(), mergedRx.TotalPcmChannels(),
+                             plain->rx.TotalMidiPorts(), mergedRx.TotalMidiPorts());
+                    LogStreamConfigSummary("EXT-TX", mergedTx);
+                    LogStreamConfigSummary("EXT-RX", mergedRx);
+                    PublishRuntimeCaps("dice-extension", plain->global, mergedTx, mergedRx);
+                    callback(kIOReturnSuccess);
+                });
+        });
 }
 
 void DICETcatProtocol::CacheRuntimeCaps(const GlobalState& global,

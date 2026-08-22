@@ -53,6 +53,24 @@ public:
     /// Read TCAT extension sections layout from DICE device.
     /// @param callback   Callback with parsed extension sections
     void ReadExtensionSections(std::function<void(IOReturn, ExtensionSections)> callback);
+
+    /// Read per-rate-mode stream geometry from the TCAT extension's
+    /// CURRENT_CONFIG section.
+    ///
+    /// This is the second of the two stream-geometry handshakes a DICE device
+    /// may implement. Unlike ReadTx/RxStreamConfig it is not restricted to the
+    /// rate the device is currently running, so the geometry we will stream at
+    /// can be read before the clock is moved. The returned entries carry no
+    /// isochronous channel — merge them onto a plain read with
+    /// MergeExtensionStreamGeometry.
+    ///
+    /// Callers must confirm the device implements the extension first
+    /// (HasDistinctExtensionSectionOffsets); this reads whatever the pointer
+    /// table addresses.
+    /// cross-validated with Linux sound/firewire/dice/dice-extension.c:84-138.
+    void ReadExtensionStreamConfig(
+        const ExtensionSections& sections, DiceRateMode mode,
+        std::function<void(IOReturn, ExtensionStreamGeometry)> callback);
     
     // ========================================================================
     // Capability Discovery

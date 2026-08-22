@@ -31,6 +31,18 @@ target_link_libraries(DICEDuplexBringupControllerTests PRIVATE
 )
 gtest_discover_tests(DICEDuplexBringupControllerTests)
 
+# The two DICE stream-geometry handshakes: TCAT protocol extension
+# (CURRENT_CONFIG) vs the plain TX/RX stream-format sections, and the runtime
+# detection between them. No hardware exists on the project for the Liquid
+# Saffire 56, so this is the only place the branch is exercised.
+add_device_test(DiceExtensionGeometryTests
+    DiceExtensionGeometryTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICETransaction.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICEDuplexBringupController.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/TCAT/DICETcatProtocol.cpp"
+    "${ASFW_DRIVER_DIR}/Discovery/DeviceRegistry.cpp"
+)
+
 # Generic DICE / TCAT protocol split tests
 add_device_test(DICETcatProtocolTests
     DICETcatProtocolTests.cpp

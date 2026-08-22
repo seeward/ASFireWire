@@ -408,6 +408,84 @@ void LogStreamConfigDetails(const char* prefix, const StreamConfig& config) {
         }
     }
 }
+
+// Parse one CURRENT_CONFIG stream block: [TX_NUMBER][RX_NUMBER] then txCount TX
+// entries followed by rxCount RX entries, all of stride kEntryStride. The
+// entries carry no isochronous channel, so every parsed entry stays inactive
+// (isoChannel == -1) and the caller must merge it onto a plain TX/RX read.
+// cross-validated with Linux sound/firewire/dice/dice-extension.c:59-138.
+ExtensionStreamGeometry ParseExtensionStreamBlock(const uint8_t* data, size_t size) {
+    ExtensionStreamGeometry geometry;
+    if (!data || size < CurrentConfigStream::kEntries) {
+        return geometry;
+    }
+
+    const uint32_t reportedTx = ReadBE32(data + CurrentConfigStream::kTxNumber);
+    const uint32_t reportedRx = ReadBE32(data + CurrentConfigStream::kRxNumber);
+    const uint32_t txCount = ClampStreamCount(reportedTx);
+    const uint32_t rxCount = ClampStreamCount(reportedRx);
+    ASFW_LOG(DICE,
+             "[DiceExt] stream block header: txReported=%u rxReported=%u clampedTx=%u clampedRx=%u bytes=%zu",
+             reportedTx, reportedRx, txCount, rxCount, size);
+    if (reportedTx > txCount || reportedRx > rxCount) {
+        ASFW_LOG(DICE,
+                 "[DiceExt] device reports more streams than the host can arm; extra streams ignored");
+    }
+    geometry.tx.isRxLayout = false;
+    geometry.rx.isRxLayout = true;
+    geometry.tx.entrySizeBytes = CurrentConfigStream::kEntryStride;
+    geometry.rx.entrySizeBytes = CurrentConfigStream::kEntryStride;
+    geometry.tx.parsedEntrySizeBytes = CurrentConfigStream::kEntryStride;
+    geometry.rx.parsedEntrySizeBytes = CurrentConfigStream::kEntryStride;
+
+    // TX entries occupy the first txCount slots; RX entries follow the *reported*
+    // TX count, not the clamped one, so a device reporting more streams than we
+    // support still yields correctly located RX entries.
+    const auto parseInto = [data, size](StreamConfig& out, uint32_t count,
+                                        uint32_t firstEntryIndex) {
+        uint32_t parsed = 0;
+        for (uint32_t i = 0; i < count; ++i) {
+            // Widen before multiplying: a garbage firstEntryIndex must overrun
+            // the bounds check below, not wrap around into a valid offset.
+            const size_t base = CurrentConfigStream::kEntries +
+                                (static_cast<size_t>(firstEntryIndex) + i) *
+                                    CurrentConfigStream::kEntryStride;
+            if (base + CurrentConfigStream::kEntryNames > size) {
+                break;
+            }
+            auto& entry = out.streams[i];
+            entry.isoChannel = -1;
+            entry.pcmChannels = ReadBE32(data + base + CurrentConfigStream::kEntryPcmChannels);
+            entry.midiPorts = ReadBE32(data + base + CurrentConfigStream::kEntryMidiPorts);
+            if (base + CurrentConfigStream::kEntryNames +
+                    CurrentConfigStream::kEntryNamesBytes <= size) {
+                CopyLabelBlob(entry.labels, data + base + CurrentConfigStream::kEntryNames,
+                              CurrentConfigStream::kEntryNamesBytes);
+            }
+            ++parsed;
+        }
+        out.numStreams = parsed;
+        return parsed == count;
+    };
+
+    const bool txComplete = parseInto(geometry.tx, txCount, 0);
+    const bool rxComplete = parseInto(geometry.rx, rxCount, reportedTx);
+    if (!txComplete || !rxComplete) {
+        // The read was capped (section size, or our 4096-byte transaction cap)
+        // before every entry landed. Report the shortfall so a device that needs
+        // a larger read is identifiable from a user-supplied log alone.
+        ASFW_LOG(DICE,
+                 "[DiceExt] stream block TRUNCATED: tx=%u/%u rx=%u/%u readSize=%zu "
+                 "(need %zu bytes for %u entries at stride %u)",
+                 geometry.tx.numStreams, txCount, geometry.rx.numStreams, rxCount, size,
+                 CurrentConfigStream::kEntries +
+                     static_cast<size_t>(reportedTx + reportedRx) *
+                         CurrentConfigStream::kEntryStride,
+                 reportedTx + reportedRx, CurrentConfigStream::kEntryStride);
+    }
+    return geometry;
+}
+
 } // anonymous namespace
 
 std::vector<std::string> SplitDiceLabels(const char* labels) {
@@ -569,6 +647,56 @@ const char* GlobalState::SupportedRatesDescription() const {
     if (clockCaps & RateCaps::k192000) strlcat(desc, "192k ", sizeof(desc));
 
     return desc;
+}
+
+void DICETransaction::ReadExtensionStreamConfig(
+    const ExtensionSections& sections, DiceRateMode mode,
+    std::function<void(IOReturn, ExtensionStreamGeometry)> callback) {
+    auto callbackState = Common::ShareCallback(std::move(callback));
+
+    const uint32_t blockOffset = CurrentConfigStreamBlockOffset(mode);
+    if (sections.currentConfig.size <= blockOffset) {
+        // The pointer table passed the distinctness screen but this rate mode's
+        // block is outside the section the device actually published.
+        ASFW_LOG(DICE,
+                 "ReadExtensionStreamConfig: mode %u block at +%u is past currentConfig size %u",
+                 static_cast<unsigned>(mode), blockOffset, sections.currentConfig.size);
+        Common::InvokeSharedCallback(callbackState, kIOReturnUnsupported,
+                                     ExtensionStreamGeometry{});
+        return;
+    }
+
+    // Header plus the widest layout we can represent: kMaxAudioStreamsPerDirection
+    // TX entries followed by as many RX entries.
+    constexpr size_t kMaxBlockBytes =
+        CurrentConfigStream::kEntries + 8u * CurrentConfigStream::kEntryStride;
+    const size_t available = sections.currentConfig.size - blockOffset;
+    const size_t readSize =
+        std::min({kMaxBlockBytes, available, kMaxSectionReadBytes});
+
+    const uint32_t absoluteOffset = ExtensionAbsoluteOffset(sections.currentConfig, blockOffset);
+    auto accumulated = std::make_shared<std::vector<uint8_t>>();
+    accumulated->reserve(readSize);
+    ReadSectionChunked(
+        io_, absoluteOffset, readSize, accumulated,
+        [callbackState, accumulated, mode](IOReturn status) {
+            if (status != kIOReturnSuccess) {
+                Common::InvokeSharedCallback(callbackState, status, ExtensionStreamGeometry{});
+                return;
+            }
+            ExtensionStreamGeometry geometry =
+                ParseExtensionStreamBlock(accumulated->data(), accumulated->size());
+            ASFW_LOG(DICE,
+                     "ReadExtensionStreamConfig: mode=%u bytes=%zu tx streams=%u pcm=%u midi=%u "
+                     "rx streams=%u pcm=%u midi=%u",
+                     static_cast<unsigned>(mode), accumulated->size(),
+                     geometry.tx.numStreams, geometry.tx.TotalPcmChannels(),
+                     geometry.tx.TotalMidiPorts(), geometry.rx.numStreams,
+                     geometry.rx.TotalPcmChannels(), geometry.rx.TotalMidiPorts());
+            LogStreamConfigDetails("EXT-TX", geometry.tx);
+            LogStreamConfigDetails("EXT-RX", geometry.rx);
+            Common::InvokeSharedCallback(callbackState, kIOReturnSuccess, geometry);
+        });
 }
 
 } // namespace ASFW::Audio::DICE

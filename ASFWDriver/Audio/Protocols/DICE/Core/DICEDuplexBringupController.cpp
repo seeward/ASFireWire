@@ -1240,7 +1240,32 @@ void DICEDuplexBringupController::RefreshRuntimeCaps(VoidCallback cb) {
                             }
 
                             state->rx = rx;
+                            const AudioStreamRuntimeCaps previous = runtimeCaps_;
                             CacheRuntimeCaps(runtimeCaps_, state->global, state->tx, state->rx);
+                            // Two geometry sources meet here. Probe time may have
+                            // published the TCAT extension's rate-mode geometry
+                            // (or the plain sections for whatever mode the device
+                            // was sitting in); this post-clock re-read of the
+                            // plain sections is what actually gets programmed.
+                            // Once the clock is at the target rate the two must
+                            // describe the same thing -- if they ever do not, the
+                            // HAL is publishing channels the wire will not carry,
+                            // which presents as a device that appears in Audio
+                            // MIDI Setup and plays nothing.
+                            if (previous.sampleRateHz != 0 &&
+                                (previous.hostInputPcmChannels != runtimeCaps_.hostInputPcmChannels ||
+                                 previous.hostOutputPcmChannels != runtimeCaps_.hostOutputPcmChannels ||
+                                 previous.deviceToHostStreamCount != runtimeCaps_.deviceToHostStreamCount ||
+                                 previous.hostToDeviceStreamCount != runtimeCaps_.hostToDeviceStreamCount)) {
+                                ASFW_LOG(DICE,
+                                         "[DiceGeom] post-clock geometry CHANGED at %u Hz: in %u->%u out %u->%u "
+                                         "d2hStreams %u->%u h2dStreams %u->%u (published vs programmed now disagree)",
+                                         runtimeCaps_.sampleRateHz,
+                                         previous.hostInputPcmChannels, runtimeCaps_.hostInputPcmChannels,
+                                         previous.hostOutputPcmChannels, runtimeCaps_.hostOutputPcmChannels,
+                                         previous.deviceToHostStreamCount, runtimeCaps_.deviceToHostStreamCount,
+                                         previous.hostToDeviceStreamCount, runtimeCaps_.hostToDeviceStreamCount);
+                            }
                             restartSession_.runtimeCaps = runtimeCaps_;
                             restartSession_.appliedClock = AudioClockConfig{
                                 .sampleRateHz = state->global.sampleRate,

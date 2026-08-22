@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 namespace ASFW::Audio::DICE {
 
@@ -134,6 +135,37 @@ struct ExtensionSections {
 [[nodiscard]] constexpr uint32_t ExtensionAbsoluteOffset(const Section& section,
                                                          uint32_t offset = 0) noexcept {
     return kDICEExtensionOffset + section.offset + offset;
+}
+
+/// Whether the pointer table read from the TCAT extension space describes a
+/// device that actually implements the protocol extension.
+///
+/// A device without the extension answers the read at 0xFFFFE0200000 with a
+/// degenerate table whose section offsets repeat instead of failing the
+/// transaction, so a successful read is NOT evidence on its own. Linux screens
+/// the table by requiring all nine section offsets to be pairwise distinct;
+/// FFADO screens the same space by requiring its zero marker to read back zero.
+/// We use the Linux test because it inspects the payload we already parse.
+/// cross-validated with Linux sound/firewire/dice/dice-extension.c:157-168
+/// and libffado-2.5.0 src/dice/dice_eap.cpp:1133 (EAP::supportsEAP).
+[[nodiscard]] constexpr bool HasDistinctExtensionSectionOffsets(
+    const ExtensionSections& sections) noexcept {
+    const uint32_t offsets[] = {
+        sections.caps.offset,          sections.command.offset,
+        sections.mixer.offset,         sections.peak.offset,
+        sections.router.offset,        sections.streamFormat.offset,
+        sections.currentConfig.offset, sections.standalone.offset,
+        sections.application.offset,
+    };
+    constexpr size_t kCount = sizeof(offsets) / sizeof(offsets[0]);
+    for (size_t i = 0; i < kCount; ++i) {
+        for (size_t j = i + 1; j < kCount; ++j) {
+            if (offsets[i] == offsets[j]) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 // ============================================================================
@@ -783,6 +815,100 @@ namespace CurrentConfigOffset {
     constexpr uint32_t kMiddleStream = 0x3000;
     constexpr uint32_t kHighRouter = 0x4000;
     constexpr uint32_t kHighStream = 0x5000;
+}
+
+// ----------------------------------------------------------------------------
+// TCAT protocol-extension stream geometry (CURRENT_CONFIG section).
+//
+// The plain DICE TX/RX stream-format sections describe only the rate mode the
+// device happens to be running right now. The extension's CURRENT_CONFIG
+// section stores one stream block per rate mode, so the geometry we will
+// actually stream at can be read without first moving the device's clock.
+// Its entries carry channel/MIDI counts and names but no isochronous channel:
+// that stays a property of the plain TX/RX sections (and is assigned by us at
+// reservation time regardless).
+// cross-validated with Linux sound/firewire/dice/dice-extension.c:33-48,84-138.
+// ----------------------------------------------------------------------------
+
+/// Rate modes the extension groups stream geometry by.
+enum class DiceRateMode : uint8_t {
+    Low = 0,     ///< 32/44.1/48 kHz
+    Middle = 1,  ///< 88.2/96 kHz
+    High = 2,    ///< 176.4/192 kHz
+};
+
+/// Rate mode covering `rateHz`, or false for a rate outside the DICE table.
+[[nodiscard]] constexpr bool DiceRateModeForRate(uint32_t rateHz,
+                                                 DiceRateMode& out) noexcept {
+    if (rateHz == 32000 || rateHz == 44100 || rateHz == 48000) {
+        out = DiceRateMode::Low;
+        return true;
+    }
+    if (rateHz == 88200 || rateHz == 96000) {
+        out = DiceRateMode::Middle;
+        return true;
+    }
+    if (rateHz == 176400 || rateHz == 192000) {
+        out = DiceRateMode::High;
+        return true;
+    }
+    return false;
+}
+
+/// Byte offset of a rate mode's stream block inside the CURRENT_CONFIG section.
+[[nodiscard]] constexpr uint32_t CurrentConfigStreamBlockOffset(
+    DiceRateMode mode) noexcept {
+    return CurrentConfigOffset::kLowStream +
+           0x2000U * static_cast<uint32_t>(mode);
+}
+
+/// Layout inside one CURRENT_CONFIG stream block: a two-quadlet header followed
+/// by `txCount` TX entries and then `rxCount` RX entries of equal stride.
+namespace CurrentConfigStream {
+    constexpr uint32_t kTxNumber       = 0x0000;
+    constexpr uint32_t kRxNumber       = 0x0004;
+    constexpr uint32_t kEntries        = 0x0008;
+    constexpr uint32_t kEntryStride    = 0x010C;
+    constexpr uint32_t kEntryPcmChannels = 0x0000;
+    constexpr uint32_t kEntryMidiPorts   = 0x0004;
+    constexpr uint32_t kEntryNames       = 0x0008;
+    constexpr uint32_t kEntryNamesBytes  = 256;
+    constexpr uint32_t kEntryAc3         = 0x0108;
+}
+
+/// Per-rate-mode stream geometry read from the extension's CURRENT_CONFIG
+/// section. Entry `isoChannel` is always -1: the extension does not carry one.
+struct ExtensionStreamGeometry {
+    StreamConfig tx{};
+    StreamConfig rx{};
+};
+
+/// Overlay `ext`'s channel/MIDI/label geometry onto `plain`, keeping the
+/// isochronous channel, speed/seqStart and register stride that only the plain
+/// TX/RX section reports. Returns `plain` unchanged when `ext` reported no
+/// streams, so a device that answers the extension read with an empty block
+/// degrades to the plain handshake instead of publishing zero channels.
+[[nodiscard]] inline StreamConfig MergeExtensionStreamGeometry(
+    const StreamConfig& plain, const StreamConfig& ext) noexcept {
+    if (ext.numStreams == 0) {
+        return plain;
+    }
+    StreamConfig merged = plain;
+    merged.numStreams = ext.numStreams;
+    for (uint32_t i = 0; i < ext.numStreams && i < 4; ++i) {
+        auto& out = merged.streams[i];
+        // Streams the plain section never reported have no wire identity yet;
+        // start from a clean entry so a stale neighbour is not inherited.
+        if (i >= plain.numStreams) {
+            out = StreamFormatEntry{};
+            out.hasSeqStart = plain.isRxLayout;
+            out.hasSpeed = !plain.isRxLayout;
+        }
+        out.pcmChannels = ext.streams[i].pcmChannels;
+        out.midiPorts = ext.streams[i].midiPorts;
+        std::memcpy(out.labels, ext.streams[i].labels, sizeof(out.labels));
+    }
+    return merged;
 }
 
 } // namespace ASFW::Audio::DICE

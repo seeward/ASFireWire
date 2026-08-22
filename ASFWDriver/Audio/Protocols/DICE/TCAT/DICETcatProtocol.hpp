@@ -37,6 +37,23 @@ struct DICETcatRuntimePolicy final {
     // are flowing; it does not select ARX1 as a clock source.
     bool requireSourceLockBeforeStreamEnable{true};
     bool requireSourceLockAtConfirm{true};
+
+    // Read probe-time stream geometry from the TCAT protocol extension's
+    // CURRENT_CONFIG section instead of the plain TX/RX stream-format sections,
+    // falling back to the plain sections when the device does not implement the
+    // extension. The plain sections only describe the rate mode the device is
+    // running right now, so a device left at 88.2 kHz+ by another host publishes
+    // that rate's narrower channel count to CoreAudio even though we will stream
+    // it at <=48 kHz. Devices whose geometry is already hardware-validated
+    // through the plain sections keep it (default false); this is opt-in per
+    // profile so enabling a new model cannot change a verified one.
+    //
+    // This changes what is PUBLISHED, not what is programmed: the bring-up
+    // controller re-reads the plain sections after the clock is accepted, and
+    // that read is what the wire is configured from. At the target rate the two
+    // must agree; DICEDuplexBringupController::RefreshRuntimeCaps logs
+    // "[DiceGeom] post-clock geometry CHANGED" if they ever do not.
+    bool preferExtensionStreamGeometry{false};
 };
 
 class DICETcatProtocol final : public Audio::IDeviceProtocol,
@@ -101,6 +118,21 @@ private:
         DiceClockConfiguration& out) noexcept;
     void EnsureSectionsLoaded(VoidCallback callback);
     void EnsureRuntimeCapsLoaded(VoidCallback callback);
+    // Second stage of EnsureRuntimeCapsLoaded when the profile opts into the
+    // extension handshake: overlay the extension's rate-mode geometry onto the
+    // plain read, or publish the plain read unchanged if the device turns out
+    // not to implement the extension.
+    void CacheRuntimeCapsPreferringExtension(const GlobalState& global,
+                                             const StreamConfig& tx,
+                                             const StreamConfig& rx,
+                                             VoidCallback callback);
+    // Cache the geometry that will be published to CoreAudio and log which
+    // handshake produced it. `source` is echoed into the runtime-caps line so a
+    // user-supplied log identifies the winning path on its own.
+    void PublishRuntimeCaps(const char* source,
+                            const GlobalState& global,
+                            const StreamConfig& tx,
+                            const StreamConfig& rx);
     void CacheRuntimeCaps(const GlobalState& global,
                           const StreamConfig& tx,
                           const StreamConfig& rx) noexcept;
