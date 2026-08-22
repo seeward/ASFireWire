@@ -10,6 +10,7 @@
 #include <DriverKit/IOReturn.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace ASFW::Audio {
@@ -176,8 +177,20 @@ struct AudioSemanticTopologySnapshot final {
     std::array<AudioSemanticParameter, kMaxAudioSemanticParameters> parameters{};
     std::array<AudioSemanticMeter, kMaxAudioSemanticMeters> meters{};
 };
-static_assert(sizeof(AudioSemanticTopologySnapshot) < 4096,
-              "semantic topology must fit one DriverKit structure reply");
+// The app decodes this as a fixed UserClient ABI. Keep each offset explicit so
+// changing a C++ enum, alignment rule, or array capacity cannot silently
+// scramble the Swift-side topology.
+static_assert(offsetof(AudioSemanticTopologySnapshot, nodes) == 52);
+static_assert(offsetof(AudioSemanticTopologySnapshot, ports) == 244);
+static_assert(offsetof(AudioSemanticTopologySnapshot, fixedLinks) == 1044);
+static_assert(offsetof(AudioSemanticTopologySnapshot, routers) == 1364);
+static_assert(offsetof(AudioSemanticTopologySnapshot, routeBundles) == 1492);
+static_assert(offsetof(AudioSemanticTopologySnapshot, routes) == 1748);
+static_assert(offsetof(AudioSemanticTopologySnapshot, crosspoints) == 1940);
+static_assert(offsetof(AudioSemanticTopologySnapshot, parameters) == 2228);
+static_assert(offsetof(AudioSemanticTopologySnapshot, meters) == 3188);
+static_assert(sizeof(AudioSemanticTopologySnapshot) == 3480,
+              "semantic topology ABI changed");
 
 class IAudioSemanticTopology {
 public:

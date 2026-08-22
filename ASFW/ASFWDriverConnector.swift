@@ -82,6 +82,7 @@ final class ASFWDriverConnector: ObservableObject {
         case getAudioMeterSnapshotAsync = 1025
         case setAudioMeteringEnabledAsync = 1026
         case requestAudioConfigurationAsync = 1027
+        case getAudioSemanticTopology = 1028
     }
 
     // MARK: - Re-exported Models
@@ -231,6 +232,23 @@ final class ASFWDriverConnector: ObservableObject {
         value: Int32,
         completion: @escaping (kern_return_t) -> Void
     ) {
+        submitAudioControlValue(
+            endpointID: endpointID,
+            controlID: controlID.rawValue,
+            value: value,
+            completion: completion
+        )
+    }
+
+    /// Submits a value for a parameter declared in an audio semantic topology.
+    /// The driver remains the protocol owner; the app never sends vendor FCP
+    /// operands or reconstructs a multi-field device command itself.
+    func submitAudioControlValue(
+        endpointID: AudioEndpointID,
+        controlID: UInt32,
+        value: Int32,
+        completion: @escaping (kern_return_t) -> Void
+    ) {
         connectionQueue.async { [weak self] in
             guard let self, self.connection != 0,
                   self.asyncPort != mach_port_t(MACH_PORT_NULL),
@@ -245,7 +263,7 @@ final class ASFWDriverConnector: ObservableObject {
             var reference = DriverKitAsyncCompletionDecoder.reference(
                 marker: Self.audioControlAsyncReference
             )
-            var inputs = [endpointID.rawValue, UInt64(controlID.rawValue),
+            var inputs = [endpointID.rawValue, UInt64(controlID),
                           UInt64(UInt32(bitPattern: value)), requestID]
             let kr = IOConnectCallAsyncScalarMethod(
                 self.connection, Method.submitAudioControlValue.rawValue,

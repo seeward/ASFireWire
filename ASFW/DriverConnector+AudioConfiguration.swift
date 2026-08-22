@@ -220,6 +220,29 @@ extension ASFWDriverConnector {
         return AudioControlSurfaceWireDecoder.decode(output)
     }
 
+    func getAudioSemanticTopology(endpointID: AudioEndpointID) -> AudioSemanticTopologySnapshot? {
+        guard isConnected, connection != 0, endpointID.rawValue != 0 else { return nil }
+        var scalarInput = endpointID.rawValue
+        var output = Data(count: 3496)
+        var outputLength = output.count
+        let result = output.withUnsafeMutableBytes { outputBytes in
+            IOConnectCallMethod(
+                connection,
+                Method.getAudioSemanticTopology.rawValue,
+                &scalarInput,
+                1,
+                nil,
+                0,
+                nil,
+                nil,
+                outputBytes.baseAddress,
+                &outputLength
+            )
+        }
+        guard result == KERN_SUCCESS, outputLength == output.count else { return nil }
+        return AudioSemanticTopologyWireDecoder.decode(output)
+    }
+
     func requestAudioControlValue(endpointID: AudioEndpointID,
                                   controlID: MAudio1814ControlID,
                                   value: Int32) -> kern_return_t {
@@ -325,6 +348,212 @@ private enum AudioControlSurfaceWireDecoder {
     }
 }
 
+/// Fixed ABI decoder for `AudioSemanticTopologySnapshotWire`. Its offsets are
+/// locked by matching `static_assert`s in the DriverKit wire headers.
+enum AudioSemanticTopologyWireDecoder {
+    nonisolated private static let wireSize = 3496
+    nonisolated private static let topologyStart = 16
+    nonisolated private static let nodeOffset = 68
+    nonisolated private static let portOffset = 260
+    nonisolated private static let fixedLinkOffset = 1060
+    nonisolated private static let routerOffset = 1380
+    nonisolated private static let routeBundleOffset = 1508
+    nonisolated private static let routeOffset = 1764
+    nonisolated private static let crosspointOffset = 1956
+    nonisolated private static let parameterOffset = 2244
+    nonisolated private static let meterOffset = 3204
+
+    nonisolated static func decode(_ data: Data) -> AudioSemanticTopologySnapshot? {
+        guard data.count == wireSize,
+              let wireVersion = data.u32(at: 0), wireVersion == 1,
+              let endpointRaw = data.u64(at: 8), endpointRaw != 0,
+              let topologyVersion = data.u32(at: topologyStart), topologyVersion == 1,
+              let deviceKind = data.u32(at: topologyStart + 4), deviceKind != 0,
+              let topologyRevision = data.u64(at: topologyStart + 8), topologyRevision != 0,
+              let counts = counts(from: data) else {
+            return nil
+        }
+
+        guard let nodes: [AudioSemanticTopologySnapshot.Node] = entries(
+            data, count: counts.nodes, maximum: 16, offset: nodeOffset, stride: 12,
+            decode: node),
+              let ports: [AudioSemanticTopologySnapshot.Port] = entries(
+                data, count: counts.ports, maximum: 40, offset: portOffset, stride: 20,
+                decode: port),
+              let fixedLinks: [AudioSemanticTopologySnapshot.FixedLink] = entries(
+                data, count: counts.fixedLinks, maximum: 40, offset: fixedLinkOffset, stride: 8,
+                decode: fixedLink),
+              let routers: [AudioSemanticTopologySnapshot.Router] = entries(
+                data, count: counts.routers, maximum: 8, offset: routerOffset, stride: 16,
+                decode: router),
+              let routeBundles: [AudioSemanticTopologySnapshot.RouteBundle] = entries(
+                data, count: counts.routeBundles, maximum: 16, offset: routeBundleOffset, stride: 16,
+                decode: routeBundle),
+              let routes: [AudioSemanticTopologySnapshot.Route] = entries(
+                data, count: counts.routes, maximum: 24, offset: routeOffset, stride: 8,
+                decode: route),
+              let crosspoints: [AudioSemanticTopologySnapshot.Crosspoint] = entries(
+                data, count: counts.crosspoints, maximum: 24, offset: crosspointOffset, stride: 12,
+                decode: crosspoint),
+              let parameters: [AudioSemanticTopologySnapshot.Parameter] = entries(
+                data, count: counts.parameters, maximum: 24, offset: parameterOffset, stride: 40,
+                decode: parameter),
+              let meters: [AudioSemanticTopologySnapshot.Meter] = entries(
+                data, count: counts.meters, maximum: 12, offset: meterOffset, stride: 24,
+                decode: meter) else {
+            return nil
+        }
+
+        return AudioSemanticTopologySnapshot(
+            endpointID: AudioEndpointID(rawValue: endpointRaw), deviceKind: deviceKind,
+            topologyRevision: topologyRevision, nodes: nodes, ports: ports,
+            fixedLinks: fixedLinks, routers: routers, routeBundles: routeBundles,
+            routes: routes, crosspoints: crosspoints, parameters: parameters, meters: meters)
+    }
+
+    nonisolated private struct Counts {
+        let nodes: UInt32
+        let ports: UInt32
+        let fixedLinks: UInt32
+        let routers: UInt32
+        let routeBundles: UInt32
+        let routes: UInt32
+        let crosspoints: UInt32
+        let parameters: UInt32
+        let meters: UInt32
+    }
+
+    nonisolated private static func counts(from data: Data) -> Counts? {
+        guard let nodes = data.u32(at: topologyStart + 16), nodes <= 16,
+              let ports = data.u32(at: topologyStart + 20), ports <= 40,
+              let fixedLinks = data.u32(at: topologyStart + 24), fixedLinks <= 40,
+              let routers = data.u32(at: topologyStart + 28), routers <= 8,
+              let routeBundles = data.u32(at: topologyStart + 32), routeBundles <= 16,
+              let routes = data.u32(at: topologyStart + 36), routes <= 24,
+              let crosspoints = data.u32(at: topologyStart + 40), crosspoints <= 24,
+              let parameters = data.u32(at: topologyStart + 44), parameters <= 24,
+              let meters = data.u32(at: topologyStart + 48), meters <= 12 else {
+            return nil
+        }
+        return Counts(nodes: nodes, ports: ports, fixedLinks: fixedLinks, routers: routers,
+                      routeBundles: routeBundles, routes: routes, crosspoints: crosspoints,
+                      parameters: parameters, meters: meters)
+    }
+
+    nonisolated private static func entries<T>(
+        _ data: Data, count: UInt32, maximum: UInt32, offset: Int, stride: Int,
+        decode: (Data, Int) -> T?
+    ) -> [T]? {
+        guard count <= maximum else { return nil }
+        var result: [T] = []
+        result.reserveCapacity(Int(count))
+        for index in 0..<Int(count) {
+            guard let entry = decode(data, offset + index * stride) else { return nil }
+            result.append(entry)
+        }
+        return result
+    }
+
+    nonisolated private static func node(_ data: Data, _ offset: Int) -> AudioSemanticTopologySnapshot.Node? {
+        guard let id = data.u32(at: offset), id != 0,
+              let kindRaw = data.u32(at: offset + 4),
+              let kind = AudioSemanticTopologySnapshot.NodeKind(rawValue: kindRaw),
+              let endpointRaw = data.u32(at: offset + 8),
+              let endpointKind = AudioSemanticTopologySnapshot.EndpointKind(rawValue: endpointRaw) else {
+            return nil
+        }
+        return .init(id: id, kind: kind, endpointKind: endpointKind)
+    }
+
+    nonisolated private static func port(_ data: Data, _ offset: Int) -> AudioSemanticTopologySnapshot.Port? {
+        guard let id = data.u32(at: offset), id != 0,
+              let ownerNodeID = data.u32(at: offset + 4), ownerNodeID != 0,
+              let directionRaw = data.u32(at: offset + 8),
+              let direction = AudioSemanticTopologySnapshot.PortDirection(rawValue: directionRaw),
+              let signalRaw = data.u32(at: offset + 12),
+              let signalKind = AudioSemanticTopologySnapshot.SignalKind(rawValue: signalRaw),
+              let signalIndex = data.u32(at: offset + 16) else {
+            return nil
+        }
+        return .init(id: id, ownerNodeID: ownerNodeID, direction: direction,
+                     signalKind: signalKind, signalIndex: signalIndex)
+    }
+
+    nonisolated private static func fixedLink(_ data: Data, _ offset: Int) -> AudioSemanticTopologySnapshot.FixedLink? {
+        guard let sourcePortID = data.u32(at: offset), sourcePortID != 0,
+              let destinationPortID = data.u32(at: offset + 4), destinationPortID != 0 else { return nil }
+        return .init(sourcePortID: sourcePortID, destinationPortID: destinationPortID)
+    }
+
+    nonisolated private static func router(_ data: Data, _ offset: Int) -> AudioSemanticTopologySnapshot.Router? {
+        guard let nodeID = data.u32(at: offset), nodeID != 0,
+              let maxActiveBundles = data.u32(at: offset + 4),
+              let maxSourcesPerOutput = data.u32(at: offset + 8),
+              let maxDestinationsPerInput = data.u32(at: offset + 12) else { return nil }
+        return .init(nodeID: nodeID, maxActiveBundles: maxActiveBundles,
+                     maxSourcesPerOutput: maxSourcesPerOutput,
+                     maxDestinationsPerInput: maxDestinationsPerInput)
+    }
+
+    nonisolated private static func routeBundle(_ data: Data, _ offset: Int) -> AudioSemanticTopologySnapshot.RouteBundle? {
+        guard let routerNodeID = data.u32(at: offset), routerNodeID != 0,
+              let bundleID = data.u32(at: offset + 4), bundleID != 0,
+              let routeOffset = data.u32(at: offset + 8),
+              let routeCount = data.u32(at: offset + 12) else { return nil }
+        return .init(routerNodeID: routerNodeID, bundleID: bundleID,
+                     routeOffset: routeOffset, routeCount: routeCount)
+    }
+
+    nonisolated private static func route(_ data: Data, _ offset: Int) -> AudioSemanticTopologySnapshot.Route? {
+        guard let sourcePortID = data.u32(at: offset), sourcePortID != 0,
+              let destinationPortID = data.u32(at: offset + 4), destinationPortID != 0 else { return nil }
+        return .init(sourcePortID: sourcePortID, destinationPortID: destinationPortID)
+    }
+
+    nonisolated private static func crosspoint(_ data: Data, _ offset: Int) -> AudioSemanticTopologySnapshot.Crosspoint? {
+        guard let id = data.u32(at: offset), id != 0,
+              let sourcePortID = data.u32(at: offset + 4), sourcePortID != 0,
+              let destinationPortID = data.u32(at: offset + 8), destinationPortID != 0 else { return nil }
+        return .init(id: id, sourcePortID: sourcePortID, destinationPortID: destinationPortID)
+    }
+
+    nonisolated private static func parameter(_ data: Data, _ offset: Int) -> AudioSemanticTopologySnapshot.Parameter? {
+        guard let id = data.u32(at: offset), id != 0,
+              let targetRaw = data.u32(at: offset + 4),
+              let targetKind = AudioSemanticTopologySnapshot.TargetKind(rawValue: targetRaw),
+              let targetID = data.u32(at: offset + 8), targetID != 0,
+              let kindRaw = data.u32(at: offset + 12),
+              let kind = AudioSemanticTopologySnapshot.ParameterKind(rawValue: kindRaw),
+              let valueRaw = data.u32(at: offset + 16),
+              let valueKind = AudioSemanticTopologySnapshot.ValueKind(rawValue: valueRaw),
+              let unitRaw = data.u32(at: offset + 20),
+              let unit = AudioSemanticTopologySnapshot.Unit(rawValue: unitRaw),
+              let minimum = data.i32(at: offset + 24),
+              let maximum = data.i32(at: offset + 28), minimum <= maximum,
+              let step = data.i32(at: offset + 32), step > 0,
+              let presentationRaw = data.u32(at: offset + 36),
+              let presentation = AudioSemanticTopologySnapshot.Presentation(rawValue: presentationRaw) else {
+            return nil
+        }
+        return .init(id: id, targetKind: targetKind, targetID: targetID, kind: kind,
+                     valueKind: valueKind, unit: unit, minimum: minimum, maximum: maximum,
+                     step: step, presentation: presentation)
+    }
+
+    nonisolated private static func meter(_ data: Data, _ offset: Int) -> AudioSemanticTopologySnapshot.Meter? {
+        guard let id = data.u32(at: offset), id != 0,
+              let targetPortID = data.u32(at: offset + 4), targetPortID != 0,
+              let kindRaw = data.u32(at: offset + 8),
+              let kind = AudioSemanticTopologySnapshot.MeterKind(rawValue: kindRaw),
+              let unitRaw = data.u32(at: offset + 12),
+              let unit = AudioSemanticTopologySnapshot.MeterUnit(rawValue: unitRaw),
+              let minimum = data.i32(at: offset + 16),
+              let maximum = data.i32(at: offset + 20), minimum <= maximum else { return nil }
+        return .init(id: id, targetPortID: targetPortID, kind: kind, unit: unit,
+                     minimum: minimum, maximum: maximum)
+    }
+}
+
 /// Mirrors the compact scalar layout of selectors 1023–1025. The layout is
 /// deliberately fixed-size and bounded, so the async completion queue never
 /// transports a pointer or allocates a variable-size reply.
@@ -414,22 +643,22 @@ private enum AudioAsyncSnapshotDecoder {
 }
 
 private extension Data {
-    func u8(at offset: Int) -> UInt8? {
+    nonisolated func u8(at offset: Int) -> UInt8? {
         guard offset < count else { return nil }
         return self[startIndex + offset]
     }
 
-    func u32(at offset: Int) -> UInt32? {
+    nonisolated func u32(at offset: Int) -> UInt32? {
         guard offset >= 0, offset + 4 <= count else { return nil }
         return withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: UInt32.self) }
     }
 
-    func u64(at offset: Int) -> UInt64? {
+    nonisolated func u64(at offset: Int) -> UInt64? {
         guard offset >= 0, offset + 8 <= count else { return nil }
         return withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: UInt64.self) }
     }
 
-    func i32(at offset: Int) -> Int32? {
+    nonisolated func i32(at offset: Int) -> Int32? {
         guard let value = u32(at: offset) else { return nil }
         return Int32(bitPattern: value)
     }

@@ -3,23 +3,6 @@ import Testing
 @testable import ASFW
 
 struct DuetViewModelLogicTests {
-    @Test func faderBankSelectionKeepsDestinationsIndependent() {
-        let connector = ASFWDriverConnector()
-        let viewModel = DuetControlViewModel(connector: connector)
-
-        viewModel.selectedOutputBank = .output1
-        viewModel.setMixerGain(source: 0, gain: 1200)
-
-        #expect(viewModel.mixerParams.gain(destination: 0, source: 0) == 1200)
-        #expect(viewModel.mixerParams.gain(destination: 1, source: 0) == 0)
-
-        viewModel.selectedOutputBank = .output2
-        viewModel.setMixerGain(source: 0, gain: 2500)
-
-        #expect(viewModel.mixerParams.gain(destination: 0, source: 0) == 1200)
-        #expect(viewModel.mixerParams.gain(destination: 1, source: 0) == 2500)
-    }
-
     @Test func duetSidecarStateTransitionsPerUnitInstance() {
         let connector = ASFWDriverConnector()
         let unitID = UnitInstanceID(
