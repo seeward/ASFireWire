@@ -226,4 +226,73 @@ struct BeBoBShellTelemetryTests {
         #expect(stats.fireWireOutput == nil)
         #expect(stats.global["rxIsr"] == 0)
     }
+
+    // MARK: - Shell prompt
+
+    // The prompt is not the same on every BeBoB device: `/cfg>` on the TerraTec
+    // PHASE 88, `1814>` on the M-Audio. It used to be hard-coded to the latter.
+    @Test func learnsTheDevicePromptFromTheResponseTail() {
+        #expect(BeBoBShellViewModel.parsePrompt(from: "msu        Music Subunit Access\r\n/cfg>") == "/cfg>")
+        #expect(BeBoBShellViewModel.parsePrompt(from: "some output\r\n1814> ") == "1814>")
+    }
+
+    // Every echo redraw ends with a space and a backspace, so a half-typed line
+    // can never be mistaken for a prompt and latched as one.
+    @Test func commandEchoIsNotMistakenForAPrompt() {
+        #expect(BeBoBShellViewModel.parsePrompt(from: "\u{08}\u{08}help \u{08}") == nil)
+        #expect(BeBoBShellViewModel.parsePrompt(from: "System is NOT synchronized!") == nil)
+        #expect(BeBoBShellViewModel.parsePrompt(from: "") == nil)
+    }
+
+    // A line ending in '>' that is plainly not a prompt should not be latched.
+    @Test func overlongTrailingLineIsNotTreatedAsAPrompt() {
+        let noisy = String(repeating: "x", count: 40) + ">"
+        #expect(BeBoBShellViewModel.parsePrompt(from: noisy) == nil)
+    }
+
+    // MARK: - Terminal line discipline
+
+    // The shell redraws the whole input line rather than echoing a keystroke:
+    // `BS x len(previous)`, the line, a space, then one more BS. Appended raw,
+    // typing "help" renders as "h he hel help".
+    @Test func collapsesTheShellsInputLineRedraws() {
+        var screen = VirtualUartScreen()
+        var typed = ""
+        for (index, prefix) in ["h", "he", "hel", "help"].enumerated() {
+            typed += String(repeating: "\u{08}", count: index) + prefix + " \u{08}"
+        }
+        screen.append(typed)
+        // Trailing space included: the device paints one to erase the character
+        // the shrinking line left behind, then backs the cursor over it. That is
+        // screen content, not an artefact to trim.
+        #expect(screen.rendered == "help ")
+    }
+
+    // Backspace moves a cursor; it does not delete. Treating it as "drop the last
+    // character" mangles a redraw, because the device backs over the whole line
+    // and rewrites it in place.
+    @Test func backspaceMovesTheCursorRatherThanDeleting() {
+        var screen = VirtualUartScreen()
+        screen.append("abc\u{08}\u{08}XY")
+        #expect(screen.rendered == "aXY")
+    }
+
+    // A carriage return returns to column zero and what follows overwrites;
+    // only a line feed commits the line.
+    @Test func carriageReturnOverwritesWithoutCommittingTheLine() {
+        var screen = VirtualUartScreen()
+        screen.append("hello\rHE")
+        #expect(screen.rendered == "HEllo")
+
+        var committing = VirtualUartScreen()
+        committing.append("one\r\ntwo")
+        #expect(committing.rendered == "one\ntwo")
+    }
+
+    // Verbatim from a PHASE 88 capture: the echo of "help" followed by the reply.
+    @Test func rendersARealDeviceResponseWithoutEchoFragments() {
+        var screen = VirtualUartScreen()
+        screen.append("\u{08}he \u{08}\u{08}\u{08}hel \u{08}\u{08}\u{08}\u{08}help \u{08}\r\n31 Available commands:\r\n/cfg>")
+        #expect(screen.rendered == "help \n31 Available commands:\n/cfg>")
+    }
 }

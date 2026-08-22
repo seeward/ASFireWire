@@ -1686,7 +1686,11 @@ private extension ASFWMCPCore {
 
             let (ok, stdout) = await executeBeBoBVirtualUart(deviceID: deviceID, nodeId: nodeId, generation: generation, command: command)
             guard ok else {
-                return .failure(toolName: toolName, code: .capabilityUnavailable, reason: "Failed to execute command on BeBoB Virtual UART.")
+                // The mailbox records which step gave up and why; a bare "it
+                // failed" here costs a whole diagnosis cycle to re-derive.
+                let detail = await BeBoBMailboxGate.shared.takeFailure() ?? "no detail recorded"
+                return .failure(toolName: toolName, code: .capabilityUnavailable,
+                                reason: "Failed to execute command on BeBoB Virtual UART: \(detail)")
             }
 
             return .success(toolName: toolName, data: .object([

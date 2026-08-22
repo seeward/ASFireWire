@@ -37,10 +37,9 @@ struct BeBoBShellView: View {
             .padding(12)
         }
         .navigationTitle("BeBoB Diagnostics & Shell")
-        .onAppear {
-            viewModel.refreshTelemetry()
-            viewModel.drainFIFO()
-        }
+        // Nothing is fetched on appear. Every telemetry command is a full mailbox
+        // conversation, and the shell shares that one mailbox: traffic the user
+        // did not ask for lands in the terminal as somebody else's echo.
     }
 
     // MARK: - Header Bar
@@ -73,18 +72,6 @@ struct BeBoBShellView: View {
             }
 
             Spacer()
-
-            // Auto-polling Toggle
-            Button {
-                viewModel.toggleAutoPolling()
-            } label: {
-                Label(
-                    viewModel.isAutoPolling ? "Live Polling (1s)" : "Auto-Poll Paused",
-                    systemImage: viewModel.isAutoPolling ? "antenna.radiowaves.left.and.right" : "play.circle"
-                )
-            }
-            .buttonStyle(.bordered)
-            .tint(viewModel.isAutoPolling ? .green : .secondary)
 
             // Manual Refresh
             Button {
@@ -321,7 +308,7 @@ struct BeBoBShellView: View {
 
             // Command Input Bar
             HStack(spacing: 8) {
-                Text("1814>")
+                Text(viewModel.devicePrompt)
                     .font(.system(.body, design: .monospaced).bold())
                     .foregroundStyle(.secondary)
 

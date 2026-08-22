@@ -220,8 +220,7 @@ add_audio_test(ITDescriptorLayoutTests
     ITDescriptorLayoutTests.cpp
 )
 
-# BeBoB Virtual UART mailbox tests (telemetry parsing lives app-side, in Swift)
+# BeBoB Virtual UART window guard (the mailbox conversation lives app-side, in Swift)
 add_audio_test(BeBoBVirtualUartTests
     BeBoBVirtualUartTests.cpp
-    "${ASFW_DRIVER_DIR}/Audio/Families/BeBoB/VirtualUart/BeBoBVirtualUartClient.cpp"
 )

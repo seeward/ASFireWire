@@ -53,8 +53,7 @@ namespace {
     // Allow Virtual UART mailbox command envelopes (0xFFFF:C8021000) ONLY for shell opcodes (0x07, 0x08, 0x09)
     if (addressHi == VUart::kVirtualUartAddressHi && addressLo == VUart::kRequestAddressLo &&
         payload.size() == VUart::kCommandEnvelopeBytes) {
-        const auto opcode = static_cast<uint8_t>((VUart::LoadLittleEndianQuadlet(payload, 4) >> 16U) & 0xFF);
-        if (VUart::IsPermittedVirtualUartOpcode(opcode)) {
+        if (VUart::IsPermittedVirtualUartOpcode(VUart::VirtualUartOpcodeOf(payload))) {
             return false;
         }
     }
