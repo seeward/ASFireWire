@@ -102,6 +102,7 @@ enum class ProfileBuilderId : uint16_t {
     // the family provider tells the two personas apart when picking a rate list.
     MAudioFireWire1814,
     MAudioProjectMix,
+    FocusriteLiquidS56,
 
     // Alias for the last real member. Range checks over this enum live in two
     // places — the catalog validator and the endpoint-profile wire validator —
@@ -109,7 +110,7 @@ enum class ProfileBuilderId : uint16_t {
     // device installs, publishes a nub, and then Start() rejects the profile
     // with a bare kIOReturnBadArgument. Extend the enum above this line and the
     // bounds follow.
-    kLastValid = MAudioProjectMix,
+    kLastValid = FocusriteLiquidS56,
 };
 
 enum class SupportDisposition : uint8_t {

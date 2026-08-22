@@ -461,6 +461,20 @@ private:
                         .requireSourceLockBeforeStreamEnable = false,
                         .requireSourceLockAtConfirm = false,
                     });
+            case ProfileBuilderId::FocusriteLiquidS56:
+                // Two firmware revisions are in the field and we cannot tell
+                // them apart from identity, so the stream geometry has to come
+                // from whichever handshake the device answers. Preferring the
+                // TCAT extension also keeps the published channel count right
+                // when another host left the device at 88.2 kHz+, where this
+                // model's ADAT channel count halves.
+                return std::make_shared<DICE::TCAT::DICETcatProtocol>(
+                    dependencies_.busOps, dependencies_.busInfo,
+                    dependencies_.routes, route, dependencies_.irm,
+                    &dependencies_.scheduler,
+                    DICE::TCAT::DICETcatRuntimePolicy{
+                        .preferExtensionStreamGeometry = true,
+                    });
             case ProfileBuilderId::FocusriteSPro14:
             case ProfileBuilderId::FocusriteSPro24:
             case ProfileBuilderId::AlesisMultiMix:

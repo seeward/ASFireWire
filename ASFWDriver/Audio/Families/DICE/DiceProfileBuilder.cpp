@@ -45,6 +45,11 @@ BuildProfile(const Devices::ProfileBuildContext& context) noexcept {
                 Duplex::HostDirection::kReceive,
             };
             break;
+        // [derived, not hardware-validated] The Liquid Saffire 56 is grouped
+        // with its Saffire siblings: every Focusrite DICE device we have tested
+        // takes host->device PCM with no AM824 labels. If it turns out to want
+        // labelled AM824, this is the line to change.
+        case ProfileBuilderId::FocusriteLiquidS56:
         case ProfileBuilderId::FocusriteSPro14:
         case ProfileBuilderId::FocusriteSPro24:
         case ProfileBuilderId::AlesisMultiMix:

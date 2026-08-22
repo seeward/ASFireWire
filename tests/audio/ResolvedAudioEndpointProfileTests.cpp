@@ -151,7 +151,7 @@ TEST(AudioEndpointProfileWire, LastValidAliasTracksTheRealLastMember) {
     // member below it, this fails rather than the device failing at Start().
     using DeviceProfiles::Audio::ProbePolicyId;
     using DeviceProfiles::Audio::ProfileBuilderId;
-    EXPECT_EQ(ProfileBuilderId::kLastValid, ProfileBuilderId::MAudioProjectMix);
+    EXPECT_EQ(ProfileBuilderId::kLastValid, ProfileBuilderId::FocusriteLiquidS56);
     EXPECT_EQ(ProbePolicyId::kLastValid, ProbePolicyId::BeBoBFilteredCommandSet);
 }
 

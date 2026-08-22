@@ -149,6 +149,29 @@ TEST(DeviceRuntimeIdentityTests, CollisionGroupsAreRecreatedOnEveryGeneration) {
     EXPECT_NE(second[1].instanceId, first[1].instanceId);
 }
 
+TEST(AudioDeviceCatalogTests, LiquidSaffire56ResolvesToTheDiceTcatProbeAndItsOwnBuilder) {
+    // Promoted from RecognizedUnsupported: the model needs no per-revision
+    // quirk table, because the stream-geometry handshake is chosen at runtime.
+    // What must hold is that it reaches the generic DICE/TCAT probe with a
+    // builder id of its own -- the builder is how the family provider knows to
+    // turn on the extension handshake, so a definition pointing at
+    // ProfileBuilderId::None or a sibling's builder would silently disable it.
+    DeviceRegistry registry;
+    // A DICE definition also constrains the selected unit (specifier == vendor
+    // OUI, version 1), so an AV/C-shaped unit would fall through to the generic
+    // fallback instead of matching.
+    const auto rom = MakeRom(0x00130E0001800000ULL, 1, 2, kFocusriteVendorId,
+                             kLiquidS56ModelId, kFocusriteVendorId, 0x000001);
+    const auto record = registry.UpsertFromROM(rom, {});
+
+    const auto result = AudioDeviceCatalog::Resolve(record, OnlyUnit(record));
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->family, AudioFamilyProviderId::DICE);
+    EXPECT_EQ(result->probePolicy, ProbePolicyId::DiceTcat);
+    EXPECT_EQ(result->profileBuilder, ProfileBuilderId::FocusriteLiquidS56);
+    EXPECT_EQ(result->support, SupportDisposition::Supported);
+}
+
 TEST(AudioDeviceCatalogTests, MAudioSpecialPersonasResolveWithAFilteredCommandSet) {
     // The two OPERATIONAL personas are no longer quarantined. Quarantine is a
     // device-level kill switch that also refused the one command they tolerate;
