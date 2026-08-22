@@ -10,13 +10,16 @@ nonisolated struct AudioSemanticTopologySnapshot: Equatable, Sendable {
     enum SignalKind: UInt32, Sendable {
         case none = 0, analogMicXlr = 1, analogInstrument = 2, analogLine = 3, headphone = 4, hostStream = 5
     }
-    enum TargetKind: UInt32, Sendable { case port = 1, crosspoint = 2 }
+    enum TargetKind: UInt32, Sendable { case port = 1, crosspoint = 2, device = 3 }
     enum ParameterKind: UInt32, Sendable {
         case level = 1, mute = 2, phantomPower = 3, phaseInvert = 4, nominalLevel = 5
+        case source = 6, stereoLink = 7, hardwareControlTarget = 8, muteFollow = 9
     }
     enum ValueKind: UInt32, Sendable { case boolean = 1, scalar = 2, enumeration = 3 }
     enum Unit: UInt32, Sendable { case none = 0, decibels = 1, normalized = 2 }
     enum Presentation: UInt32, Sendable { case toggle = 1, fader = 2, selector = 3 }
+    enum CrosspointPresentation: UInt32, Sendable { case none = 0, primaryFader = 1, routingFader = 2 }
+    enum CrosspointGroup: UInt32, Sendable { case none = 0, inputMonitor = 1, hostPlayback = 2 }
     enum MeterKind: UInt32, Sendable { case level = 1, peak = 2 }
     enum MeterUnit: UInt32, Sendable { case native = 0, decibels = 1 }
 
@@ -66,6 +69,9 @@ nonisolated struct AudioSemanticTopologySnapshot: Equatable, Sendable {
         let id: UInt32
         let sourcePortID: UInt32
         let destinationPortID: UInt32
+        let presentation: CrosspointPresentation
+        let presentationGroup: CrosspointGroup
+        let presentationOrder: UInt32
     }
 
     struct Parameter: Identifiable, Equatable, Sendable {

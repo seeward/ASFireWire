@@ -223,7 +223,7 @@ extension ASFWDriverConnector {
     func getAudioSemanticTopology(endpointID: AudioEndpointID) -> AudioSemanticTopologySnapshot? {
         guard isConnected, connection != 0, endpointID.rawValue != 0 else { return nil }
         var scalarInput = endpointID.rawValue
-        var output = Data(count: 3496)
+        var output = Data(count: 3944)
         var outputLength = output.count
         let result = output.withUnsafeMutableBytes { outputBytes in
             IOConnectCallMethod(
@@ -359,7 +359,7 @@ private enum AudioControlSurfaceWireDecoder {
 /// Fixed ABI decoder for `AudioSemanticTopologySnapshotWire`. Its offsets are
 /// locked by matching `static_assert`s in the DriverKit wire headers.
 enum AudioSemanticTopologyWireDecoder {
-    nonisolated private static let wireSize = 3496
+    nonisolated private static let wireSize = 3944
     nonisolated private static let topologyStart = 16
     nonisolated private static let nodeOffset = 68
     nonisolated private static let portOffset = 260
@@ -368,8 +368,8 @@ enum AudioSemanticTopologyWireDecoder {
     nonisolated private static let routeBundleOffset = 1508
     nonisolated private static let routeOffset = 1764
     nonisolated private static let crosspointOffset = 1956
-    nonisolated private static let parameterOffset = 2244
-    nonisolated private static let meterOffset = 3204
+    nonisolated private static let parameterOffset = 2532
+    nonisolated private static let meterOffset = 3652
 
     nonisolated static func decodeEndpointIDs(_ data: Data) -> [AudioEndpointID] {
         guard data.count == 72,
@@ -386,9 +386,9 @@ enum AudioSemanticTopologyWireDecoder {
 
     nonisolated static func decode(_ data: Data) -> AudioSemanticTopologySnapshot? {
         guard data.count == wireSize,
-              let wireVersion = data.u32(at: 0), wireVersion == 1,
+              let wireVersion = data.u32(at: 0), wireVersion == 3,
               let endpointRaw = data.u64(at: 8), endpointRaw != 0,
-              let topologyVersion = data.u32(at: topologyStart), topologyVersion == 1,
+              let topologyVersion = data.u32(at: topologyStart), topologyVersion == 3,
               let deviceKind = data.u32(at: topologyStart + 4), deviceKind != 0,
               let topologyRevision = data.u64(at: topologyStart + 8), topologyRevision != 0,
               let counts = counts(from: data) else {
@@ -414,10 +414,10 @@ enum AudioSemanticTopologyWireDecoder {
                 data, count: counts.routes, maximum: 24, offset: routeOffset, stride: 8,
                 decode: route),
               let crosspoints: [AudioSemanticTopologySnapshot.Crosspoint] = entries(
-                data, count: counts.crosspoints, maximum: 24, offset: crosspointOffset, stride: 12,
+                data, count: counts.crosspoints, maximum: 24, offset: crosspointOffset, stride: 24,
                 decode: crosspoint),
               let parameters: [AudioSemanticTopologySnapshot.Parameter] = entries(
-                data, count: counts.parameters, maximum: 24, offset: parameterOffset, stride: 40,
+                data, count: counts.parameters, maximum: 28, offset: parameterOffset, stride: 40,
                 decode: parameter),
               let meters: [AudioSemanticTopologySnapshot.Meter] = entries(
                 data, count: counts.meters, maximum: 12, offset: meterOffset, stride: 24,
@@ -452,7 +452,7 @@ enum AudioSemanticTopologyWireDecoder {
               let routeBundles = data.u32(at: topologyStart + 32), routeBundles <= 16,
               let routes = data.u32(at: topologyStart + 36), routes <= 24,
               let crosspoints = data.u32(at: topologyStart + 40), crosspoints <= 24,
-              let parameters = data.u32(at: topologyStart + 44), parameters <= 24,
+              let parameters = data.u32(at: topologyStart + 44), parameters <= 28,
               let meters = data.u32(at: topologyStart + 48), meters <= 12 else {
             return nil
         }
@@ -534,8 +534,16 @@ enum AudioSemanticTopologyWireDecoder {
     nonisolated private static func crosspoint(_ data: Data, _ offset: Int) -> AudioSemanticTopologySnapshot.Crosspoint? {
         guard let id = data.u32(at: offset), id != 0,
               let sourcePortID = data.u32(at: offset + 4), sourcePortID != 0,
-              let destinationPortID = data.u32(at: offset + 8), destinationPortID != 0 else { return nil }
-        return .init(id: id, sourcePortID: sourcePortID, destinationPortID: destinationPortID)
+              let destinationPortID = data.u32(at: offset + 8), destinationPortID != 0,
+              let presentationRaw = data.u32(at: offset + 12),
+              let presentation = AudioSemanticTopologySnapshot.CrosspointPresentation(rawValue: presentationRaw),
+              let groupRaw = data.u32(at: offset + 16),
+              let presentationGroup = AudioSemanticTopologySnapshot.CrosspointGroup(rawValue: groupRaw),
+              presentationGroup != .none,
+              let presentationOrder = data.u32(at: offset + 20) else { return nil }
+        return .init(id: id, sourcePortID: sourcePortID, destinationPortID: destinationPortID,
+                     presentation: presentation, presentationGroup: presentationGroup,
+                     presentationOrder: presentationOrder)
     }
 
     nonisolated private static func parameter(_ data: Data, _ offset: Int) -> AudioSemanticTopologySnapshot.Parameter? {
