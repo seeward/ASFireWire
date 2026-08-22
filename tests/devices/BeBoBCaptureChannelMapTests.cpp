@@ -8,6 +8,7 @@
 namespace {
 
 using ASFW::Audio::Families::BeBoBProbe::CaptureChannelMapFromProbe;
+using ASFW::Audio::Families::BeBoBProbe::PlaybackChannelMapFromProbe;
 using ASFW::Protocols::AVC::Probe::ChannelPosition;
 using ASFW::Protocols::AVC::Probe::ChannelSection;
 using ASFW::Protocols::AVC::Probe::IsochronousPlugModel;
@@ -39,6 +40,15 @@ TEST(BeBoBCaptureChannelMapTests, ReordersPlanarWireSectionToLogicalChannels) {
     EXPECT_EQ(map.SlotFor(2), 1u);
     EXPECT_EQ(map.SlotFor(3), 3u);
     EXPECT_TRUE(map.FitsWithin(4, 5));
+
+    // The host-to-device plug uses the same BridgeCo channel-position contract.
+    // Playback has no capture delay, but it must place host PCM in the same
+    // advertised AM824 slots.
+    const auto playbackMap = PlaybackChannelMapFromProbe(capture, 4, 5);
+    EXPECT_EQ(playbackMap.SlotFor(0), 0u);
+    EXPECT_EQ(playbackMap.SlotFor(1), 2u);
+    EXPECT_EQ(playbackMap.SlotFor(2), 1u);
+    EXPECT_EQ(playbackMap.SlotFor(3), 3u);
 }
 
 TEST(BeBoBCaptureChannelMapTests, MidiSectionDoesNotConsumeAPcmChannel) {

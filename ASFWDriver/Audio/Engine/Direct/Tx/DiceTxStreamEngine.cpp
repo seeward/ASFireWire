@@ -208,6 +208,7 @@ AMDTP::AmdtpTxPolicy DiceTxStreamEngine::BuildTxPolicy(
     policy.emptyPacketsDuringIdle = streamPolicy.emptyPacketsDuringIdle;
     policy.cadencePacketsCarryDataBlocks =
         streamPolicy.cadencePacketsCarryDataBlocks;
+    policy.playbackChannelMap = streamPolicy.playbackChannelMap;
     return policy;
 }
 

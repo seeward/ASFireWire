@@ -65,6 +65,13 @@ ResolvedAudioEndpointProfile MakeProfile() {
     capability.runtimeCaps.hostOutputPcmChannels = 6;
     capability.runtimeCaps.deviceToHostStreams[0].pcmChannels = 16;
     capability.runtimeCaps.hostToDeviceStreams[0].pcmChannels = 6;
+    std::array<uint8_t, 16> playbackSlots{};
+    for (uint8_t channel = 0; channel < playbackSlots.size(); ++channel) {
+        playbackSlots[channel] = channel;
+    }
+    std::swap(playbackSlots[0], playbackSlots[1]);
+    (void)profile.playbackChannelMap.SetSlots(playbackSlots);
+    profile.playbackChannelMap.channelCount = playbackSlots.size();
     return profile;
 }
 
@@ -84,6 +91,8 @@ TEST(AudioEndpointProfileWire, RoundTripsBoundedNumericSnapshot) {
     EXPECT_EQ(decoded->supportedRates[3], 96000U);
     EXPECT_EQ(decoded->runtimeCaps.deviceToHostStreamCount, 2U);
     EXPECT_EQ(decoded->runtimeCaps.deviceToHostStreams[1].pcmChannels, 8U);
+    EXPECT_EQ(decoded->playbackChannelMap.SlotFor(0), 1U);
+    EXPECT_EQ(decoded->playbackChannelMap.SlotFor(1), 0U);
     EXPECT_EQ(decoded->timing[0].anchorTimeoutMs, 750U);
     EXPECT_TRUE(decoded->txPacketPolicy.emptyPacketsDuringIdle);
     ASSERT_EQ(decoded->facets.size(), 2U);
@@ -160,7 +169,7 @@ TEST(AudioEndpointProfileWire, RejectsVersionTruncationAndMalformedSection) {
               Audio::Devices::Wire::WireError::InvalidHeader);
 
     auto badSection = *encoded;
-    Audio::Devices::Wire::AudioEndpointProfileWireV2 header{};
+    Audio::Devices::Wire::AudioEndpointProfileWireV3 header{};
     std::memcpy(&header, badSection.data(), sizeof(header));
     header.rates.offset = static_cast<uint16_t>(sizeof(header) - 1);
     std::memcpy(badSection.data(), &header, sizeof(header));
@@ -179,7 +188,7 @@ TEST(AudioEndpointProfileWire, RejectsOverlappingSectionsUnknownEnumsAndReserved
     auto encoded = Audio::Devices::Wire::Serialize(MakeProfile());
     ASSERT_TRUE(encoded.has_value());
 
-    Audio::Devices::Wire::AudioEndpointProfileWireV2 header{};
+    Audio::Devices::Wire::AudioEndpointProfileWireV3 header{};
     std::memcpy(&header, encoded->data(), sizeof(header));
 
     auto overlap = *encoded;
@@ -201,6 +210,15 @@ TEST(AudioEndpointProfileWire, RejectsOverlappingSectionsUnknownEnumsAndReserved
     reservedHeader._reserved[0] = 1;
     std::memcpy(reserved.data(), &reservedHeader, sizeof(reservedHeader));
     EXPECT_EQ(Audio::Devices::Wire::Parse(reserved).error(),
+              Audio::Devices::Wire::WireError::InvalidValue);
+
+    auto malformedPlaybackMap = *encoded;
+    auto malformedMapHeader = header;
+    malformedMapHeader.playbackChannelMap.slotCount = 2;
+    malformedMapHeader.playbackChannelMap.channelCount = 1;
+    std::memcpy(malformedPlaybackMap.data(), &malformedMapHeader,
+                sizeof(malformedMapHeader));
+    EXPECT_EQ(Audio::Devices::Wire::Parse(malformedPlaybackMap).error(),
               Audio::Devices::Wire::WireError::InvalidValue);
 
     auto unclaimedTail = *encoded;

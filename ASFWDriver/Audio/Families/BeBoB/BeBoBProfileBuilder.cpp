@@ -129,6 +129,7 @@ BuildProfile(const Devices::ProfileBuildContext& context) noexcept {
         // the safe plug-0 probe. Use that observed permutation; M-Audio special
         // firmware is excluded because issuing the query freezes it.
         profile.captureChannelMap = facts->captureChannelMap;
+        profile.playbackChannelMap = facts->playbackChannelMap;
     }
 
 

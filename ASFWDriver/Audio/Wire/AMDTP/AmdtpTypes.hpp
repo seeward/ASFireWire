@@ -1,5 +1,7 @@
 #pragma once
 
+#include "PcmSlotMap.hpp"
+
 #include <cstdint>
 
 namespace ASFW::Protocols::Audio::AMDTP {
@@ -82,6 +84,10 @@ struct AmdtpTxPolicy final {
     /// Audio-slot fill for those packets. Only meaningful when
     /// `cadencePacketsCarryDataBlocks` is set.
     uint32_t cadenceSlotWord{0xCF000000};
+
+    /// Logical host PCM channel -> AM824 slot mapping, selected by the
+    /// device-family profile and consumed solely by the packetizer.
+    ASFW::Audio::Wire::PcmSlotMap playbackChannelMap{};
 };
 
 // Value-owned PCM snapshot supplied to the packetizer. The bytes referenced by

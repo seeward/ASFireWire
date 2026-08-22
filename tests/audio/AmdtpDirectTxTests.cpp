@@ -185,6 +185,36 @@ TEST(AmdtpDirectTxTests, DataRequiresCompletePcmBeforeStateAdvances) {
     EXPECT_EQ(ReadBE32(bytes.data() + 12), 0x40800001u);
 }
 
+TEST(AmdtpDirectTxTests, PlaybackMapWritesLogicalChannelsToAdvertisedSlots) {
+    AmdtpPacketTimeline timeline{};
+    std::array<PacketTimelineSlot, 8> slots{};
+    ASSERT_TRUE(timeline.AttachSlots(slots.data(), slots.size()));
+
+    auto config = BlockingStereoConfig();
+    config.dbs = 3; // slot 2 is a MIDI/control slot.
+    AmdtpTxPolicy policy{};
+    constexpr std::array<uint8_t, 2> kPlanarSlots{1, 0};
+    ASSERT_TRUE(policy.playbackChannelMap.SetSlots(kPlanarSlots));
+    policy.playbackChannelMap.channelCount = 2;
+
+    AmdtpTxPacketizer packetizer{};
+    packetizer.BindTimeline(&timeline);
+    ASSERT_TRUE(packetizer.Configure(config, policy));
+
+    std::array<uint8_t, 128> bytes{};
+    std::array<float, 16> pcm{};
+    pcm[0] = 1.0f;
+    pcm[1] = -1.0f;
+    PreparedTxPacket packet{};
+    ASSERT_TRUE(packetizer.PrepareNextPacket(
+        {0, bytes.data(), bytes.size()}, DataTiming(), StereoSnapshot(pcm), packet));
+
+    // The host's first channel occupies advertised AM824 slot 1, not slot 0.
+    EXPECT_EQ(ReadBE32(bytes.data() + 8), 0x40800001u);
+    EXPECT_EQ(ReadBE32(bytes.data() + 12), 0x407FFFFFu);
+    EXPECT_EQ(ReadBE32(bytes.data() + 16), 0x80000000u);
+}
+
 TEST(AmdtpDirectTxTests, ForcedNoDataHoldsDbcAndAudioFrame) {
     AmdtpPacketTimeline timeline{};
     std::array<PacketTimelineSlot, 8> slots{};

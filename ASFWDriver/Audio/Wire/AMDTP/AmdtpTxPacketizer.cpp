@@ -70,6 +70,9 @@ bool AmdtpTxPacketizer::Configure(const AmdtpStreamConfig& streamConfig,
         config.pcmChannels > ASFW::Encoding::kMaxPcmChannels) {
         return false;
     }
+    if (!txPolicy.playbackChannelMap.FitsWithin(config.pcmChannels, config.dbs)) {
+        return false;
+    }
 
     const uint32_t dataPacketBytes =
         kCipHeaderBytes + static_cast<uint32_t>(config.framesPerDataPacket) *
@@ -351,12 +354,10 @@ void AmdtpTxPacketizer::WriteDataPacketDefaults(uint8_t* packetBytes,
         payload[i] = 0;
     }
 
-    if (txPolicy_.initializeNonAudioSlots &&
-        streamConfig_.dbs > streamConfig_.pcmChannels) {
+    if (txPolicy_.initializeNonAudioSlots) {
         const uint32_t frames = payloadBytes / (streamConfig_.dbs * kBytesPerSlot);
         for (uint32_t frame = 0; frame < frames; ++frame) {
-            for (uint32_t s = streamConfig_.pcmChannels; s < streamConfig_.dbs;
-                 ++s) {
+            for (uint32_t s = 0; s < streamConfig_.dbs; ++s) {
                 WriteBE32(payload + (frame * streamConfig_.dbs + s) * kBytesPerSlot,
                           txPolicy_.defaultNonAudioSlotWord);
             }
@@ -371,14 +372,14 @@ void AmdtpTxPacketizer::WriteCadencePacketFill(uint8_t* packetBytes,
 
     for (uint32_t block = 0; block < blocks; ++block) {
         for (uint32_t s = 0; s < streamConfig_.dbs; ++s) {
-            // Audio slots take the cadence label; the non-audio slots keep the
-            // same word a DATA packet gives them, so the block layout is
-            // byte-identical apart from the label itself.
-            const uint32_t word = s < streamConfig_.pcmChannels
-                                      ? txPolicy_.cadenceSlotWord
-                                      : txPolicy_.defaultNonAudioSlotWord;
             WriteBE32(payload + (block * streamConfig_.dbs + s) * kBytesPerSlot,
-                      word);
+                      txPolicy_.defaultNonAudioSlotWord);
+        }
+        for (uint32_t channel = 0; channel < streamConfig_.pcmChannels; ++channel) {
+            WriteBE32(payload +
+                          (block * streamConfig_.dbs +
+                           txPolicy_.playbackChannelMap.SlotFor(channel)) * kBytesPerSlot,
+                      txPolicy_.cadenceSlotWord);
         }
     }
 }
@@ -401,7 +402,7 @@ void AmdtpTxPacketizer::WritePcmSnapshot(
                           kBytesPerSlot;
         for (uint32_t channel = 0; channel < pcmSlots; ++channel) {
             WriteBE32(
-                destination + channel * kBytesPerSlot,
+                destination + txPolicy_.playbackChannelMap.SlotFor(channel) * kBytesPerSlot,
                 PcmSlotCodec::EncodeFloat32(
                     source[channel],
                     txPolicy_.hostToDevicePcmEncoding));

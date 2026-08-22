@@ -38,6 +38,9 @@ struct BeBoBProbeFacts final {
     /// Value-owned BridgeCo plug-0 permutation for capture. Empty means the
     /// device reported identity order or incomplete evidence, never a guess.
     AudioEngine::Direct::Rx::RxCaptureChannelMap captureChannelMap{};
+    /// The symmetric host-to-device permutation. Unlike capture it carries no
+    /// device timing correction, only the AM824 slot presentation.
+    ::ASFW::Audio::Wire::PcmSlotMap playbackChannelMap{};
 };
 
 struct DiceProbeFacts final {

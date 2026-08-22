@@ -656,6 +656,9 @@ private:
                         .captureChannelMap = BeBoBProbe::CaptureChannelMapFromProbe(
                             observedModel.output, caps.hostInputPcmChannels,
                             caps.deviceToHostAm824Slots),
+                        .playbackChannelMap = BeBoBProbe::PlaybackChannelMapFromProbe(
+                            observedModel.input, caps.hostOutputPcmChannels,
+                            caps.hostToDeviceAm824Slots),
                     });
                 } else {
                     self->Complete(epoch, Devices::OxfwProbeFacts{

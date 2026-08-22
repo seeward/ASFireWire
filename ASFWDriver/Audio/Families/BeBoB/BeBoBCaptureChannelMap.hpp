@@ -6,6 +6,7 @@
 #pragma once
 
 #include "../../Engine/Direct/Rx/RxCaptureChannelMap.hpp"
+#include "../../Wire/AMDTP/PcmSlotMap.hpp"
 #include "../../../Protocols/AVC/Probe/AVCPlug0StreamDiscovery.hpp"
 
 #include <array>
@@ -24,11 +25,10 @@ namespace ASFW::Audio::Families::BeBoBProbe {
 /// AM824 data block, and MIDI sections do not consume a PCM channel.  Unlike
 /// Linux, malformed or duplicate positions fail closed to identity rather than
 /// allowing an accidental overwrite to relabel audio.
-[[nodiscard]] inline AudioEngine::Direct::Rx::RxCaptureChannelMap
-CaptureChannelMapFromProbe(
+[[nodiscard]] inline Wire::PcmSlotMap ChannelMapFromProbe(
     const Protocols::AVC::Probe::IsochronousPlugModel& capturePlug,
     uint32_t pcmChannels, uint32_t dataBlockSize) noexcept {
-    using Map = AudioEngine::Direct::Rx::RxCaptureChannelMap;
+    using Map = Wire::PcmSlotMap;
     constexpr uint8_t kMidiSectionType = 0x0a;
     if (pcmChannels == 0 || pcmChannels > Encoding::kMaxPcmChannels ||
         dataBlockSize < pcmChannels || capturePlug.channelSections.empty()) {
@@ -74,6 +74,22 @@ CaptureChannelMapFromProbe(
     if (!map.SetSlots(std::span<const uint8_t>{slots.data(), pcmChannels})) return {};
     map.channelCount = pcmChannels;
     return map;
+}
+
+[[nodiscard]] inline AudioEngine::Direct::Rx::RxCaptureChannelMap
+CaptureChannelMapFromProbe(
+    const Protocols::AVC::Probe::IsochronousPlugModel& capturePlug,
+    uint32_t pcmChannels, uint32_t dataBlockSize) noexcept {
+    AudioEngine::Direct::Rx::RxCaptureChannelMap captureMap{};
+    static_cast<Wire::PcmSlotMap&>(captureMap) =
+        ChannelMapFromProbe(capturePlug, pcmChannels, dataBlockSize);
+    return captureMap;
+}
+
+[[nodiscard]] inline Wire::PcmSlotMap PlaybackChannelMapFromProbe(
+    const Protocols::AVC::Probe::IsochronousPlugModel& playbackPlug,
+    uint32_t pcmChannels, uint32_t dataBlockSize) noexcept {
+    return ChannelMapFromProbe(playbackPlug, pcmChannels, dataBlockSize);
 }
 
 } // namespace ASFW::Audio::Families::BeBoBProbe

@@ -36,7 +36,7 @@ template <typename T>
 
 [[nodiscard]] bool SectionsAreContiguous(
     std::span<const uint8_t> bytes,
-    const AudioEndpointProfileWireV2& header) noexcept {
+    const AudioEndpointProfileWireV3& header) noexcept {
     std::array<Section, 5> sections{header.rates, header.captureStreams,
                                     header.playbackStreams, header.timing,
                                     header.facets};
@@ -47,17 +47,17 @@ template <typename T>
         if (section.byteSize == 0) continue;
         const size_t begin = section.offset;
         const size_t length = section.byteSize;
-        if (begin < sizeof(AudioEndpointProfileWireV2) || begin > bytes.size() ||
+        if (begin < sizeof(AudioEndpointProfileWireV3) || begin > bytes.size() ||
             length > bytes.size() - begin) return false;
         ranges.emplace_back(begin, begin + length);
     }
     std::ranges::sort(ranges);
-    size_t claimedEnd = sizeof(AudioEndpointProfileWireV2);
+    size_t claimedEnd = sizeof(AudioEndpointProfileWireV3);
     for (const auto& range : ranges) {
         if (range.first != claimedEnd) return false;
         claimedEnd = range.second;
     }
-    // Every byte in a V2 property is claimed by the fixed header or a typed
+    // Every byte in a V3 property is claimed by the fixed header or a typed
     // section. Reject gaps and unknown trailing data instead of silently
     // accepting a second, unvalidated wire format inside the property.
     return claimedEnd == bytes.size();
@@ -68,7 +68,7 @@ template <typename T>
 }
 
 [[nodiscard]] constexpr bool ValidEnumFields(
-    const AudioEndpointProfileWireV2& header) noexcept {
+    const AudioEndpointProfileWireV3& header) noexcept {
     using DeviceProfiles::Audio::AudioFamilyProviderId;
     using DeviceProfiles::Audio::ProfileBuilderId;
     return header.familyProviderId >= static_cast<uint8_t>(AudioFamilyProviderId::GenericAvc) &&
@@ -93,7 +93,7 @@ template <typename T>
 }
 
 [[nodiscard]] constexpr bool ValidFlagsAndReserved(
-    const AudioEndpointProfileWireV2& header) noexcept {
+    const AudioEndpointProfileWireV3& header) noexcept {
     return (header.txPacketFlags & ~0x1FU) == 0 &&
            (header.recoveryFlags & ~0x07U) == 0 &&
            (header.clockFlags & ~0x01U) == 0 &&
@@ -117,7 +117,7 @@ ReadSection(std::span<const uint8_t> bytes, Section section,
     }
     const size_t begin = section.offset;
     const size_t length = section.byteSize;
-    if (begin < sizeof(AudioEndpointProfileWireV2) || begin > bytes.size() ||
+    if (begin < sizeof(AudioEndpointProfileWireV3) || begin > bytes.size() ||
         length > bytes.size() - begin || length % sizeof(T) != 0) {
         return std::unexpected(WireError::InvalidSection);
     }
@@ -144,6 +144,62 @@ ReadSection(std::span<const uint8_t> bytes, Section section,
            stream.isoChannel == AudioStreamWireInfo::kInvalidIsoChannel &&
            stream._reserved[0] == 0 && stream._reserved[1] == 0 &&
            stream._reserved[2] == 0;
+}
+
+[[nodiscard]] constexpr bool ValidPcmSlotMap(
+    const PcmSlotMapWireV1& value, uint32_t pcmChannels,
+    uint32_t dataBlockSize) noexcept {
+    if (value._reserved[0] != 0 || value._reserved[1] != 0 ||
+        value.slotCount > Encoding::kMaxPcmChannels ||
+        value.channelCount > Encoding::kMaxPcmChannels) {
+        return false;
+    }
+    if (value.slotCount == 0) {
+        if (value.channelCount != 0) return false;
+        return std::ranges::all_of(value.slotForChannel,
+                                   [](uint8_t slot) { return slot == 0; });
+    }
+    if (value.slotCount != value.channelCount || value.channelCount != pcmChannels ||
+        dataBlockSize < pcmChannels) {
+        return false;
+    }
+    std::array<bool, Encoding::kMaxPcmChannels> assigned{};
+    for (uint32_t channel = 0; channel < value.channelCount; ++channel) {
+        const uint8_t slot = value.slotForChannel[channel];
+        if (slot >= dataBlockSize || assigned[slot]) return false;
+        assigned[slot] = true;
+    }
+    for (uint32_t channel = value.channelCount;
+         channel < value.slotForChannel.size(); ++channel) {
+        if (value.slotForChannel[channel] != 0) return false;
+    }
+    return true;
+}
+
+[[nodiscard]] bool EncodePcmSlotMap(const ::ASFW::Audio::Wire::PcmSlotMap& source,
+                                    uint32_t pcmChannels,
+                                    uint32_t dataBlockSize,
+                                    PcmSlotMapWireV1& destination) noexcept {
+    destination = {};
+    if (!source.FitsWithin(pcmChannels, dataBlockSize)) return false;
+    if (source.IsIdentity()) return true;
+    if (source.slotCount > UINT8_MAX || source.channelCount > UINT8_MAX) return false;
+    destination.slotCount = static_cast<uint8_t>(source.slotCount);
+    destination.channelCount = static_cast<uint8_t>(source.channelCount);
+    for (uint32_t channel = 0; channel < source.slotCount; ++channel) {
+        destination.slotForChannel[channel] = source.slotForChannel[channel];
+    }
+    return ValidPcmSlotMap(destination, pcmChannels, dataBlockSize);
+}
+
+[[nodiscard]] ::ASFW::Audio::Wire::PcmSlotMap DecodePcmSlotMap(
+    const PcmSlotMapWireV1& source) noexcept {
+    ::ASFW::Audio::Wire::PcmSlotMap destination{};
+    if (source.slotCount == 0) return destination;
+    (void)destination.SetSlots(std::span<const uint8_t>{
+        source.slotForChannel.data(), source.slotCount});
+    destination.channelCount = source.channelCount;
+    return destination;
 }
 
 [[nodiscard]] constexpr bool ValidOpticalMode(uint8_t mode) noexcept {
@@ -219,7 +275,7 @@ Serialize(const ResolvedAudioEndpointProfile& profile) noexcept {
         return std::unexpected(WireError::InvalidCount);
     }
 
-    AudioEndpointProfileWireV2 header{};
+    AudioEndpointProfileWireV3 header{};
     header.version = kAudioEndpointProfileWireVersion;
     header.headerSize = sizeof(header);
     header.endpointId = profile.endpointId.value;
@@ -276,6 +332,12 @@ Serialize(const ResolvedAudioEndpointProfile& profile) noexcept {
     header.hostToDeviceAm824Slots = profile.runtimeCaps.hostToDeviceAm824Slots;
     header.deviceToHostIsoChannel = profile.runtimeCaps.deviceToHostIsoChannel;
     header.hostToDeviceIsoChannel = profile.runtimeCaps.hostToDeviceIsoChannel;
+    if (!EncodePcmSlotMap(profile.playbackChannelMap,
+                          profile.runtimeCaps.hostOutputPcmChannels,
+                          profile.runtimeCaps.hostToDeviceAm824Slots,
+                          header.playbackChannelMap)) {
+        return std::unexpected(WireError::InvalidValue);
+    }
     header.configurationCapabilityCount = profile.configurationCapabilityCount;
     for (uint8_t i = 0; i < profile.configurationCapabilityCount; ++i) {
         const auto& source = profile.configurationCapabilities[i];
@@ -385,10 +447,10 @@ Serialize(const ResolvedAudioEndpointProfile& profile) noexcept {
 
 std::expected<ResolvedAudioEndpointProfile, WireError>
 Parse(std::span<const uint8_t> bytes) noexcept {
-    if (bytes.size() < sizeof(AudioEndpointProfileWireV2)) {
+    if (bytes.size() < sizeof(AudioEndpointProfileWireV3)) {
         return std::unexpected(WireError::Truncated);
     }
-    AudioEndpointProfileWireV2 header{};
+    AudioEndpointProfileWireV3 header{};
     std::memcpy(&header, bytes.data(), sizeof(header));
     if (header.version != kAudioEndpointProfileWireVersion) {
         return std::unexpected(WireError::UnsupportedVersion);
@@ -402,7 +464,9 @@ Parse(std::span<const uint8_t> bytes) noexcept {
         !ValidFlagsAndReserved(header) ||
         header.configurationCapabilityCount > header.configurationCapabilities.size() ||
         !ValidIsoChannel(header.deviceToHostIsoChannel) ||
-        !ValidIsoChannel(header.hostToDeviceIsoChannel)) {
+        !ValidIsoChannel(header.hostToDeviceIsoChannel) ||
+        !ValidPcmSlotMap(header.playbackChannelMap, header.hostOutputPcmChannels,
+                         header.hostToDeviceAm824Slots)) {
         return std::unexpected(WireError::InvalidValue);
     }
     if (!SectionsAreContiguous(bytes, header)) {
@@ -527,6 +591,7 @@ Parse(std::span<const uint8_t> bytes) noexcept {
     profile.runtimeCaps.hostToDeviceAm824Slots = header.hostToDeviceAm824Slots;
     profile.runtimeCaps.deviceToHostIsoChannel = header.deviceToHostIsoChannel;
     profile.runtimeCaps.hostToDeviceIsoChannel = header.hostToDeviceIsoChannel;
+    profile.playbackChannelMap = DecodePcmSlotMap(header.playbackChannelMap);
     profile.runtimeCaps.deviceToHostStreamCount = static_cast<uint32_t>(capture->size());
     for (size_t i = 0; i < capture->size(); ++i) {
         profile.runtimeCaps.deviceToHostStreams[i].pcmChannels = (*capture)[i].pcmChannels;

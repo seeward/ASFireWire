@@ -12,7 +12,7 @@
 
 namespace ASFW::Audio::Devices::Wire {
 
-inline constexpr uint16_t kAudioEndpointProfileWireVersion = 2;
+inline constexpr uint16_t kAudioEndpointProfileWireVersion = 3;
 inline constexpr size_t kAudioEndpointProfileWireMaxBytes = 4096;
 
 struct Section final {
@@ -52,7 +52,14 @@ struct ConfigurationCapabilityWireV2 final {
     std::array<StreamWireV1, kMaxAudioStreamsPerDirection> hostToDeviceStreams{};
 } __attribute__((packed));
 
-struct AudioEndpointProfileWireV2 final {
+struct PcmSlotMapWireV1 final {
+    std::array<uint8_t, Encoding::kMaxPcmChannels> slotForChannel{};
+    uint8_t slotCount{0};
+    uint8_t channelCount{0};
+    uint8_t _reserved[2]{};
+} __attribute__((packed));
+
+struct AudioEndpointProfileWireV3 final {
     uint16_t version{0};
     uint16_t headerSize{0};
     uint32_t byteSize{0};
@@ -97,6 +104,7 @@ struct AudioEndpointProfileWireV2 final {
     uint8_t deviceToHostIsoChannel{AudioStreamWireInfo::kInvalidIsoChannel};
     uint8_t hostToDeviceIsoChannel{AudioStreamWireInfo::kInvalidIsoChannel};
     uint8_t _reserved[2]{};
+    PcmSlotMapWireV1 playbackChannelMap{};
     Section rates{};
     Section captureStreams{};
     Section playbackStreams{};

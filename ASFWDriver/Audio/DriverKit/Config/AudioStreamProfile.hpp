@@ -6,6 +6,7 @@
 #pragma once
 
 #include "IAudioDeviceProfile.hpp"
+#include "../../Wire/AMDTP/PcmSlotMap.hpp"
 
 #include <cstdint>
 
@@ -38,6 +39,9 @@ struct AudioStreamTxPolicy final {
     bool preserveFdfInNoDataPackets{false};
     bool emptyPacketsDuringIdle{false};
     bool cadencePacketsCarryDataBlocks{false};
+    /// Logical host PCM channel -> AM824 slot mapping for playback. This is
+    /// content framing data; transport only sees the completed packet.
+    ASFW::Audio::Wire::PcmSlotMap playbackChannelMap{};
 };
 
 // ADK packet allocation and AMDTP encoding are shared by multiple protocol

@@ -131,6 +131,9 @@ struct ResolvedAudioEndpointProfile final {
     // channel order. Identity everywhere else; the duplex coordinator forwards
     // it without interpreting it.
     AudioEngine::Direct::Rx::RxCaptureChannelMap captureChannelMap{};
+    // Host PCM channel to device-facing AM824 slot mapping. This crosses the
+    // nub seam because the AudioDriverKit packetizer owns playback encoding.
+    ::ASFW::Audio::Wire::PcmSlotMap playbackChannelMap{};
     uint8_t captureFramesPerDataPacket{8};
     uint8_t playbackFramesPerDataPacket{8};
     uint8_t captureFdf{0x02};
