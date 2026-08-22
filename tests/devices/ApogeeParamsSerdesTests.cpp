@@ -141,7 +141,11 @@ TEST(ApogeeParamsSerdes, InputRoundTripsEveryField) {
     in.sources[1] = InputSource::Xlr;
     in.xlrNominalLevels[0] = InputXlrNominalLevel::Microphone;
     in.xlrNominalLevels[1] = InputXlrNominalLevel::Consumer;
-    in.clickless = true;
+    // LimitedGainRange/InClickless is deliberately not serialized: the
+    // recovered daemon names the opcode but its physical behavior is still
+    // unverified, so the driver must not write it merely to satisfy a model
+    // round-trip.
+    in.clickless = false;
 
     const auto out = RoundTrip<InputParams, Serdes::InputSerdes>(in);
 
@@ -155,7 +159,7 @@ TEST(ApogeeParamsSerdes, InputRoundTripsEveryField) {
     EXPECT_EQ(out.sources[1], in.sources[1]);
     EXPECT_EQ(out.xlrNominalLevels[0], in.xlrNominalLevels[0]);
     EXPECT_EQ(out.xlrNominalLevels[1], in.xlrNominalLevels[1]);
-    EXPECT_EQ(out.clickless, in.clickless);
+    EXPECT_FALSE(out.clickless);
 }
 
 TEST(ApogeeParamsSerdes, InputXlrNominalLevelRoundTripsAllThreeValues) {

@@ -10,7 +10,7 @@
 
 namespace ASFW::UserClient::Wire {
 
-inline constexpr uint32_t kAudioSemanticTopologyWireVersion = 1;
+inline constexpr uint32_t kAudioSemanticTopologyWireVersion = 3;
 inline constexpr uint32_t kAudioSemanticTopologyEndpointListWireVersion = 1;
 
 struct AudioSemanticTopologyEndpointListWire final {
@@ -27,7 +27,7 @@ struct AudioSemanticTopologySnapshotWire final {
     ASFW::Audio::AudioSemanticTopologySnapshot topology{};
 };
 static_assert(offsetof(AudioSemanticTopologySnapshotWire, topology) == 16);
-static_assert(sizeof(AudioSemanticTopologySnapshotWire) == 3496,
+static_assert(sizeof(AudioSemanticTopologySnapshotWire) == 3944,
               "semantic topology wire ABI changed");
 
 } // namespace ASFW::UserClient::Wire

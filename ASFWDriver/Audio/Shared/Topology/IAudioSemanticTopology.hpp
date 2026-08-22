@@ -39,7 +39,7 @@ enum class AudioSemanticSignalKind : uint32_t {
     HostStream = 5,
 };
 
-enum class AudioSemanticTargetKind : uint32_t { Port = 1, Crosspoint = 2 };
+enum class AudioSemanticTargetKind : uint32_t { Port = 1, Crosspoint = 2, Device = 3 };
 
 enum class AudioSemanticParameterKind : uint32_t {
     Level = 1,
@@ -47,6 +47,12 @@ enum class AudioSemanticParameterKind : uint32_t {
     PhantomPower = 3,
     PhaseInvert = 4,
     NominalLevel = 5,
+    Source = 6,
+    StereoLink = 7,
+    HardwareControlTarget = 8,
+    /// Defines how the device-wide mute state affects a physical output pair.
+    /// The enum domain is protocol-neutral: never, mute asserted, mute released.
+    MuteFollow = 9,
 };
 
 enum class AudioSemanticValueKind : uint32_t { Boolean = 1, Scalar = 2, Enum = 3 };
@@ -58,6 +64,21 @@ enum class AudioSemanticUnit : uint32_t {
 };
 
 enum class AudioSemanticPresentation : uint32_t { Toggle = 1, Fader = 2, Selector = 3 };
+
+// A crosspoint is still a complete signal-graph edge.  These presentation
+// hints only describe how a console should plot that edge, so a client never
+// has to infer a stereo pair (or a crossfeed) from incidental port numbering.
+enum class AudioSemanticCrosspointPresentation : uint32_t {
+    None = 0,
+    PrimaryFader = 1,
+    RoutingFader = 2,
+};
+
+enum class AudioSemanticCrosspointGroup : uint32_t {
+    None = 0,
+    InputMonitor = 1,
+    HostPlayback = 2,
+};
 
 enum class AudioSemanticMeterKind : uint32_t { Level = 1, Peak = 2 };
 
@@ -114,8 +135,11 @@ struct AudioSemanticCrosspoint final {
     uint32_t id{0};
     uint32_t sourcePortId{0};
     uint32_t destinationPortId{0};
+    AudioSemanticCrosspointPresentation presentation{AudioSemanticCrosspointPresentation::None};
+    AudioSemanticCrosspointGroup presentationGroup{AudioSemanticCrosspointGroup::None};
+    uint32_t presentationOrder{0};
 };
-static_assert(sizeof(AudioSemanticCrosspoint) == 12);
+static_assert(sizeof(AudioSemanticCrosspoint) == 24);
 
 // Scalar domains use micro-units for stable, lossless UserClient transport:
 // e.g. 1.0 normalized is 1'000'000, and 0.5 is 500'000.
@@ -143,7 +167,7 @@ struct AudioSemanticMeter final {
 };
 static_assert(sizeof(AudioSemanticMeter) == 24);
 
-inline constexpr uint32_t kAudioSemanticTopologyVersion = 1;
+inline constexpr uint32_t kAudioSemanticTopologyVersion = 3;
 inline constexpr size_t kMaxAudioSemanticTopologyEndpoints = 8;
 inline constexpr size_t kMaxAudioSemanticNodes = 16;
 inline constexpr size_t kMaxAudioSemanticPorts = 40;
@@ -152,7 +176,7 @@ inline constexpr size_t kMaxAudioSemanticRouters = 8;
 inline constexpr size_t kMaxAudioSemanticRouteBundles = 16;
 inline constexpr size_t kMaxAudioSemanticRoutes = 24;
 inline constexpr size_t kMaxAudioSemanticCrosspoints = 24;
-inline constexpr size_t kMaxAudioSemanticParameters = 24;
+inline constexpr size_t kMaxAudioSemanticParameters = 28;
 inline constexpr size_t kMaxAudioSemanticMeters = 12;
 
 struct AudioSemanticTopologySnapshot final {
@@ -188,9 +212,9 @@ static_assert(offsetof(AudioSemanticTopologySnapshot, routers) == 1364);
 static_assert(offsetof(AudioSemanticTopologySnapshot, routeBundles) == 1492);
 static_assert(offsetof(AudioSemanticTopologySnapshot, routes) == 1748);
 static_assert(offsetof(AudioSemanticTopologySnapshot, crosspoints) == 1940);
-static_assert(offsetof(AudioSemanticTopologySnapshot, parameters) == 2228);
-static_assert(offsetof(AudioSemanticTopologySnapshot, meters) == 3188);
-static_assert(sizeof(AudioSemanticTopologySnapshot) == 3480,
+static_assert(offsetof(AudioSemanticTopologySnapshot, parameters) == 2516);
+static_assert(offsetof(AudioSemanticTopologySnapshot, meters) == 3636);
+static_assert(sizeof(AudioSemanticTopologySnapshot) == 3928,
               "semantic topology ABI changed");
 
 class IAudioSemanticTopology {

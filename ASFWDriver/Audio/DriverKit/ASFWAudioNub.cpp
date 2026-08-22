@@ -612,15 +612,13 @@ DecodeOpticalMode(uint32_t raw) noexcept {
 [[nodiscard]] bool BuildDeviceConfiguration(
     uint32_t sampleRateHz, uint32_t opticalInput, uint32_t opticalOutput,
     ASFW::Configuration::DeviceConfiguration& out) noexcept {
-    const auto input = DecodeOpticalMode(opticalInput);
-    const auto output = DecodeOpticalMode(opticalOutput);
-    if (sampleRateHz == 0 || !input || !output) {
+    if (sampleRateHz == 0 || opticalInput > 2U || opticalOutput > 2U) {
         return false;
     }
     out = {
         .sampleRate = sampleRateHz,
-        .opticalInput = input,
-        .opticalOutput = output,
+        .opticalInput = DecodeOpticalMode(opticalInput),
+        .opticalOutput = DecodeOpticalMode(opticalOutput),
     };
     return true;
 }

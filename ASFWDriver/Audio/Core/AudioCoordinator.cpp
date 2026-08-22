@@ -336,12 +336,13 @@ IOReturn AudioCoordinator::RequestDeviceConfiguration(
     const auto profile = runtime_.FindProfile(endpointId);
     auto* nub = publisher_.GetNub(endpointId);
     if (!profile || !nub) return kIOReturnNoDevice;
-    if (!profile->ConfigurationFor(desired) || !desired.opticalInput ||
-        !desired.opticalOutput) {
+    if (!profile->ConfigurationFor(desired)) {
         return kIOReturnUnsupported;
     }
-    const uint32_t input = *desired.opticalInput == Configuration::OpticalMode::Adat ? 1U : 2U;
-    const uint32_t output = *desired.opticalOutput == Configuration::OpticalMode::Adat ? 1U : 2U;
+    const uint32_t input = !desired.opticalInput ? 0U :
+        (*desired.opticalInput == Configuration::OpticalMode::Adat ? 1U : 2U);
+    const uint32_t output = !desired.opticalOutput ? 0U :
+        (*desired.opticalOutput == Configuration::OpticalMode::Adat ? 1U : 2U);
     return nub->NotifyDeviceConfigurationRequested(desired.sampleRate, input, output)
         ? kIOReturnSuccess : kIOReturnNotReady;
 }

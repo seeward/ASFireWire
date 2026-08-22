@@ -101,10 +101,10 @@ std::vector<uint8_t> ApogeeVendorCommand::BuildOperandBase() const {
         case Code::OutIsConsumerLevel:
         case Code::OutMute:
         case Code::OutVolume:
-        case Code::MuteForLineOut:
-        case Code::MuteForHpOut:
-        case Code::UnmuteForLineOut:
-        case Code::UnmuteForHpOut:
+        case Code::UnmuteMutesLineOut:
+        case Code::UnmuteMutesHpOut:
+        case Code::MuteMutesLineOut:
+        case Code::MuteMutesHpOut:
             operands[kArg1] = kApogeeArgIndexed;
             break;
         // Mixer: both argument slots carry routing.
@@ -114,6 +114,7 @@ std::vector<uint8_t> ApogeeVendorCommand::BuildOperandBase() const {
             break;
         // No arguments; both slots stay at the default filler.
         case Code::HwState:
+        case Code::MicsGrouped:
         case Code::OutSourceIsMixer:
         case Code::DisplayOverholdTwoSec:
         case Code::DisplayClear:
@@ -134,13 +135,14 @@ void ApogeeVendorCommand::AppendControlValue(std::vector<uint8_t>& operands) con
         case Code::MicPhantom:
         case Code::OutIsConsumerLevel:
         case Code::OutMute:
+        case Code::MicsGrouped:
         case Code::InputSourceIsPhone:
         case Code::OutSourceIsMixer:
         case Code::DisplayOverholdTwoSec:
-        case Code::MuteForLineOut:
-        case Code::MuteForHpOut:
-        case Code::UnmuteForLineOut:
-        case Code::UnmuteForHpOut:
+        case Code::UnmuteMutesLineOut:
+        case Code::UnmuteMutesHpOut:
+        case Code::MuteMutesLineOut:
+        case Code::MuteMutesHpOut:
         case Code::DisplayIsInput:
         case Code::InClickless:
         case Code::DisplayFollowToKnob:
@@ -193,12 +195,13 @@ bool ApogeeVendorCommand::ParseStatusPayload(std::span<const uint8_t> payload) {
             return true;
         case Code::OutIsConsumerLevel:
         case Code::OutMute:
+        case Code::MicsGrouped:
         case Code::OutSourceIsMixer:
         case Code::DisplayOverholdTwoSec:
-        case Code::MuteForLineOut:
-        case Code::MuteForHpOut:
-        case Code::UnmuteForLineOut:
-        case Code::UnmuteForHpOut:
+        case Code::UnmuteMutesLineOut:
+        case Code::UnmuteMutesHpOut:
+        case Code::MuteMutesLineOut:
+        case Code::MuteMutesHpOut:
         case Code::DisplayIsInput:
         case Code::InClickless:
         case Code::DisplayFollowToKnob:

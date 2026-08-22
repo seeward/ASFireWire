@@ -14,11 +14,13 @@
 #include "ApogeeTransport.hpp"
 
 #include "../../../../Common/CallbackUtils.hpp"
+#include "../../../../Logging/Logging.hpp"
 #include "../../../../Protocols/AVC/CMP/CMPClient.hpp"
 
 #include <DriverKit/IOLib.h>
 #include <algorithm>
 #include <atomic>
+#include <array>
 #include <memory>
 #include <vector>
 
@@ -33,8 +35,25 @@ struct ApogeeDuetProtocol::SemanticControlState final {
     OutputParams output{};
     InputParams input{};
     MixerParams mixer{};
+    bool micsGrouped{false};
+    KnobState knob{};
 
     ~SemanticControlState() {
+        if (lock) IOLockFree(lock);
+    }
+};
+
+struct ApogeeDuetProtocol::MeteringState final {
+    IOLock* lock{IOLockAlloc()};
+    std::array<int16_t, 6> values{};
+    uint32_t revision{0};
+    uint64_t epoch{1};
+    Scheduling::TimerToken timer{Scheduling::kInvalidTimerToken};
+    bool enabled{false};
+    bool readInFlight{false};
+    uint64_t readEpoch{0};
+
+    ~MeteringState() {
         if (lock) IOLockFree(lock);
     }
 };
@@ -53,7 +72,29 @@ constexpr uint32_t kOutputVolume = 9;
 constexpr uint32_t kOutputMute = 10;
 constexpr uint32_t kCrosspointFirst = 11;
 constexpr uint32_t kCrosspointLast = 18;
+constexpr uint32_t kInputSource1 = 19;
+constexpr uint32_t kInputSource2 = 20;
+constexpr uint32_t kOutputSource = 21;
+constexpr uint32_t kOutputNominalLevel = 22;
+constexpr uint32_t kStereoLink = 23;
+constexpr uint32_t kHardwareKnobTarget = 24;
+constexpr uint32_t kMainMuteFollow = 25;
+constexpr uint32_t kHeadphoneMuteFollow = 26;
 constexpr int32_t kNormalizedOne = 1'000'000;
+// The original control path updates its live meter/knob state at about 33 Hz.
+// A FireBug export can omit transactions, so its sparse visible records are
+// not a cadence measurement. Keep one complete optional telemetry bundle per
+// 30 ms; this is also the upper bound on observable meter latency.
+constexpr uint64_t kMeterPollNs = 30ULL * 1000ULL * 1000ULL;
+// A failed sample should recover promptly. Metering is explicitly opt-in, and
+// a bounded 100 ms retry avoids turning a transient bus error into seconds of
+// frozen UI while still keeping an absent route from spinning at 33 Hz.
+constexpr uint64_t kMeterRetryNs = 100ULL * 1000ULL * 1000ULL;
+
+[[nodiscard]] int16_t MeterMagnitude(int32_t raw) noexcept {
+    constexpr int32_t kMaximum = 0x3fff;
+    return static_cast<int16_t>(std::clamp(raw >> 17U, 0, kMaximum));
+}
 
 [[nodiscard]] int32_t NormalizedCoefficient(uint16_t coefficient) noexcept {
     return static_cast<int32_t>((static_cast<uint64_t>(coefficient) * kNormalizedOne + 8191U) / 16383U);
@@ -96,10 +137,12 @@ ApogeeDuetProtocol::ApogeeDuetProtocol(Protocols::Ports::FireWireBusOps& busOps,
           .formatSettleDelayMs = formatSettleDelayMs,
       }
     , duplex_(runtime_)
-    , semanticControlState_(std::make_shared<SemanticControlState>()) {
+    , semanticControlState_(std::make_shared<SemanticControlState>())
+    , meteringState_(std::make_shared<MeteringState>()) {
 }
 
 ApogeeDuetProtocol::~ApogeeDuetProtocol() {
+    (void)SetAudioMeteringEnabled(false);
     if (!semanticControlState_ || !semanticControlState_->lock) return;
     IOLockLock(semanticControlState_->lock);
     ++semanticControlState_->epoch;
@@ -114,6 +157,7 @@ IOReturn ApogeeDuetProtocol::Initialize() {
 }
 
 IOReturn ApogeeDuetProtocol::Shutdown() {
+    (void)SetAudioMeteringEnabled(false);
     duplex_.Shutdown();
     if (semanticControlState_ && semanticControlState_->lock) {
         IOLockLock(semanticControlState_->lock);
@@ -128,6 +172,7 @@ IOReturn ApogeeDuetProtocol::Shutdown() {
 void ApogeeDuetProtocol::UpdateRuntimeContext(
     const Discovery::DeviceRouteToken& route, Protocols::AVC::FCPTransport* transport) {
     duplex_.UpdateRuntimeContext(route, transport);
+    (void)SetAudioMeteringEnabled(false);
     if (semanticControlState_ && semanticControlState_->lock) {
         IOLockLock(semanticControlState_->lock);
         ++semanticControlState_->epoch;
@@ -227,6 +272,30 @@ void ApogeeDuetProtocol::SetInputParams(const InputParams& params, VoidCallback 
         });
 }
 
+void ApogeeDuetProtocol::GetMicsGrouped(ResultCallback<bool> callback) {
+    auto callbackState = Common::ShareCallback(std::move(callback));
+    ExecuteVendorSequence(
+        {VendorCommand::Bool(VendorCommand::Code::MicsGrouped, false)}, true,
+        [callbackState](IOReturn status, const std::vector<VendorCommand>& responses) {
+            if (status != kIOReturnSuccess || responses.size() != 1U) {
+                Common::InvokeSharedCallback(callbackState,
+                                             status != kIOReturnSuccess ? status : kIOReturnError,
+                                             false);
+                return;
+            }
+            Common::InvokeSharedCallback(callbackState, kIOReturnSuccess, responses[0].boolValue);
+        });
+}
+
+void ApogeeDuetProtocol::SetMicsGrouped(bool enabled, VoidCallback callback) {
+    auto callbackState = Common::ShareCallback(std::move(callback));
+    ExecuteVendorSequence(
+        {VendorCommand::Bool(VendorCommand::Code::MicsGrouped, enabled)}, false,
+        [callbackState](IOReturn status, const std::vector<VendorCommand>&) {
+            Common::InvokeSharedCallback(callbackState, status);
+        });
+}
+
 void ApogeeDuetProtocol::GetMixerParams(ResultCallback<MixerParams> callback) {
     auto callbackState = Common::ShareCallback(std::move(callback));
     ExecuteVendorSequence(
@@ -291,11 +360,13 @@ void ApogeeDuetProtocol::RefreshSemanticControlState() noexcept {
     struct Refresh final {
         std::shared_ptr<SemanticControlState> state;
         uint64_t epoch{0};
-        std::atomic<uint32_t> pending{3};
+        std::atomic<uint32_t> pending{5};
         std::atomic<int32_t> status{kIOReturnSuccess};
         OutputParams output{};
         InputParams input{};
         MixerParams mixer{};
+        KnobState knob{};
+        bool micsGrouped{false};
     };
 
     const auto refresh = std::make_shared<Refresh>();
@@ -319,6 +390,8 @@ void ApogeeDuetProtocol::RefreshSemanticControlState() noexcept {
             refresh->state->output = refresh->output;
             refresh->state->input = refresh->input;
             refresh->state->mixer = refresh->mixer;
+            refresh->state->knob = refresh->knob;
+            refresh->state->micsGrouped = refresh->micsGrouped;
             refresh->state->valid = true;
             ++refresh->state->revision;
         }
@@ -342,6 +415,26 @@ void ApogeeDuetProtocol::RefreshSemanticControlState() noexcept {
         transport, ParamsSerdes::BuildMixerParamsQuery(), true,
         [refresh, finish](IOReturn status, const std::vector<VendorCommand>& responses) {
             if (status == kIOReturnSuccess) refresh->mixer = ParamsSerdes::ParseMixerParams(responses);
+            finish(status);
+        });
+    VendorFcp::ExecuteSequence(
+        transport, ParamsSerdes::BuildKnobStateQuery(), true,
+        [refresh, finish](IOReturn status, const std::vector<VendorCommand>& responses) {
+            if (status == kIOReturnSuccess && responses.size() == 1U) {
+                refresh->knob = ParamsSerdes::ParseKnobState(responses[0]);
+            } else if (status == kIOReturnSuccess) {
+                status = kIOReturnError;
+            }
+            finish(status);
+        });
+    VendorFcp::ExecuteSequence(
+        transport, {VendorCommand::Bool(VendorCommand::Code::MicsGrouped, false)}, true,
+        [refresh, finish](IOReturn status, const std::vector<VendorCommand>& responses) {
+            if (status == kIOReturnSuccess && responses.size() == 1U) {
+                refresh->micsGrouped = responses[0].boolValue;
+            } else if (status == kIOReturnSuccess) {
+                status = kIOReturnError;
+            }
             finish(status);
         });
 }
@@ -385,8 +478,60 @@ bool ApogeeDuetProtocol::CopyAudioControlSurfaceSnapshot(
         for (const auto coefficient : output.analogInputs) emit(control++, NormalizedCoefficient(coefficient));
         for (const auto coefficient : output.streamInputs) emit(control++, NormalizedCoefficient(coefficient));
     }
+    emit(kInputSource1, static_cast<int32_t>(state->input.sources[0]));
+    emit(kInputSource2, static_cast<int32_t>(state->input.sources[1]));
+    emit(kOutputSource, static_cast<int32_t>(state->output.source));
+    emit(kOutputNominalLevel, static_cast<int32_t>(state->output.nominalLevel));
+    emit(kStereoLink, state->micsGrouped ? 1 : 0);
+    emit(kHardwareKnobTarget, static_cast<int32_t>(state->knob.target));
+    emit(kMainMuteFollow, static_cast<int32_t>(state->output.lineMuteMode));
+    emit(kHeadphoneMuteFollow, static_cast<int32_t>(state->output.hpMuteMode));
     IOLockUnlock(state->lock);
-    return outSnapshot.valueCount == 18;
+    return outSnapshot.valueCount == 26;
+}
+
+bool ApogeeDuetProtocol::SupportsConfiguration(
+    const Configuration::DeviceConfiguration& configuration) const noexcept {
+    // Duet has no optical transport selector.  Do not smuggle a made-up
+    // S/PDIF/ADAT setting through the generic configuration model.
+    return !configuration.opticalInput && !configuration.opticalOutput &&
+           (configuration.sampleRate == 44100U || configuration.sampleRate == 48000U);
+}
+
+void ApogeeDuetProtocol::ApplyConfiguration(
+    const Configuration::DeviceConfiguration& configuration,
+    IAudioConfigurationControl::ApplyCallback callback) {
+    if (!callback) return;
+    if (!SupportsConfiguration(configuration)) {
+        callback(kIOReturnUnsupported, {});
+        return;
+    }
+
+    // This is deliberately the same AV/C signal-format state machine used by
+    // PrepareDuplex.  Its successful result carries the selected sample rate
+    // into runtime caps, which makes the ADK packetizer reconfigure both AM824
+    // FDF and the rational 44.1-family cadence before streaming resumes.
+    duplex_.ApplyClockConfig(
+        {.sampleRateHz = configuration.sampleRate},
+        [configuration, callback = std::move(callback)](
+            IOReturn status, ClockApplyResult result) mutable {
+            if (status != kIOReturnSuccess) {
+                callback(status, {});
+                return;
+            }
+            callback(kIOReturnSuccess,
+                     {.configuration = configuration, .runtimeCaps = result.runtimeCaps});
+        });
+}
+
+AudioConfigurationApplyResult ApogeeDuetProtocol::CurrentConfiguration() const noexcept {
+    AudioStreamRuntimeCaps caps{};
+    (void)duplex_.GetRuntimeAudioStreamCaps(caps);
+    const uint32_t rate = caps.sampleRateHz == 44100U ? 44100U : 48000U;
+    return {
+        .configuration = {.sampleRate = rate},
+        .runtimeCaps = caps,
+    };
 }
 
 void ApogeeDuetProtocol::ApplyAudioControlValue(
@@ -401,7 +546,8 @@ void ApogeeDuetProtocol::ApplyAudioControlValue(
     OutputParams output{};
     InputParams input{};
     MixerParams mixer{};
-    enum class Group { Input, Output, Mixer } group{Group::Input};
+    bool micsGrouped{false};
+    enum class Group { Input, Output, Mixer, StereoLink } group{Group::Input};
     uint64_t epoch = 0;
     IOReturn rejected = kIOReturnSuccess;
     IOLockLock(state->lock);
@@ -411,6 +557,7 @@ void ApogeeDuetProtocol::ApplyAudioControlValue(
         output = state->output;
         input = state->input;
         mixer = state->mixer;
+        micsGrouped = state->micsGrouped;
         epoch = state->epoch;
         switch (controlId) {
             case kInputGain1:
@@ -469,6 +616,56 @@ void ApogeeDuetProtocol::ApplyAudioControlValue(
                     group = Group::Output;
                 }
                 break;
+            case kMainMuteFollow:
+            case kHeadphoneMuteFollow:
+                if (value < static_cast<int32_t>(OutputMuteMode::Never) ||
+                    value > static_cast<int32_t>(OutputMuteMode::Swapped)) {
+                    rejected = kIOReturnBadArgument;
+                } else {
+                    const auto mode = static_cast<OutputMuteMode>(value);
+                    if (controlId == kMainMuteFollow) output.lineMuteMode = mode;
+                    else output.hpMuteMode = mode;
+                    group = Group::Output;
+                }
+                break;
+            case kInputSource1:
+            case kInputSource2:
+                if (value < static_cast<int32_t>(InputSource::Xlr) ||
+                    value > static_cast<int32_t>(InputSource::Phone)) {
+                    rejected = kIOReturnBadArgument;
+                } else {
+                    input.sources[controlId - kInputSource1] = static_cast<InputSource>(value);
+                    group = Group::Input;
+                }
+                break;
+            case kOutputSource:
+                if (value < static_cast<int32_t>(OutputSource::StreamInputPair0) ||
+                    value > static_cast<int32_t>(OutputSource::MixerOutputPair0)) {
+                    rejected = kIOReturnBadArgument;
+                } else {
+                    output.source = static_cast<OutputSource>(value);
+                    group = Group::Output;
+                }
+                break;
+            case kOutputNominalLevel:
+                if (value < static_cast<int32_t>(OutputNominalLevel::Instrument) ||
+                    value > static_cast<int32_t>(OutputNominalLevel::Consumer)) {
+                    rejected = kIOReturnBadArgument;
+                } else {
+                    output.nominalLevel = static_cast<OutputNominalLevel>(value);
+                    group = Group::Output;
+                }
+                break;
+            case kStereoLink:
+                if (value != 0 && value != 1) rejected = kIOReturnBadArgument;
+                else {
+                    micsGrouped = value != 0;
+                    group = Group::StereoLink;
+                }
+                break;
+            case kHardwareKnobTarget:
+                rejected = kIOReturnUnsupported;
+                break;
             default:
                 if (controlId < kCrosspointFirst || controlId > kCrosspointLast ||
                     value < 0 || value > kNormalizedOne) {
@@ -494,7 +691,8 @@ void ApogeeDuetProtocol::ApplyAudioControlValue(
 
     const auto complete = [state, epoch, callback = std::move(callback)](
                               IOReturn status, const OutputParams& nextOutput,
-                              const InputParams& nextInput, const MixerParams& nextMixer) {
+                              const InputParams& nextInput, const MixerParams& nextMixer,
+                              bool nextMicsGrouped) {
         if (!state->lock) {
             callback(kIOReturnAborted);
             return;
@@ -505,6 +703,7 @@ void ApogeeDuetProtocol::ApplyAudioControlValue(
             state->output = nextOutput;
             state->input = nextInput;
             state->mixer = nextMixer;
+            state->micsGrouped = nextMicsGrouped;
             ++state->revision;
         }
         state->writeInFlight = false;
@@ -514,21 +713,199 @@ void ApogeeDuetProtocol::ApplyAudioControlValue(
 
     switch (group) {
         case Group::Input:
-            SetInputParams(input, [complete, output, input, mixer](IOReturn status) mutable {
-                complete(status, output, input, mixer);
+            SetInputParams(input, [complete, output, input, mixer, micsGrouped](IOReturn status) mutable {
+                complete(status, output, input, mixer, micsGrouped);
             });
             break;
         case Group::Output:
-            SetOutputParams(output, [complete, output, input, mixer](IOReturn status) mutable {
-                complete(status, output, input, mixer);
+            SetOutputParams(output, [complete, output, input, mixer, micsGrouped](IOReturn status) mutable {
+                complete(status, output, input, mixer, micsGrouped);
             });
             break;
         case Group::Mixer:
-            SetMixerParams(mixer, [complete, output, input, mixer](IOReturn status) mutable {
-                complete(status, output, input, mixer);
+            SetMixerParams(mixer, [complete, output, input, mixer, micsGrouped](IOReturn status) mutable {
+                complete(status, output, input, mixer, micsGrouped);
+            });
+            break;
+        case Group::StereoLink:
+            SetMicsGrouped(micsGrouped, [complete, output, input, mixer, micsGrouped](IOReturn status) mutable {
+                complete(status, output, input, mixer, micsGrouped);
             });
             break;
     }
+}
+
+bool ApogeeDuetProtocol::CopyAudioMeterSnapshot(
+    AudioMeterSnapshot& outSnapshot) const noexcept {
+    outSnapshot = {};
+    const auto state = meteringState_;
+    if (!state || !state->lock) return false;
+
+    IOLockLock(state->lock);
+    outSnapshot.telemetrySequence = state->revision;
+    outSnapshot.valueCount = static_cast<uint32_t>(state->values.size());
+    outSnapshot.enabled = state->enabled;
+    for (size_t index = 0; index < state->values.size(); ++index) {
+        outSnapshot.values[index] = state->values[index];
+    }
+    IOLockUnlock(state->lock);
+    return true;
+}
+
+IOReturn ApogeeDuetProtocol::SetAudioMeteringEnabled(bool enabled) noexcept {
+    const auto state = meteringState_;
+    if (!state || !state->lock) return kIOReturnUnsupported;
+
+    Scheduling::TimerToken cancelled{Scheduling::kInvalidTimerToken};
+    uint64_t epoch{0};
+    IOLockLock(state->lock);
+    if (state->enabled == enabled) {
+        IOLockUnlock(state->lock);
+        return kIOReturnSuccess;
+    }
+    state->enabled = enabled;
+    epoch = ++state->epoch;
+    cancelled = std::exchange(state->timer, Scheduling::kInvalidTimerToken);
+    state->readInFlight = false;
+    state->readEpoch = 0;
+    if (!enabled) {
+        state->values.fill(0);
+        ++state->revision;
+    }
+    IOLockUnlock(state->lock);
+
+    if (cancelled != Scheduling::kInvalidTimerToken && runtime_.timerScheduler) {
+        runtime_.timerScheduler->Cancel(cancelled);
+    }
+    if (enabled) ScheduleMeterRead(0, epoch);
+    return kIOReturnSuccess;
+}
+
+void ApogeeDuetProtocol::ScheduleMeterRead(uint64_t delayNs, uint64_t epoch) noexcept {
+    const auto state = meteringState_;
+    if (!state || !state->lock || !runtime_.timerScheduler) {
+        ASFW_LOG_ERROR(Oxfw, "[DuetMeter] unavailable: no timer scheduler");
+        return;
+    }
+    const auto timer = runtime_.timerScheduler->ScheduleAfter(delayNs, [this, epoch] {
+        PollMeter(epoch);
+    });
+    if (timer == Scheduling::kInvalidTimerToken) {
+        ASFW_LOG_ERROR(Oxfw, "[DuetMeter] timer scheduling failed");
+        return;
+    }
+
+    bool keep{false};
+    IOLockLock(state->lock);
+    if (state->enabled && state->epoch == epoch &&
+        state->timer == Scheduling::kInvalidTimerToken) {
+        state->timer = timer;
+        keep = true;
+    }
+    IOLockUnlock(state->lock);
+    if (!keep) runtime_.timerScheduler->Cancel(timer);
+}
+
+void ApogeeDuetProtocol::PollMeter(uint64_t epoch) noexcept {
+    const auto state = meteringState_;
+    if (!state || !state->lock) return;
+
+    IOLockLock(state->lock);
+    state->timer = Scheduling::kInvalidTimerToken;
+    if (!state->enabled || state->epoch != epoch || state->readInFlight) {
+        IOLockUnlock(state->lock);
+        return;
+    }
+    state->readInFlight = true;
+    state->readEpoch = epoch;
+    IOLockUnlock(state->lock);
+
+    struct Poll final {
+        std::atomic<uint32_t> pending{2};
+        std::atomic<int32_t> status{kIOReturnSuccess};
+        InputMeterState input{};
+        MixerMeterState mixer{};
+    };
+    const auto poll = std::make_shared<Poll>();
+    const auto finish = [this, epoch, poll](IOReturn status) {
+        if (status != kIOReturnSuccess) {
+            int32_t expected{kIOReturnSuccess};
+            (void)poll->status.compare_exchange_strong(expected, status);
+        }
+        if (poll->pending.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            CompleteMeterRead(epoch, poll->status.load(std::memory_order_acquire),
+                              poll->input, poll->mixer);
+        }
+    };
+    GetInputMeter([poll, finish](IOReturn status, InputMeterState value) {
+        if (status == kIOReturnSuccess) poll->input = value;
+        finish(status);
+    });
+    GetMixerMeter([poll, finish](IOReturn status, MixerMeterState value) {
+        if (status == kIOReturnSuccess) poll->mixer = value;
+        finish(status);
+    });
+
+    // The encoder state is a separate vendor status read, not meter payload.
+    // It shares this optional telemetry lifecycle so disabling metering also
+    // stops all periodic Duet traffic.
+    GetKnobState([this, epoch](IOReturn status, KnobState knob) {
+        if (status == kIOReturnSuccess) ApplyPolledKnobState(epoch, knob);
+    });
+}
+
+void ApogeeDuetProtocol::CompleteMeterRead(uint64_t epoch, IOReturn status,
+                                            const InputMeterState& input,
+                                            const MixerMeterState& mixer) noexcept {
+    const auto state = meteringState_;
+    if (!state || !state->lock) return;
+
+    uint64_t nextDelay{kMeterRetryNs};
+    bool reschedule{false};
+    IOLockLock(state->lock);
+    if (state->readInFlight && state->readEpoch == epoch) {
+        state->readInFlight = false;
+        state->readEpoch = 0;
+    }
+    if (state->enabled && state->epoch == epoch && status == kIOReturnSuccess) {
+        state->values = {
+            MeterMagnitude(input.levels[0]), MeterMagnitude(input.levels[1]),
+            MeterMagnitude(mixer.streamInputs[0]), MeterMagnitude(mixer.streamInputs[1]),
+            MeterMagnitude(mixer.mixerOutputs[0]), MeterMagnitude(mixer.mixerOutputs[1]),
+        };
+        ++state->revision;
+        nextDelay = kMeterPollNs;
+    }
+    reschedule = state->enabled && state->epoch == epoch;
+    IOLockUnlock(state->lock);
+
+    if (status != kIOReturnSuccess && reschedule) {
+        ASFW_LOG_ERROR(Oxfw, "[DuetMeter] read rejected kr=0x%08x; retry=1s",
+                       static_cast<unsigned>(status));
+    }
+    if (reschedule) ScheduleMeterRead(nextDelay, epoch);
+}
+
+void ApogeeDuetProtocol::ApplyPolledKnobState(uint64_t epoch,
+                                               const KnobState& knob) noexcept {
+    const auto meter = meteringState_;
+    const auto semantic = semanticControlState_;
+    if (!meter || !meter->lock || !semantic || !semantic->lock) return;
+
+    IOLockLock(meter->lock);
+    const bool active = meter->enabled && meter->epoch == epoch;
+    IOLockUnlock(meter->lock);
+    if (!active) return;
+
+    IOLockLock(semantic->lock);
+    if (semantic->valid && !semantic->writeInFlight) {
+        semantic->knob = knob;
+        semantic->output.mute = knob.outputMute;
+        semantic->output.volume = knob.outputVolume;
+        semantic->input.gains = knob.inputGains;
+        ++semantic->revision;
+    }
+    IOLockUnlock(semantic->lock);
 }
 
 void ApogeeDuetProtocol::GetInputMeter(ResultCallback<InputMeterState> callback) {

@@ -3,6 +3,8 @@
 #include "OxfwProfileBuilder.hpp"
 #include "../Common/CommonProfileBuilder.hpp"
 
+#include <algorithm>
+
 namespace ASFW::Audio::Families::OXFW {
 
 std::expected<Devices::ResolvedAudioEndpointProfile, Devices::ProfileBuildError>
@@ -24,6 +26,23 @@ BuildProfile(const Devices::ProfileBuildContext& context) noexcept {
     profile.startPolicy.postDeviceEnableDelayMs = 0;
     profile.stopPolicy.disconnectPlaybackThenStopTransmitThenDisconnectCaptureThenStopReceive = true;
     profile.facets.push_back({Devices::FacetKind::Parameters, 0x44554554});
+    if (context.staticPlan.profileBuilder == DeviceProfiles::Audio::ProfileBuilderId::ApogeeDuet) {
+        // The Duet's host-selectable formations are the two base rates.  Its
+        // AV/C control path has no optical selector, so the absent selectors
+        // are represented as nullopt rather than a fictitious S/PDIF mode.
+        for (const uint32_t rate : {44100U, 48000U}) {
+            if (std::find(facts->supportedRates.begin(), facts->supportedRates.end(), rate) ==
+                facts->supportedRates.end() ||
+                profile.configurationCapabilityCount >= profile.configurationCapabilities.size()) {
+                continue;
+            }
+            auto& capability = profile.configurationCapabilities[
+                profile.configurationCapabilityCount++];
+            capability.configuration = {.sampleRate = rate};
+            capability.runtimeCaps = facts->streams;
+            capability.runtimeCaps.sampleRateHz = rate;
+        }
+    }
     Common::AddDefaultTiming(profile, 500);
     for (uint8_t i = 0; i < profile.timingCount; ++i) {
         profile.timing[i].inputLatencyFrames = 128;

@@ -9,6 +9,7 @@
 #include <span>
 #include <type_traits>
 #include "Audio/Protocols/Oxford/Apogee/ApogeeDuetProtocol.hpp"
+#include "Audio/Protocols/Oxford/Apogee/ApogeeDuetVendorCommands.hpp"
 #include "Audio/Protocols/Oxford/Apogee/ApogeeParamsSerdes.hpp"
 #include "Audio/Protocols/Oxford/Apogee/ApogeeTypes.hpp"
 #include "Bus/IRM/IRMClient.hpp"
@@ -24,6 +25,8 @@ using VendorCmdCode = ApogeeDuetProtocol::VendorCommand::Code;
 using DuetKnobState = KnobState;
 using DuetKnobTarget = KnobTarget;
 using DuetOutputMuteMode = OutputMuteMode;
+
+using DuetVendorOpcode = ApogeeDuetVendorOpcode;
 
 static_assert(!std::is_base_of_v<OSObject, ASFW::Protocols::AVC::FCPTransport>,
               "FCPTransport is shared C++ state, not a DriverKit OSObject");
@@ -164,6 +167,18 @@ inline std::vector<VendorCmd> BuildMixerParamsQuery() {
 }
 inline std::vector<VendorCmd> BuildDisplayParamsQuery() {
     return Serdes::BuildDisplayParamsQuery();
+}
+
+// ============================================================================
+// Recovered vendor command catalogue tests
+// ============================================================================
+
+TEST(ApogeeDuetVendorOpcode, RetainsRecoveredControlAndDiagnosticBytes) {
+    EXPECT_EQ(static_cast<uint8_t>(DuetVendorOpcode::MicsGrouped), 0x08U);
+    EXPECT_EQ(static_cast<uint8_t>(DuetVendorOpcode::MixerGain), 0x10U);
+    EXPECT_EQ(static_cast<uint8_t>(DuetVendorOpcode::LimitedGainRange), 0x1EU);
+    EXPECT_EQ(static_cast<uint8_t>(DuetVendorOpcode::HasDaemon), 0x24U);
+    EXPECT_EQ(static_cast<uint8_t>(DuetVendorOpcode::SelectEncoderControl), 0x25U);
 }
 
 // ============================================================================
@@ -443,7 +458,7 @@ TEST(ApogeeDuetVendorCmd, BuildOutputParamsQuery) {
 
 TEST(ApogeeDuetVendorCmd, BuildInputParamsQuery) {
     auto cmds = BuildInputParamsQuery();
-    EXPECT_EQ(cmds.size(), 13u);  // 2×gain, 2×polarity, 2×mic, 2×consumer, 2×phantom, 2×source, clickless
+    EXPECT_EQ(cmds.size(), 12u);  // 2×gain, 2×polarity, 2×mic, 2×consumer, 2×phantom, 2×source
 }
 
 TEST(ApogeeDuetVendorCmd, BuildMixerParamsQuery) {
@@ -464,14 +479,16 @@ TEST(ApogeeDuetSemanticControlSurface, PublishesConfirmedSemanticValuesAndCommit
         // Return an accepted vendor frame with zero-valued one- and two-byte
         // fields so every parser in the refresh transaction is exercised.
         std::vector<uint8_t> response(command.begin(), command.end());
-        response.resize(16U, 0U);
+        // HwState carries its 11-byte state block after the common vendor
+        // header; leave enough room for the full semantic refresh.
+        response.resize(32U, 0U);
         response[0] = static_cast<uint8_t>(ASFW::Protocols::AVC::AVCResponseType::kAccepted);
         return AvcReply::RawBytes(std::move(response));
     });
     ApogeeDuetProtocol protocol(rig.Bus(), rig.Bus(), rig.Route(), &rig.Routes(), rig.Transport(),
                                 nullptr, nullptr, 0U, &rig.Timers());
 
-    // Three native parameter groups are fetched asynchronously.  The surface
+    // Parameter groups plus front-panel state are fetched asynchronously. The surface
     // becomes visible only after all of them have completed against one epoch.
     ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
     EXPECT_FALSE([&] {
@@ -483,7 +500,7 @@ TEST(ApogeeDuetSemanticControlSurface, PublishesConfirmedSemanticValuesAndCommit
     ASFW::Audio::AudioControlSurfaceSnapshot before{};
     ASSERT_TRUE(protocol.CopyAudioControlSurfaceSnapshot(before));
     EXPECT_EQ(before.kind, ASFW::Audio::AudioControlSurfaceKind::ApogeeDuet);
-    EXPECT_EQ(before.valueCount, 18U);
+    EXPECT_EQ(before.valueCount, 26U);
     EXPECT_EQ(before.values[8].id, 9U);       // semantic Main Out level
     EXPECT_EQ(before.values[8].value, -64);   // native raw zero is -64 dB
 
@@ -497,6 +514,24 @@ TEST(ApogeeDuetSemanticControlSurface, PublishesConfirmedSemanticValuesAndCommit
     EXPECT_EQ(after.stateRevision, before.stateRevision + 1U);
     EXPECT_EQ(after.values[8].id, 9U);
     EXPECT_EQ(after.values[8].value, -12);
+}
+
+TEST(ApogeeDuetConfiguration, ExposesOnlyTheVerifiedBaseRateControlSurface) {
+    AvcTestRig rig;
+    ApogeeDuetProtocol protocol(rig.Bus(), rig.Bus(), rig.Route(), &rig.Routes(), rig.Transport(),
+                                nullptr, nullptr, 0U, &rig.Timers());
+
+    EXPECT_TRUE(protocol.SupportsConfiguration({.sampleRate = 44100U}));
+    EXPECT_TRUE(protocol.SupportsConfiguration({.sampleRate = 48000U}));
+    EXPECT_FALSE(protocol.SupportsConfiguration({.sampleRate = 32000U}));
+    EXPECT_FALSE(protocol.SupportsConfiguration({
+        .sampleRate = 44100U,
+        .opticalInput = ASFW::Configuration::OpticalMode::Spdif,
+    }));
+
+    std::vector<uint32_t> rates;
+    ASSERT_TRUE(protocol.GetSupportedSampleRates(rates));
+    EXPECT_EQ(rates, (std::vector<uint32_t>{44100U, 48000U}));
 }
 
 

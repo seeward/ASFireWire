@@ -24,6 +24,8 @@ bool BuildApogeeDuetSemanticTopology(AudioSemanticTopologySnapshot& outSnapshot)
     using ValueKind = AudioSemanticValueKind;
     using Unit = AudioSemanticUnit;
     using Presentation = AudioSemanticPresentation;
+    using CrosspointPresentation = AudioSemanticCrosspointPresentation;
+    using CrosspointGroup = AudioSemanticCrosspointGroup;
     using MeterKind = AudioSemanticMeterKind;
     using MeterUnit = AudioSemanticMeterUnit;
 
@@ -72,10 +74,27 @@ bool BuildApogeeDuetSemanticTopology(AudioSemanticTopologySnapshot& outSnapshot)
         {11, 15}, {12, 15}, {13, 16}, {14, 16}, {51, 55}, {52, 56}, {53, 55}, {54, 56},
     };
     constexpr AudioSemanticCrosspoint kCrosspoints[] = {
-        {1, 41, 45}, {2, 42, 45}, {3, 43, 45}, {4, 44, 45},
-        {5, 41, 46}, {6, 42, 46}, {7, 43, 46}, {8, 44, 46},
+        // The two primary pairs are deliberately described here rather than
+        // inferred by clients from the mixer port IDs.  The other four values
+        // are crossfeeds: retain them as routing controls, not duplicate
+        // L/R strips in the primary console rack.
+        {1, 41, 45, CrosspointPresentation::PrimaryFader, CrosspointGroup::InputMonitor, 0},
+        {2, 42, 45, CrosspointPresentation::RoutingFader, CrosspointGroup::InputMonitor, 0},
+        {3, 43, 45, CrosspointPresentation::PrimaryFader, CrosspointGroup::HostPlayback, 0},
+        {4, 44, 45, CrosspointPresentation::RoutingFader, CrosspointGroup::HostPlayback, 0},
+        {5, 41, 46, CrosspointPresentation::RoutingFader, CrosspointGroup::InputMonitor, 1},
+        {6, 42, 46, CrosspointPresentation::PrimaryFader, CrosspointGroup::InputMonitor, 1},
+        {7, 43, 46, CrosspointPresentation::RoutingFader, CrosspointGroup::HostPlayback, 1},
+        {8, 44, 46, CrosspointPresentation::PrimaryFader, CrosspointGroup::HostPlayback, 1},
     };
     constexpr AudioSemanticParameter kParameters[] = {
+        // The console projects the gain's active sub-range from the selected
+        // source/mode: Instrument is 0...65 dB, mic XLR is 10...75 dB, and
+        // fixed-level XLR disables it. This superset keeps the wire topology
+        // stable while the driver remains the final authority on each write.
+        // The recovered daemon advertises the normal XLR microphone range as
+        // 10...75 dB. Instrument mode projects its own 0...65 dB range in
+        // the app; 0 is not a valid microphone-gain position.
         {1, TargetKind::Port, 21, ParameterKind::Level, ValueKind::Scalar, Unit::Decibels, 10, 75, 1, Presentation::Fader},
         {2, TargetKind::Port, 22, ParameterKind::Level, ValueKind::Scalar, Unit::Decibels, 10, 75, 1, Presentation::Fader},
         {3, TargetKind::Port, 1, ParameterKind::PhantomPower, ValueKind::Boolean, Unit::None, 0, 1, 1, Presentation::Toggle},
@@ -94,14 +113,27 @@ bool BuildApogeeDuetSemanticTopology(AudioSemanticTopologySnapshot& outSnapshot)
         {16, TargetKind::Crosspoint, 6, ParameterKind::Level, ValueKind::Scalar, Unit::Normalized, 0, kNormalizedOne, kNormalized14BitStep, Presentation::Fader},
         {17, TargetKind::Crosspoint, 7, ParameterKind::Level, ValueKind::Scalar, Unit::Normalized, 0, kNormalizedOne, kNormalized14BitStep, Presentation::Fader},
         {18, TargetKind::Crosspoint, 8, ParameterKind::Level, ValueKind::Scalar, Unit::Normalized, 0, kNormalizedOne, kNormalized14BitStep, Presentation::Fader},
+        {19, TargetKind::Port, 21, ParameterKind::Source, ValueKind::Enum, Unit::None, 0, 1, 1, Presentation::Selector},
+        {20, TargetKind::Port, 22, ParameterKind::Source, ValueKind::Enum, Unit::None, 0, 1, 1, Presentation::Selector},
+        {21, TargetKind::Port, 59, ParameterKind::Source, ValueKind::Enum, Unit::None, 0, 1, 1, Presentation::Selector},
+        {22, TargetKind::Port, 59, ParameterKind::NominalLevel, ValueKind::Enum, Unit::None, 0, 1, 1, Presentation::Selector},
+        {23, TargetKind::Device, 1, ParameterKind::StereoLink, ValueKind::Boolean, Unit::None, 0, 1, 1, Presentation::Toggle},
+        {24, TargetKind::Device, 1, ParameterKind::HardwareControlTarget, ValueKind::Enum, Unit::None, 0, 2, 1, Presentation::Selector},
+        // The front-panel mute state is global. These two independent policy
+        // selectors state whether that state mutes the Main and Headphone
+        // stereo pairs, respectively; they are not per-channel gain mutes.
+        {25, TargetKind::Port, 61, ParameterKind::MuteFollow, ValueKind::Enum, Unit::None, 0, 2, 1, Presentation::Selector},
+        {26, TargetKind::Port, 63, ParameterKind::MuteFollow, ValueKind::Enum, Unit::None, 0, 2, 1, Presentation::Selector},
     };
     constexpr AudioSemanticMeter kMeters[] = {
-        {1, 23, MeterKind::Level, MeterUnit::Native, 0, std::numeric_limits<int32_t>::max()},
-        {2, 24, MeterKind::Level, MeterUnit::Native, 0, std::numeric_limits<int32_t>::max()},
-        {3, 43, MeterKind::Level, MeterUnit::Native, 0, std::numeric_limits<int32_t>::max()},
-        {4, 44, MeterKind::Level, MeterUnit::Native, 0, std::numeric_limits<int32_t>::max()},
-        {5, 45, MeterKind::Peak, MeterUnit::Native, 0, std::numeric_limits<int32_t>::max()},
-        {6, 46, MeterKind::Peak, MeterUnit::Native, 0, std::numeric_limits<int32_t>::max()},
+        // The device's 32-bit fixed-point words are reduced by the daemon to
+        // their high 15-bit magnitude before presentation.
+        {1, 23, MeterKind::Level, MeterUnit::Native, 0, 0x3fff},
+        {2, 24, MeterKind::Level, MeterUnit::Native, 0, 0x3fff},
+        {3, 43, MeterKind::Level, MeterUnit::Native, 0, 0x3fff},
+        {4, 44, MeterKind::Level, MeterUnit::Native, 0, 0x3fff},
+        {5, 45, MeterKind::Peak, MeterUnit::Native, 0, 0x3fff},
+        {6, 46, MeterKind::Peak, MeterUnit::Native, 0, 0x3fff},
     };
 
     static_assert(std::size(kNodes) <= kMaxAudioSemanticNodes);

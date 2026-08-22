@@ -56,8 +56,10 @@ enum class OutputNominalLevel : uint8_t {
 
 enum class OutputMuteMode : uint8_t {
     Never   = 0,
-    Normal  = 1, // Mute on push, unmute on release
-    Swapped = 2, // Mute on release, unmute on push
+    // The physical pair follows the asserted global/user mute state.
+    Normal  = 1,
+    // The physical pair follows the released global/user mute state.
+    Swapped = 2,
 };
 
 struct OutputParams {

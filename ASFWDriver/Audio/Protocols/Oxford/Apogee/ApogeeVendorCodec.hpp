@@ -4,8 +4,9 @@
 // ApogeeVendorCodec.hpp - Apogee's vendor command table and operand encoding.
 //
 // The generic VENDOR-DEPENDENT prefix lives in Oxford/OxfwVendorDependent.hpp.
-// What is here is Apogee's alone: the 21 command codes, the two argument bytes
-// it always emits after the code, and the per-code argument shape.
+// What is here is Apogee's active Duet command subset, the two argument bytes
+// it always emits after the code, and the per-code argument shape. The complete
+// recovered Duet catalogue is kept separately in ApogeeDuetVendorCommands.hpp.
 //
 // Reference: snd-firewire-ctl-services protocols/oxfw/src/apogee.rs (read as a
 // behavioural source; no code copied).
@@ -19,6 +20,7 @@
 #include <vector>
 
 #include "ApogeeCaps.hpp"
+#include "ApogeeDuetVendorCommands.hpp"
 #include "../OxfwVendorDependent.hpp"
 
 namespace ASFW::Audio::Oxford::Apogee {
@@ -52,6 +54,7 @@ struct ApogeeVendorCommand {
         OutIsConsumerLevel = 0x04,
         InGain = 0x05,
         HwState = 0x07,
+        MicsGrouped = 0x08,
         OutMute = 0x09,
         InputSourceIsPhone = 0x0C,
         MixerSrc = 0x10,
@@ -59,12 +62,17 @@ struct ApogeeVendorCommand {
         DisplayOverholdTwoSec = 0x13,
         DisplayClear = 0x14,
         OutVolume = 0x15,
-        MuteForLineOut = 0x16,
-        MuteForHpOut = 0x17,
-        UnmuteForLineOut = 0x18,
-        UnmuteForHpOut = 0x19,
+        // Names taken from the original Duet daemon.  These flags describe
+        // whether the physical pair is muted while the global mute state is
+        // respectively released or asserted.
+        UnmuteMutesLineOut = 0x16,
+        UnmuteMutesHpOut = 0x17,
+        MuteMutesLineOut = 0x18,
+        MuteMutesHpOut = 0x19,
         DisplayIsInput = 0x1B,
-        InClickless = 0x1E,
+        // Retained operational name. Daemon recovery calls this byte
+        // LimitedGainRange; its physical behaviour still needs validation.
+        InClickless = static_cast<uint8_t>(ApogeeDuetVendorOpcode::LimitedGainRange),
         DisplayFollowToKnob = 0x22,
     };
 

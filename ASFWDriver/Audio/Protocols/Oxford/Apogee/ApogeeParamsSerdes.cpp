@@ -14,33 +14,33 @@ namespace {
 
 /// The Duet spends two independent booleans on what is really a tri-state, and
 /// both-set is the same "never mute" the device reports when neither applies.
-[[nodiscard]] OutputMuteMode ParseMuteMode(bool mute, bool unmute) noexcept {
-    if (mute && unmute) {
+[[nodiscard]] OutputMuteMode ParseMuteMode(bool unmuteMutes, bool muteMutes) noexcept {
+    if (unmuteMutes && muteMutes) {
         return OutputMuteMode::Never;
     }
-    if (mute && !unmute) {
+    if (unmuteMutes && !muteMutes) {
         return OutputMuteMode::Swapped;
     }
-    if (!mute && unmute) {
+    if (!unmuteMutes && muteMutes) {
         return OutputMuteMode::Normal;
     }
     return OutputMuteMode::Never;
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-void BuildMuteMode(OutputMuteMode mode, bool& mute, bool& unmute) noexcept {
+void BuildMuteMode(OutputMuteMode mode, bool& unmuteMutes, bool& muteMutes) noexcept {
     switch (mode) {
         case OutputMuteMode::Never:
-            mute = true;
-            unmute = true;
+            unmuteMutes = true;
+            muteMutes = true;
             break;
         case OutputMuteMode::Normal:
-            mute = false;
-            unmute = true;
+            unmuteMutes = false;
+            muteMutes = true;
             break;
         case OutputMuteMode::Swapped:
-            mute = true;
-            unmute = false;
+            unmuteMutes = true;
+            muteMutes = false;
             break;
     }
 }
@@ -100,21 +100,21 @@ std::vector<Command> BuildOutputParamsQuery() {
         Command::OutVolume(0),
         Command::Bool(Command::Code::OutSourceIsMixer, false),
         Command::Bool(Command::Code::OutIsConsumerLevel, false),
-        Command::Bool(Command::Code::MuteForLineOut, false),
-        Command::Bool(Command::Code::UnmuteForLineOut, false),
-        Command::Bool(Command::Code::MuteForHpOut, false),
-        Command::Bool(Command::Code::UnmuteForHpOut, false),
+        Command::Bool(Command::Code::UnmuteMutesLineOut, false),
+        Command::Bool(Command::Code::MuteMutesLineOut, false),
+        Command::Bool(Command::Code::UnmuteMutesHpOut, false),
+        Command::Bool(Command::Code::MuteMutesHpOut, false),
     };
 }
 
 std::vector<Command> BuildOutputParamsControl(const OutputParams& params) {
-    bool lineMute = false;
-    bool lineUnmute = false;
-    bool hpMute = false;
-    bool hpUnmute = false;
+    bool lineUnmuteMutes = false;
+    bool lineMuteMutes = false;
+    bool hpUnmuteMutes = false;
+    bool hpMuteMutes = false;
 
-    BuildMuteMode(params.lineMuteMode, lineMute, lineUnmute);
-    BuildMuteMode(params.hpMuteMode, hpMute, hpUnmute);
+    BuildMuteMode(params.lineMuteMode, lineUnmuteMutes, lineMuteMutes);
+    BuildMuteMode(params.hpMuteMode, hpUnmuteMutes, hpMuteMutes);
 
     return {
         Command::Bool(Command::Code::OutMute, params.mute),
@@ -123,20 +123,20 @@ std::vector<Command> BuildOutputParamsControl(const OutputParams& params) {
                       params.source == OutputSource::MixerOutputPair0),
         Command::Bool(Command::Code::OutIsConsumerLevel,
                       params.nominalLevel == OutputNominalLevel::Consumer),
-        Command::Bool(Command::Code::MuteForLineOut, lineMute),
-        Command::Bool(Command::Code::UnmuteForLineOut, lineUnmute),
-        Command::Bool(Command::Code::MuteForHpOut, hpMute),
-        Command::Bool(Command::Code::UnmuteForHpOut, hpUnmute),
+        Command::Bool(Command::Code::UnmuteMutesLineOut, lineUnmuteMutes),
+        Command::Bool(Command::Code::MuteMutesLineOut, lineMuteMutes),
+        Command::Bool(Command::Code::UnmuteMutesHpOut, hpUnmuteMutes),
+        Command::Bool(Command::Code::MuteMutesHpOut, hpMuteMutes),
     };
 }
 
 OutputParams ParseOutputParams(const std::vector<Command>& commands) {
     OutputParams params{};
 
-    bool lineMute = false;
-    bool lineUnmute = false;
-    bool hpMute = false;
-    bool hpUnmute = false;
+    bool lineUnmuteMutes = false;
+    bool lineMuteMutes = false;
+    bool hpUnmuteMutes = false;
+    bool hpMuteMutes = false;
 
     for (const auto& command : commands) {
         switch (command.code) {
@@ -154,25 +154,25 @@ OutputParams ParseOutputParams(const std::vector<Command>& commands) {
                 params.nominalLevel = command.boolValue ? OutputNominalLevel::Consumer
                                                         : OutputNominalLevel::Instrument;
                 break;
-            case Command::Code::MuteForLineOut:
-                lineMute = command.boolValue;
+            case Command::Code::UnmuteMutesLineOut:
+                lineUnmuteMutes = command.boolValue;
                 break;
-            case Command::Code::UnmuteForLineOut:
-                lineUnmute = command.boolValue;
+            case Command::Code::MuteMutesLineOut:
+                lineMuteMutes = command.boolValue;
                 break;
-            case Command::Code::MuteForHpOut:
-                hpMute = command.boolValue;
+            case Command::Code::UnmuteMutesHpOut:
+                hpUnmuteMutes = command.boolValue;
                 break;
-            case Command::Code::UnmuteForHpOut:
-                hpUnmute = command.boolValue;
+            case Command::Code::MuteMutesHpOut:
+                hpMuteMutes = command.boolValue;
                 break;
             default:
                 break;
         }
     }
 
-    params.lineMuteMode = ParseMuteMode(lineMute, lineUnmute);
-    params.hpMuteMode = ParseMuteMode(hpMute, hpUnmute);
+    params.lineMuteMode = ParseMuteMode(lineUnmuteMutes, lineMuteMutes);
+    params.hpMuteMode = ParseMuteMode(hpUnmuteMutes, hpMuteMutes);
     return params;
 }
 
@@ -194,13 +194,12 @@ std::vector<Command> BuildInputParamsQuery() {
         Command::IndexedBool(Command::Code::MicPhantom, 1, false),
         Command::IndexedBool(Command::Code::InputSourceIsPhone, 0, false),
         Command::IndexedBool(Command::Code::InputSourceIsPhone, 1, false),
-        Command::Bool(Command::Code::InClickless, false),
     };
 }
 
 std::vector<Command> BuildInputParamsControl(const InputParams& params) {
     std::vector<Command> commands;
-    commands.reserve(13);
+    commands.reserve(12);
 
     for (size_t i = 0; i < params.gains.size(); ++i) {
         commands.push_back(Command::InGain(static_cast<uint8_t>(i), params.gains[i]));
@@ -220,8 +219,6 @@ std::vector<Command> BuildInputParamsControl(const InputParams& params) {
                                                 static_cast<uint8_t>(i),
                                                 params.sources[i] == InputSource::Phone));
     }
-
-    commands.push_back(Command::Bool(Command::Code::InClickless, params.clickless));
 
     for (size_t i = 0; i < params.xlrNominalLevels.size(); ++i) {
         commands.push_back(Command::IndexedBool(
@@ -276,9 +273,6 @@ InputParams ParseInputParams(const std::vector<Command>& commands) {
                     params.sources[command.index] = command.boolValue ? InputSource::Phone
                                                                       : InputSource::Xlr;
                 }
-                break;
-            case Command::Code::InClickless:
-                params.clickless = command.boolValue;
                 break;
             default:
                 break;

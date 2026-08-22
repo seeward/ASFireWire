@@ -1055,15 +1055,14 @@ kern_return_t ASFWAudioDevice::RequestControlConfiguration(
         return kIOReturnUnsupported;
     }
     auto& driverIvars = *ivars->driverIvars;
-    const auto input = OpticalModeFromWire(opticalInput);
-    const auto output = OpticalModeFromWire(opticalOutput);
-    if (!input || !output || sampleRateHz == 0 || !driverIvars.device.audioNub) {
+    if (opticalInput > 2U || opticalOutput > 2U || sampleRateHz == 0 ||
+        !driverIvars.device.audioNub) {
         return kIOReturnBadArgument;
     }
     const ASFW::Configuration::DeviceConfiguration requested{
         .sampleRate = sampleRateHz,
-        .opticalInput = input,
-        .opticalOutput = output,
+        .opticalInput = OpticalModeFromWire(opticalInput),
+        .opticalOutput = OpticalModeFromWire(opticalOutput),
     };
     if (!driverIvars.resolvedProfile.Value().ConfigurationFor(requested)) {
         return kIOReturnUnsupported;

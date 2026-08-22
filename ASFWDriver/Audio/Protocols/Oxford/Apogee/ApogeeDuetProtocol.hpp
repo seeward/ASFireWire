@@ -27,7 +27,9 @@
 #include "../OxfordCsr.hpp"
 #include "../../IDeviceProtocol.hpp"
 #include "../../Duplex/IDuplexDeviceControl.hpp"
+#include "../../Configuration/IAudioConfigurationControl.hpp"
 #include "../../../Shared/Controls/IAudioControlSurface.hpp"
+#include "../../../Shared/Metering/IAudioMetering.hpp"
 #include "../../../../Protocols/Ports/FireWireBusPort.hpp"
 #include "../../../../Scheduling/ITimerScheduler.hpp"
 #include <DriverKit/IOReturn.h>
@@ -54,7 +56,9 @@ namespace ASFW::Audio::Oxford::Apogee {
 
 class ApogeeDuetProtocol final : public IDeviceProtocol,
                                  public IAudioSemanticTopology,
-                                 public IAudioControlSurface {
+                                 public IAudioControlSurface,
+                                 public IAudioMetering,
+                                 public IAudioConfigurationControl {
 public:
     // The command table and operand encoding moved to ApogeeVendorCodec (FW-126);
     // this alias keeps every existing ApogeeDuetProtocol::VendorCommand use valid.
@@ -105,6 +109,21 @@ public:
         AudioControlSurfaceSnapshot& outSnapshot) const noexcept override;
     void ApplyAudioControlValue(uint32_t controlId, int32_t value,
                                 IAudioControlSurface::ApplyCallback callback) override;
+    IAudioMetering* AsAudioMetering() noexcept override { return this; }
+    const IAudioMetering* AsAudioMetering() const noexcept override { return this; }
+    [[nodiscard]] bool CopyAudioMeterSnapshot(
+        AudioMeterSnapshot& outSnapshot) const noexcept override;
+    [[nodiscard]] IOReturn SetAudioMeteringEnabled(bool enabled) noexcept override;
+    IAudioConfigurationControl* AsAudioConfigurationControl() noexcept override { return this; }
+    const IAudioConfigurationControl* AsAudioConfigurationControl() const noexcept override {
+        return this;
+    }
+    [[nodiscard]] bool SupportsConfiguration(
+        const Configuration::DeviceConfiguration& configuration) const noexcept override;
+    void ApplyConfiguration(const Configuration::DeviceConfiguration& configuration,
+                            IAudioConfigurationControl::ApplyCallback callback) override;
+    [[nodiscard]] AudioConfigurationApplyResult
+    CurrentConfiguration() const noexcept override;
 
     // IDeviceProtocol members the duplex controller answers. Kept here because
     // callers hold an IDeviceProtocol, not an IDuplexDeviceControl.
@@ -112,9 +131,10 @@ public:
         return duplex_.GetRuntimeAudioStreamCaps(outCaps);
     }
     bool GetSupportedSampleRates(std::vector<uint32_t>& outRates) const override {
-        // These are exactly the rates accepted by ApogeeDuetDuplex's existing
-        // AV/C signal-format operation policy.
-        outRates = {32000U, 44100U, 48000U};
+        // These are exactly the rate formations exposed by the Duet console.
+        // Do not advertise 32 kHz: configuration rejects it and Core Audio
+        // must never select a rate that the semantic control path cannot keep.
+        outRates = {44100U, 48000U};
         return true;
     }
     [[nodiscard]] IOReturn StopDuplex() override { return duplex_.StopDuplex(); }
@@ -149,6 +169,11 @@ public:
     // Input Parameters
     void GetInputParams(ResultCallback<InputParams> callback);
     void SetInputParams(const InputParams& params, VoidCallback callback);
+
+    // Hardware-owned input stereo link. This is a Duet global boolean, not a
+    // host-side linked-fader preference.
+    void GetMicsGrouped(ResultCallback<bool> callback);
+    void SetMicsGrouped(bool enabled, VoidCallback callback);
 
     // Mixer Parameters
     void GetMixerParams(ResultCallback<MixerParams> callback);
@@ -191,12 +216,20 @@ private:
     /// Route-liveness policy handed to the chip-common CSR reads.
     [[nodiscard]] Oxford::RouteProvider MakeRouteProvider() const;
     void RefreshSemanticControlState() noexcept;
+    void ScheduleMeterRead(uint64_t delayNs, uint64_t epoch) noexcept;
+    void PollMeter(uint64_t epoch) noexcept;
+    void CompleteMeterRead(uint64_t epoch, IOReturn status,
+                           const InputMeterState& input,
+                           const MixerMeterState& mixer) noexcept;
+    void ApplyPolledKnobState(uint64_t epoch, const KnobState& knob) noexcept;
 
     // Declaration order matters: duplex_ binds a reference to runtime_.
     DuetRuntime runtime_;
     ApogeeDuetDuplex duplex_;
     struct SemanticControlState;
+    struct MeteringState;
     std::shared_ptr<SemanticControlState> semanticControlState_;
+    std::shared_ptr<MeteringState> meteringState_;
 };
 
 } // namespace ASFW::Audio::Oxford::Apogee
