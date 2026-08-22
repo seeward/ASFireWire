@@ -10,6 +10,9 @@ struct AudioControlSurfaceValue: Equatable, Sendable {
 /// checked; it is never a cross-family UI identifier.
 enum AudioControlSurfaceKind: UInt32, Sendable {
     case mAudioSpecialMixer = 0x4D41_3134 // "MA14"
+    /// Values are parameter IDs defined by the driver's semantic topology
+    /// snapshot; this enum deliberately carries no vendor control layout.
+    case apogeeDuet = 0x4455_4554 // "DUET"
 }
 
 struct AudioControlSurfaceSnapshot: Equatable, Sendable {
@@ -28,6 +31,7 @@ struct AudioControlSurfaceSnapshot: Equatable, Sendable {
     }
 
     var isMAudioSpecialMixer: Bool { kind == .mAudioSpecialMixer }
+    var isSemanticTopologyBacked: Bool { kind == .apogeeDuet }
 }
 
 /// A family of like-typed controls in the 1814's parameter window.

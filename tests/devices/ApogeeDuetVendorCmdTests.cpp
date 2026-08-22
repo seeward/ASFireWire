@@ -456,6 +456,49 @@ TEST(ApogeeDuetVendorCmd, BuildDisplayParamsQuery) {
     EXPECT_EQ(cmds.size(), 3u);  // isInput, followKnob, overhold
 }
 
+TEST(ApogeeDuetSemanticControlSurface, PublishesConfirmedSemanticValuesAndCommitsWrites) {
+    AvcTestRig rig;
+    ASSERT_TRUE(rig.IsReady());
+    rig.Target().SetDeviceModel([](std::span<const uint8_t> command) -> std::optional<AvcReply> {
+        // Status requests omit their value field; a real target appends it.
+        // Return an accepted vendor frame with zero-valued one- and two-byte
+        // fields so every parser in the refresh transaction is exercised.
+        std::vector<uint8_t> response(command.begin(), command.end());
+        response.resize(16U, 0U);
+        response[0] = static_cast<uint8_t>(ASFW::Protocols::AVC::AVCResponseType::kAccepted);
+        return AvcReply::RawBytes(std::move(response));
+    });
+    ApogeeDuetProtocol protocol(rig.Bus(), rig.Bus(), rig.Route(), &rig.Routes(), rig.Transport(),
+                                nullptr, nullptr, 0U, &rig.Timers());
+
+    // Three native parameter groups are fetched asynchronously.  The surface
+    // becomes visible only after all of them have completed against one epoch.
+    ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+    EXPECT_FALSE([&] {
+        ASFW::Audio::AudioControlSurfaceSnapshot snapshot{};
+        return protocol.CopyAudioControlSurfaceSnapshot(snapshot);
+    }());
+    rig.Drain();
+
+    ASFW::Audio::AudioControlSurfaceSnapshot before{};
+    ASSERT_TRUE(protocol.CopyAudioControlSurfaceSnapshot(before));
+    EXPECT_EQ(before.kind, ASFW::Audio::AudioControlSurfaceKind::ApogeeDuet);
+    EXPECT_EQ(before.valueCount, 18U);
+    EXPECT_EQ(before.values[8].id, 9U);       // semantic Main Out level
+    EXPECT_EQ(before.values[8].value, -64);   // native raw zero is -64 dB
+
+    IOReturn completion = kIOReturnError;
+    protocol.ApplyAudioControlValue(9U, -12, [&](IOReturn status) { completion = status; });
+    rig.Drain();
+    EXPECT_EQ(completion, kIOReturnSuccess);
+
+    ASFW::Audio::AudioControlSurfaceSnapshot after{};
+    ASSERT_TRUE(protocol.CopyAudioControlSurfaceSnapshot(after));
+    EXPECT_EQ(after.stateRevision, before.stateRevision + 1U);
+    EXPECT_EQ(after.values[8].id, 9U);
+    EXPECT_EQ(after.values[8].value, -12);
+}
+
 
 TEST(ApogeeDuetDuplexAdapter, Applies48kToInputThenOutputUnitPlugsOnlyOnce) {
     AvcTestRig rig;

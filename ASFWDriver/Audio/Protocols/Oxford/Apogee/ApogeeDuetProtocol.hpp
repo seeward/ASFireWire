@@ -27,6 +27,7 @@
 #include "../OxfordCsr.hpp"
 #include "../../IDeviceProtocol.hpp"
 #include "../../Duplex/IDuplexDeviceControl.hpp"
+#include "../../../Shared/Controls/IAudioControlSurface.hpp"
 #include "../../../../Protocols/Ports/FireWireBusPort.hpp"
 #include "../../../../Scheduling/ITimerScheduler.hpp"
 #include <DriverKit/IOReturn.h>
@@ -34,6 +35,7 @@
 #include <functional>
 #include <cstdint>
 #include <span>
+#include <memory>
 
 namespace ASFW::Protocols::AVC {
     class FCPTransport;
@@ -51,7 +53,8 @@ struct CMPDevice;
 namespace ASFW::Audio::Oxford::Apogee {
 
 class ApogeeDuetProtocol final : public IDeviceProtocol,
-                                 public IAudioSemanticTopology {
+                                 public IAudioSemanticTopology,
+                                 public IAudioControlSurface {
 public:
     // The command table and operand encoding moved to ApogeeVendorCodec (FW-126);
     // this alias keeps every existing ApogeeDuetProtocol::VendorCommand use valid.
@@ -78,7 +81,7 @@ public:
                        CMP::CMPClient* cmpClient = nullptr,
                        uint32_t formatSettleDelayMs = 100U,
                        Scheduling::ITimerScheduler* timerScheduler = nullptr);
-    ~ApogeeDuetProtocol() override = default;
+    ~ApogeeDuetProtocol() override;
 
     // IDeviceProtocol implementation
     IOReturn Initialize() override;
@@ -96,6 +99,12 @@ public:
         AudioSemanticTopologySnapshot& outSnapshot) const noexcept override {
         return BuildApogeeDuetSemanticTopology(outSnapshot);
     }
+    IAudioControlSurface* AsAudioControlSurface() noexcept override { return this; }
+    const IAudioControlSurface* AsAudioControlSurface() const noexcept override { return this; }
+    [[nodiscard]] bool CopyAudioControlSurfaceSnapshot(
+        AudioControlSurfaceSnapshot& outSnapshot) const noexcept override;
+    void ApplyAudioControlValue(uint32_t controlId, int32_t value,
+                                IAudioControlSurface::ApplyCallback callback) override;
 
     // IDeviceProtocol members the duplex controller answers. Kept here because
     // callers hold an IDeviceProtocol, not an IDuplexDeviceControl.
@@ -116,9 +125,7 @@ public:
         return runtime_.fcpTransport;
     }
     void UpdateRuntimeContext(const Discovery::DeviceRouteToken& route,
-                              Protocols::AVC::FCPTransport* transport) override {
-        duplex_.UpdateRuntimeContext(route, transport);
-    }
+                              Protocols::AVC::FCPTransport* transport) override;
 
     /// Discovery applies the 48 kHz formation before publishing, holding the
     /// concrete type rather than the duplex seam.
@@ -183,10 +190,13 @@ private:
 
     /// Route-liveness policy handed to the chip-common CSR reads.
     [[nodiscard]] Oxford::RouteProvider MakeRouteProvider() const;
+    void RefreshSemanticControlState() noexcept;
 
     // Declaration order matters: duplex_ binds a reference to runtime_.
     DuetRuntime runtime_;
     ApogeeDuetDuplex duplex_;
+    struct SemanticControlState;
+    std::shared_ptr<SemanticControlState> semanticControlState_;
 };
 
 } // namespace ASFW::Audio::Oxford::Apogee

@@ -18,6 +18,9 @@ namespace ASFW::Audio {
 enum class AudioControlSurfaceKind : uint32_t {
     None = 0,
     MAudio1814Mixer = 0x4D41'3134, // "MA14"
+    /// Values are semantic parameter IDs; their definitions come from the
+    /// accompanying IAudioSemanticTopology snapshot, never from this enum.
+    ApogeeDuet = 0x4455'4554, // "DUET"
 };
 
 struct AudioControlValue final {
