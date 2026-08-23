@@ -305,6 +305,13 @@ add_protocols_test(MAudioSpecialParametersTests
     MAudioSpecialParametersTests.cpp
 )
 
+# The DriverKit-facing bounded topology ABI has the same structural guarantees
+# as the lab model, without pulling the lab's heap-owning model into production.
+add_protocols_test(AudioSemanticTopologyValidationTests
+    AudioSemanticTopologyValidationTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/Oxford/Apogee/ApogeeDuetSemanticTopology.cpp"
+)
+
 add_protocols_test(MAudioSpecialMeterTests
     MAudioSpecialMeterTests.cpp
 )

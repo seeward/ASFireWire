@@ -436,6 +436,11 @@ IOReturn AudioCoordinator::CopyAudioSemanticTopology(
     }
     if (endpoint->CopyTopologyRevision() != topologyRevision) return kIOReturnBusy;
     outSnapshot.topologyRevision = topologyRevision;
+    // A topology producer is an internal implementation detail; the UserClient
+    // boundary is not. Do not publish a malformed graph merely because the
+    // producer returned true. This mirrors the lab's validate-before-commit
+    // rule without making the DriverKit path allocate diagnostics.
+    if (!ValidateAudioSemanticTopology(outSnapshot)) return kIOReturnBadArgument;
     return kIOReturnSuccess;
 }
 
