@@ -8,9 +8,12 @@
 
 #include "SaffireproCommon.hpp"
 #include "SPro24DspTypes.hpp"
+#include "SPro24DspSemanticMatrix.hpp"
 #include "../Core/DICETypes.hpp"
 #include "../TCAT/DICETcatProtocol.hpp"
 #include "../../IDeviceProtocol.hpp"
+#include "../../../Shared/Topology/IAudioSemanticMatrix.hpp"
+#include <DriverKit/IOLib.h>
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -43,7 +46,8 @@ constexpr uint32_t kSPro24DspModelId = 0x000008;
 /// 
 /// This class provides async-callback-based access to device parameters.
 /// All operations are asynchronous since they involve FireWire transactions.
-class SPro24DspProtocol : public Audio::IDeviceProtocol {
+class SPro24DspProtocol : public Audio::IDeviceProtocol,
+                          public Audio::IAudioSemanticMatrix {
 public:
     /// Callback types for async operations
     using InitCallback = std::function<void(IOReturn)>;
@@ -60,6 +64,7 @@ public:
                       const Discovery::DeviceRouteToken& route,
                       ::ASFW::IRM::IRMClient* irmClient = nullptr,
                       ::ASFW::Scheduling::ITimerScheduler* timerScheduler = nullptr);
+    ~SPro24DspProtocol() override;
     
     /// Initialize protocol (generic DICE init is delegated to the TCAT core)
     IOReturn Initialize() override;
@@ -75,6 +80,12 @@ public:
     const Audio::IDuplexDeviceControl* AsDuplexDeviceControl() const noexcept override {
         return tcat_.AsDuplexDeviceControl();
     }
+    Audio::IAudioSemanticMatrix* AsAudioSemanticMatrix() noexcept override { return this; }
+    const Audio::IAudioSemanticMatrix* AsAudioSemanticMatrix() const noexcept override {
+        return this;
+    }
+    [[nodiscard]] bool CopyAudioSemanticMatrix(
+        Audio::AudioSemanticMatrixSnapshot& outSnapshot) const noexcept override;
     
     /// Device has DSP effects
     bool HasDsp() const override { return true; }
@@ -165,6 +176,11 @@ private:
     uint32_t routerSectionBase_{0};
     uint32_t currentConfigBase_{0};
     bool extensionsLoaded_{false};
+    IOLock* semanticMatrixLock_{nullptr};
+    DiceMixerCoefficients semanticMixerCoefficients_{};
+    DiceRouterEntries semanticRouterEntries_{};
+    uint32_t semanticMatrixRevision_{0};
+    bool semanticMatrixReady_{false};
     
     /// Send software notice to commit changes
     void SendSwNotice(SwNotice notice, VoidCallback callback);
@@ -175,6 +191,7 @@ private:
     void HandleExtensionSectionsRead(IOReturn status,
                                      ExtensionSections sections,
                                      InitCallback callback);
+    void PrimeSemanticMatrix() noexcept;
     
     /// Read from application section
     void ReadAppSection(uint32_t offset, size_t size, DICEReadCallback callback);

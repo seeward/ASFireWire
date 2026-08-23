@@ -513,12 +513,22 @@ TEST(DICETcatProtocolTests, ReadDuplexHealthReturnsCurrentGlobalLockState) {
     EXPECT_EQ(bus.globalReadCount, 1);
 }
 
-TEST(SPro24DspProtocolTests, VendorCallLoadsExtensionsLazily) {
+TEST(SPro24DspProtocolTests, InitializationPrimesSemanticMatrixWithoutDuplicatingVendorReads) {
     CountingFireWireBus bus;
     RouteState routeState;
     SPro24DspProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
     ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
-    EXPECT_EQ(bus.extensionReadCount, 0);
+    EXPECT_EQ(bus.extensionReadCount, 1);
+    EXPECT_EQ(bus.extensionCapsReadCount, 1);
+    EXPECT_EQ(bus.routerHeaderReadCount, 1);
+    EXPECT_EQ(bus.routerEntriesReadCount, 1);
+    EXPECT_EQ(bus.mixerReadCount, 3);
+
+    ASFW::Audio::AudioSemanticMatrixSnapshot matrix{};
+    ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(matrix));
+    EXPECT_EQ(matrix.inputCount, 18);
+    EXPECT_EQ(matrix.outputCount, 16);
+    EXPECT_EQ(matrix.Coefficient(0, 0), 1);
 
     std::optional<IOReturn> callbackStatus;
     protocol.GetEffectParams([&](IOReturn status, EffectGeneralParams /*params*/) {

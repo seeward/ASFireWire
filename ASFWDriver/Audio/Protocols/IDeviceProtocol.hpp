@@ -29,6 +29,7 @@ class IAudioControlSurface;
 class IAudioMetering;
 class IAudioSemanticTopology;
 class IAudioSemanticConsoleLayout;
+class IAudioSemanticMatrix;
 }
 
 namespace ASFW::Audio {
@@ -184,6 +185,14 @@ public:
     }
 
     virtual const IAudioSemanticConsoleLayout* AsAudioSemanticConsoleLayout() const noexcept {
+        return nullptr;
+    }
+
+    /// Optional semantic hardware-mixer matrix.  This is a dedicated snapshot
+    /// because a dense matrix is neither an immutable graph nor a small scalar
+    /// control surface.
+    virtual IAudioSemanticMatrix* AsAudioSemanticMatrix() noexcept { return nullptr; }
+    virtual const IAudioSemanticMatrix* AsAudioSemanticMatrix() const noexcept {
         return nullptr;
     }
 

@@ -312,6 +312,11 @@ add_protocols_test(AudioSemanticTopologyValidationTests
     "${ASFW_DRIVER_DIR}/Audio/Protocols/Oxford/Apogee/ApogeeDuetSemanticTopology.cpp"
 )
 
+add_protocols_test(AudioSemanticMatrixTests
+    AudioSemanticMatrixTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro24DspSemanticMatrix.cpp"
+)
+
 add_protocols_test(MAudioSpecialConsoleLayoutTests
     MAudioSpecialConsoleLayoutTests.cpp
     "${ASFW_DRIVER_DIR}/Audio/Protocols/BeBoB/MAudioSpecialConsoleLayout.cpp"

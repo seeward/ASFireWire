@@ -64,6 +64,7 @@ add_device_test(DICETcatProtocolTests
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICEDuplexBringupController.cpp"
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/TCAT/DICETcatProtocol.cpp"
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro24DspProtocol.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro24DspSemanticMatrix.cpp"
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro24DspTypes.cpp"
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SaffireproCommon.cpp"
     "${ASFW_DRIVER_DIR}/Discovery/DeviceRegistry.cpp"

@@ -33,9 +33,17 @@ SPro24DspProtocol::SPro24DspProtocol(Protocols::Ports::FireWireBusOps& busOps,
                                      Scheduling::ITimerScheduler* timerScheduler)
     : tcat_(busOps, busInfo, routeRegistry, route, irmClient, timerScheduler)
 {
+    semanticMatrixLock_ = IOLockAlloc();
     ASFW_LOG(DICE, "SPro24DspProtocol created for instance=%llu node=0x%04x",
              route.deviceInstanceId.value,
              route.nodeId);
+}
+
+SPro24DspProtocol::~SPro24DspProtocol() {
+    if (semanticMatrixLock_) {
+        IOLockFree(semanticMatrixLock_);
+        semanticMatrixLock_ = nullptr;
+    }
 }
 
 bool SPro24DspProtocol::GetRuntimeAudioStreamCaps(AudioStreamRuntimeCaps& outCaps) const {
@@ -53,7 +61,21 @@ IOReturn SPro24DspProtocol::Initialize() {
 
 void SPro24DspProtocol::InitializeAsync(InitCallback callback) {
     ASFW_LOG(DICE, "SPro24DspProtocol::InitializeAsync defers generic DICE discovery to TCAT runtime");
-    callback(tcat_.Initialize());
+    const IOReturn status = tcat_.Initialize();
+    callback(status);
+    if (status == kIOReturnSuccess) PrimeSemanticMatrix();
+}
+
+bool SPro24DspProtocol::CopyAudioSemanticMatrix(
+    Audio::AudioSemanticMatrixSnapshot& outSnapshot) const noexcept {
+    outSnapshot = {};
+    if (!semanticMatrixLock_) return false;
+    IOLockLock(semanticMatrixLock_);
+    const bool ready = semanticMatrixReady_ &&
+        BuildSPro24DspSemanticMatrix(semanticMixerCoefficients_, semanticRouterEntries_, outSnapshot);
+    if (ready) outSnapshot.stateRevision = semanticMatrixRevision_;
+    IOLockUnlock(semanticMatrixLock_);
+    return ready;
 }
 
 void SPro24DspProtocol::HandleExtensionSectionsRead(IOReturn status,
@@ -102,6 +124,44 @@ void SPro24DspProtocol::EnsureExtensionsLoaded(VoidCallback callback) {
         });
 }
 
+void SPro24DspProtocol::PrimeSemanticMatrix() noexcept {
+    EnsureExtensionsLoaded([this](IOReturn sectionStatus) {
+        if (sectionStatus != kIOReturnSuccess) {
+            ASFW_LOG(DICE, "SPro24 semantic matrix unavailable: extension sections 0x%x", sectionStatus);
+            return;
+        }
+        tcat_.Transaction().ReadExtensionCaps(extensionSections_,
+            [this](IOReturn capsStatus, DiceExtensionCaps caps) {
+                if (capsStatus != kIOReturnSuccess) {
+                    ASFW_LOG(DICE, "SPro24 semantic matrix unavailable: extension caps 0x%x", capsStatus);
+                    return;
+                }
+                tcat_.Transaction().ReadRouterEntries(extensionSections_, caps,
+                    [this, caps](IOReturn routeStatus, DiceRouterEntries routes) {
+                        if (routeStatus != kIOReturnSuccess) {
+                            ASFW_LOG(DICE, "SPro24 semantic matrix unavailable: router 0x%x", routeStatus);
+                            return;
+                        }
+                        tcat_.Transaction().ReadMixerCoefficients(extensionSections_, caps,
+                            [this, routes](IOReturn mixerStatus, DiceMixerCoefficients coefficients) {
+                                if (mixerStatus != kIOReturnSuccess || !semanticMatrixLock_) {
+                                    ASFW_LOG(DICE, "SPro24 semantic matrix unavailable: mixer 0x%x", mixerStatus);
+                                    return;
+                                }
+                                IOLockLock(semanticMatrixLock_);
+                                semanticRouterEntries_ = routes;
+                                semanticMixerCoefficients_ = coefficients;
+                                semanticMatrixReady_ = true;
+                                ++semanticMatrixRevision_;
+                                IOLockUnlock(semanticMatrixLock_);
+                                ASFW_LOG(DICE, "SPro24 semantic matrix cached: %ux%u routes=%u",
+                                         coefficients.inputCount, coefficients.outputCount, routes.count);
+                            });
+                    });
+            });
+    });
+}
+
 IOReturn SPro24DspProtocol::Shutdown() {
     ASFW_LOG(DICE, "SPro24DspProtocol::Shutdown");
     extensionSections_ = {};
@@ -110,6 +170,14 @@ IOReturn SPro24DspProtocol::Shutdown() {
     routerSectionBase_ = 0;
     currentConfigBase_ = 0;
     extensionsLoaded_ = false;
+    if (semanticMatrixLock_) {
+        IOLockLock(semanticMatrixLock_);
+        semanticMixerCoefficients_ = {};
+        semanticRouterEntries_ = {};
+        semanticMatrixReady_ = false;
+        ++semanticMatrixRevision_;
+        IOLockUnlock(semanticMatrixLock_);
+    }
     return tcat_.Shutdown();
 }
 

@@ -11,6 +11,7 @@
 #include "../Shared/Controls/IAudioControlSurface.hpp"
 #include "../Shared/Topology/IAudioSemanticTopology.hpp"
 #include "../Shared/Topology/IAudioSemanticConsoleLayout.hpp"
+#include "../Shared/Topology/IAudioSemanticMatrix.hpp"
 #include "../Shared/Metering/IAudioMetering.hpp"
 #include "../Shared/Configuration/DeviceConfigurationSnapshot.hpp"
 
@@ -96,6 +97,8 @@ public:
         EndpointId endpointId, AudioSemanticTopologySnapshot& outSnapshot) noexcept;
     [[nodiscard]] IOReturn CopyAudioSemanticConsoleLayout(
         EndpointId endpointId, AudioSemanticConsoleLayoutSnapshot& outSnapshot) noexcept;
+    [[nodiscard]] IOReturn CopyAudioSemanticMatrix(
+        EndpointId endpointId, AudioSemanticMatrixSnapshot& outSnapshot) noexcept;
     [[nodiscard]] IOReturn RequestAudioControlValue(
         EndpointId endpointId, uint32_t controlId, int32_t value) noexcept;
     /// Starts a bounded semantic control write and returns immediately. The
