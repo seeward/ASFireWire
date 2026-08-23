@@ -62,6 +62,9 @@ struct AudioSemanticMatrixSnapshot final {
     }
 };
 static_assert(sizeof(AudioSemanticMatrixSnapshot) == 1768);
+static_assert(offsetof(AudioSemanticMatrixSnapshot, inputs) == 36);
+static_assert(offsetof(AudioSemanticMatrixSnapshot, outputs) == 324);
+static_assert(offsetof(AudioSemanticMatrixSnapshot, coefficients) == 612);
 
 class IAudioSemanticMatrix {
 public:

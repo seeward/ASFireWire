@@ -293,6 +293,48 @@ extension ASFWDriverConnector {
         return AudioSemanticConsoleLayoutWireDecoder.decode(output)
     }
 
+    /// Reads one coherent, driver-owned hardware-mixer matrix. The call runs
+    /// off the main actor; callers can retry when the profile is still loading
+    /// its initial hardware snapshot.
+    func requestAudioSemanticMatrix(
+        endpointID: AudioEndpointID,
+        completion: @escaping (AudioSemanticMatrixSnapshot?) -> Void
+    ) {
+        connectionQueue.async { [weak self] in
+            guard let self else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            let matrix = self.getAudioSemanticMatrix(endpointID: endpointID)
+            DispatchQueue.main.async { completion(matrix) }
+        }
+    }
+
+    private func getAudioSemanticMatrix(
+        endpointID: AudioEndpointID
+    ) -> AudioSemanticMatrixSnapshot? {
+        guard connection != 0, endpointID.rawValue != 0 else { return nil }
+        var scalarInput = endpointID.rawValue
+        var output = Data(count: 1784)
+        var outputLength = output.count
+        let result = output.withUnsafeMutableBytes { outputBytes in
+            IOConnectCallMethod(
+                connection,
+                Method.getAudioSemanticMatrix.rawValue,
+                &scalarInput,
+                1,
+                nil,
+                0,
+                nil,
+                nil,
+                outputBytes.baseAddress,
+                &outputLength
+            )
+        }
+        guard result == KERN_SUCCESS, outputLength == output.count else { return nil }
+        return AudioSemanticMatrixWireDecoder.decode(output)
+    }
+
     func requestAudioControlValue(endpointID: AudioEndpointID,
                                   controlID: UInt32,
                                   value: Int32) -> kern_return_t {
@@ -693,6 +735,66 @@ private enum AudioSemanticConsoleLayoutWireDecoder {
               let enabledMask = data.u32(at: offset + 16), enabledMask != 0 else { return nil }
         return .init(id: id, sourceStripID: sourceStripID, destinationBus: destinationBus,
                      controlID: controlID, enabledMask: enabledMask)
+    }
+}
+
+/// Fixed ABI decoder for selector 1031. This is intentionally separate from
+/// control values: a matrix is a dense state snapshot with driver-declared
+/// axes, not an app-side reconstruction of DICE records.
+private enum AudioSemanticMatrixWireDecoder {
+    private static let wireSize = 1784
+    private static let matrixStart = 16
+    private static let axisSize = 12
+    private static let inputAxisOffset = matrixStart + 36
+    private static let outputAxisOffset = matrixStart + 324
+    private static let coefficientOffset = matrixStart + 612
+    private static let maximumInputs = 24
+    private static let maximumOutputs = 24
+
+    static func decode(_ data: Data) -> AudioSemanticMatrixSnapshot? {
+        guard data.count == wireSize,
+              let wireVersion = data.u32(at: 0), wireVersion == 1,
+              let endpoint = data.u64(at: 8), endpoint != 0,
+              let matrixVersion = data.u32(at: matrixStart), matrixVersion == 1,
+              let deviceKind = data.u32(at: matrixStart + 4), deviceKind != 0,
+              let topologyRevision = data.u64(at: matrixStart + 8), topologyRevision != 0,
+              let stateRevision = data.u32(at: matrixStart + 16),
+              let kind = data.u32(at: matrixStart + 20), kind == 1,
+              let inputCount = data.u32(at: matrixStart + 24), inputCount > 0,
+              inputCount <= maximumInputs,
+              let outputCount = data.u32(at: matrixStart + 28), outputCount > 0,
+              outputCount <= maximumOutputs,
+              let coefficientMaximum = data.u16(at: matrixStart + 32), coefficientMaximum > 0 else {
+            return nil
+        }
+        let inputs = (0..<Int(inputCount)).compactMap { axis(data, inputAxisOffset + $0 * axisSize) }
+        let outputs = (0..<Int(outputCount)).compactMap { axis(data, outputAxisOffset + $0 * axisSize) }
+        guard inputs.count == Int(inputCount), outputs.count == Int(outputCount),
+              Set(inputs.map(\.portID)).count == inputs.count,
+              Set(outputs.map(\.portID)).count == outputs.count else { return nil }
+
+        var coefficients: [UInt16] = []
+        coefficients.reserveCapacity(Int(inputCount * outputCount))
+        for output in 0..<Int(outputCount) {
+            for input in 0..<Int(inputCount) {
+                let offset = coefficientOffset + (output * maximumInputs + input) * MemoryLayout<UInt16>.size
+                guard let value = data.u16(at: offset), value <= coefficientMaximum else { return nil }
+                coefficients.append(value)
+            }
+        }
+        return .init(endpointID: AudioEndpointID(rawValue: endpoint), deviceKind: deviceKind,
+                     topologyRevision: topologyRevision, stateRevision: stateRevision,
+                     coefficientMaximum: coefficientMaximum, inputs: inputs,
+                     outputs: outputs, coefficients: coefficients)
+    }
+
+    private static func axis(_ data: Data, _ offset: Int) -> AudioSemanticMatrixSnapshot.Axis? {
+        guard let portID = data.u32(at: offset), portID != 0,
+              let signalRaw = data.u32(at: offset + 4),
+              let signalKind = AudioSemanticTopologySnapshot.SignalKind(rawValue: signalRaw),
+              signalKind != .none,
+              let signalIndex = data.u32(at: offset + 8), signalIndex != 0 else { return nil }
+        return .init(portID: portID, signalKind: signalKind, signalIndex: signalIndex)
     }
 }
 
