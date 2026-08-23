@@ -80,6 +80,7 @@ enum class AudioSemanticMatrixValidationError : uint32_t {
     InvalidKind,
     CountOutOfRange,
     MissingCoefficientDomain,
+    CoefficientOutOfRange,
     InvalidInput,
     DuplicateInputPort,
     InvalidOutput,
@@ -128,6 +129,13 @@ ValidateAudioSemanticMatrix(const AudioSemanticMatrixSnapshot& snapshot) noexcep
         for (uint32_t earlier = 0; earlier < output; ++earlier) {
             if (snapshot.outputs[earlier].portId == snapshot.outputs[output].portId) {
                 return std::unexpected(Error::DuplicateOutputPort);
+            }
+        }
+    }
+    for (uint32_t output = 0; output < snapshot.outputCount; ++output) {
+        for (uint32_t input = 0; input < snapshot.inputCount; ++input) {
+            if (snapshot.Coefficient(output, input) > snapshot.coefficientMaximum) {
+                return std::unexpected(Error::CoefficientOutOfRange);
             }
         }
     }

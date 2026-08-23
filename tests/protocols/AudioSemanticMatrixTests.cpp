@@ -39,6 +39,13 @@ TEST(AudioSemanticMatrixTests, RejectsInvalidOrAmbiguousAxes) {
     result = ValidateAudioSemanticMatrix(snapshot);
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), AudioSemanticMatrixValidationError::InvalidOutput);
+
+    snapshot = ValidMatrix();
+    snapshot.coefficientMaximum = 100;
+    snapshot.coefficients[0] = 101;
+    result = ValidateAudioSemanticMatrix(snapshot);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), AudioSemanticMatrixValidationError::CoefficientOutOfRange);
 }
 
 TEST(AudioSemanticMatrixTests, SPro24MapsRouterSourcesWithoutLeakingBlockIds) {
