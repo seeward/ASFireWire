@@ -294,12 +294,12 @@ extension ASFWDriverConnector {
     }
 
     func requestAudioControlValue(endpointID: AudioEndpointID,
-                                  controlID: MAudio1814ControlID,
+                                  controlID: UInt32,
                                   value: Int32) -> kern_return_t {
         guard isConnected, connection != 0, endpointID.rawValue != 0 else {
             return kIOReturnNotReady
         }
-        var scalarInputs = [endpointID.rawValue, UInt64(controlID.rawValue),
+        var scalarInputs = [endpointID.rawValue, UInt64(controlID),
                             UInt64(UInt32(bitPattern: value))]
         return IOConnectCallScalarMethod(
             connection,

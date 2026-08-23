@@ -226,22 +226,6 @@ final class ASFWDriverConnector: ObservableObject {
         transport.callStructWithScalar(selector: selector.rawValue, input: input, initialCap: initialCap, scalarOutput: &scalarOutput)
     }
 
-    /// Submits a semantic audio control write without blocking the caller or
-    /// the DriverKit UserClient queue. Completion runs on the main queue.
-    func submitAudioControlValue(
-        endpointID: AudioEndpointID,
-        controlID: MAudio1814ControlID,
-        value: Int32,
-        completion: @escaping (kern_return_t) -> Void
-    ) {
-        submitAudioControlValue(
-            endpointID: endpointID,
-            controlID: controlID.rawValue,
-            value: value,
-            completion: completion
-        )
-    }
-
     /// Submits a value for a parameter declared in an audio semantic topology.
     /// The driver remains the protocol owner; the app never sends vendor FCP
     /// operands or reconstructs a multi-field device command itself.
