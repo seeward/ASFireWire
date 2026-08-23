@@ -21,6 +21,12 @@ add_device_test(DiceFocusriteSerializationTests
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro24DspTypes.cpp"
 )
 
+# Bounded parsing for the TCAT extension's caps, router/peak and mixer data.
+add_device_test(DiceExtensionStateTests
+    DiceExtensionStateTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICEExtensionState.cpp"
+)
+
 # DICE duplex parity tests (requires support dir in includes for ReferencePhase0ParityFixture.inc)
 add_executable(DICEDuplexBringupControllerTests
     DICEDuplexBringupControllerTests.cpp
