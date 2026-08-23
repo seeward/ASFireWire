@@ -53,9 +53,10 @@ protected:
                 *val = 0x80000000;
             });
 
-        hardware_.Attach(nullptr, mockDevice_);
+        hardware_.Attach(&owner_, mockDevice_);
     }
 
+    IOService owner_;
     HardwareInterface hardware_;
     MockPCIDevice* mockDevice_{nullptr}; // Owned by hardware_ after Attach
 };
@@ -177,6 +178,37 @@ TEST_F(HardwareInterfaceOrderTests, ProviderRevocationLatchesHardwareGoneAndBloc
     EXPECT_CALL(*mockDevice_, MemoryWrite32(_, _, _)).Times(0);
     EXPECT_TRUE(hardware_.HardwareGone());
     EXPECT_EQ(hardware_.GoneReason(), HardwareGoneReason::kProviderRevoked);
+    EXPECT_FALSE(hardware_.TryBeginAccess());
+}
+
+TEST_F(HardwareInterfaceOrderTests, ProviderRevocationDrainsBarScopesBeforeClosingPciSession) {
+    std::atomic<bool> scopeEntered{false};
+    std::atomic<bool> releaseScope{false};
+
+    std::thread worker([&] {
+        auto access = hardware_.TryBeginAccess();
+        ASSERT_TRUE(access);
+        scopeEntered.store(true, std::memory_order_release);
+        while (!releaseScope.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+    });
+
+    while (!scopeEntered.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+
+    EXPECT_CALL(*mockDevice_, Close(&owner_)).Times(1);
+    auto revoke = std::async(std::launch::async, [&] { hardware_.RevokeProviderAndClose(); });
+    EXPECT_EQ(revoke.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+
+    releaseScope.store(true, std::memory_order_release);
+    EXPECT_EQ(revoke.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    worker.join();
+
+    EXPECT_TRUE(hardware_.HardwareGone());
+    EXPECT_EQ(hardware_.GoneReason(), HardwareGoneReason::kProviderRevoked);
+    EXPECT_FALSE(hardware_.IsAvailable());
     EXPECT_FALSE(hardware_.TryBeginAccess());
 }
 

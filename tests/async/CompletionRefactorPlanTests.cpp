@@ -79,6 +79,34 @@ TEST(CompletionRefactorPlan, AckCompleteWriteCompletesOnAT) {
     EXPECT_EQ(h.mgr.Find(TLabel{1}), nullptr);  // Extracted on completion
 }
 
+TEST(CompletionRefactorPlan, CancelAllClearsManagerBeforeInvokingReentrantHandler) {
+    TransactionManager mgr;
+    ASSERT_TRUE(mgr.Initialize().has_value());
+
+    auto allocated = mgr.Allocate(TLabel{7}, BusGeneration{1}, NodeID{0x1234});
+    ASSERT_TRUE(allocated.has_value());
+    Transaction* transaction = *allocated;
+
+    int callbacks = 0;
+    bool replacementAllocated = false;
+    transaction->SetResponseHandler([&](kern_return_t kr, uint8_t responseCode,
+                                        std::span<const uint8_t>) {
+        ++callbacks;
+        EXPECT_EQ(kr, kIOReturnAborted);
+        EXPECT_EQ(responseCode, 0xFF);
+        EXPECT_EQ(mgr.Count(), 0u);
+
+        auto replacement = mgr.Allocate(TLabel{7}, BusGeneration{2}, NodeID{0x5678});
+        replacementAllocated = replacement.has_value();
+    });
+
+    mgr.CancelAll();
+
+    EXPECT_EQ(callbacks, 1);
+    EXPECT_TRUE(replacementAllocated);
+    EXPECT_NE(mgr.Find(TLabel{7}), nullptr);
+}
+
 TEST(CompletionRefactorPlan, AckCompleteEventNormalizesLegacyAck8ForWrite) {
     Harness h;
     ASSERT_TRUE(h.initOk);

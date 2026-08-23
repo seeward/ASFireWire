@@ -40,6 +40,24 @@ TEST_F(RuntimeLifecycleCoordinatorTests, StartAndPlannedStopFollowOneStateAuthor
     EXPECT_FALSE(coordinator_.AdmitsNormalWork());
 }
 
+TEST_F(RuntimeLifecycleCoordinatorTests, ProviderRevocationFromRunningStopsWorkBeforeTeardown) {
+    ASSERT_TRUE(coordinator_.BeginStart("start", 1));
+    coordinator_.MarkStageComplete(StartStage::kProviderOpened);
+    ASSERT_TRUE(coordinator_.CompleteStart("running", 2));
+
+    const auto plan =
+        coordinator_.BeginQuiesce(QuiesceReason::kProviderRevoked, "provider removed", 3);
+    ASSERT_TRUE(plan.has_value());
+    EXPECT_TRUE(plan->runTeardown);
+    EXPECT_TRUE(plan->revokeImmediately);
+    EXPECT_EQ(plan->stateBefore, ControllerState::kRunning);
+    EXPECT_EQ(coordinator_.CurrentState(), ControllerState::kRevoked);
+    EXPECT_FALSE(coordinator_.AdmitsNormalWork());
+
+    coordinator_.CompleteQuiesce(*plan, "provider teardown complete", 4);
+    EXPECT_EQ(coordinator_.CurrentState(), ControllerState::kStopped);
+}
+
 TEST_F(RuntimeLifecycleCoordinatorTests, DuplicateStartDoesNotRerunResourcePipeline) {
     ASSERT_TRUE(coordinator_.BeginStart("start", 1));
     EXPECT_FALSE(coordinator_.BeginStart("duplicate start", 2));

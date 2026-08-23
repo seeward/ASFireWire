@@ -166,10 +166,23 @@ void HardwareInterface::LatchProviderRevokedAndDrain() noexcept {
     accessGate_.RevokeAndDrain();
 }
 
+void HardwareInterface::RevokeProviderAndClose() noexcept {
+    // This is deliberately terminal.  Closing the PCI session disables DMA
+    // before the higher-level teardown can drop descriptor and payload
+    // mappings.  Never insert a controller register operation between the
+    // revocation fence and this Close().
+    LatchProviderRevokedAndDrain();
+    CloseProvider();
+}
+
 void HardwareInterface::Detach() {
     // Make every later BAR operation a no-op before closing the PCI client.
     // RevokeAndDrain() also waits for any in-progress batch to finish.
     RevokeAndDrain();
+    CloseProvider();
+}
+
+void HardwareInterface::CloseProvider() noexcept {
     if (device_) {
         if (owner_) {
             device_->Close(owner_);

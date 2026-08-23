@@ -208,27 +208,38 @@ void TransactionManager::CancelAll() noexcept {
         return;
     }
 
+    // A response handler can retry, allocate another tLabel, or start the
+    // next software teardown stage.  Remove every transaction while holding
+    // the manager lock, but invoke handlers only after it is released.
+    // This makes cancellation a real ownership/drain boundary rather than a
+    // lock-recursive callback path.
+    std::array<std::unique_ptr<Transaction>, 64> cancelled{};
+    std::array<bool, 64> notify{};
+
     IOLockLock(lock_);
 
-    // Transition all transactions to Cancelled state
-    for (auto& txn : transactions_) {
-        if (txn && 
-            txn->state() != TransactionState::Completed &&
-            txn->state() != TransactionState::Failed &&
-            txn->state() != TransactionState::Cancelled) {
-            txn->TransitionTo(TransactionState::Cancelled, "TransactionManager::CancelAll");
+    for (size_t index = 0; index < transactions_.size(); ++index) {
+        auto& txn = transactions_[index];
+        if (!txn) {
+            continue;
+        }
 
-            // Invoke callback with cancellation error
-            txn->InvokeResponseHandler(kIOReturnAborted, 0xFF, {});
+        if (!IsTerminalState(txn->state())) {
+            txn->TransitionTo(TransactionState::Cancelled, "TransactionManager::CancelAll");
+            notify[index] = true;
+        }
+
+        // Slot ownership is cleared before any handler can re-enter this
+        // manager.  Keep the object alive until its handler returns.
+        cancelled[index] = std::move(txn);
+    }
+    IOLockUnlock(lock_);
+
+    for (size_t index = 0; index < cancelled.size(); ++index) {
+        if (notify[index]) {
+            cancelled[index]->InvokeResponseHandler(kIOReturnAborted, 0xFF, {});
         }
     }
-
-    // Clear all slots
-    for (auto& txn : transactions_) {
-        txn = nullptr;
-    }
-
-    IOLockUnlock(lock_);
 }
 
 size_t TransactionManager::Count() const noexcept {

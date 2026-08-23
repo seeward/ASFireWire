@@ -119,10 +119,12 @@ only the DriverKit objects explicitly required for a safe resume. Finish in
 
 1. Enter `Revoked` from `Running`.
 2. Close producers.
-3. Revoke and drain local MMIO immediately.
+3. Revoke and drain local MMIO immediately, then close the PCI session while
+   every DMA mapping is still pinned. `IOPCIDevice::Close()` disables bus
+   mastering and PCI memory-space enable, so it must precede DMA release.
 4. Cancel and drain DriverKit callback sources.
 5. Tear down software state without final register cleanup.
-6. Release provider resources.
+6. Release the remaining provider-owned resources.
 7. Enter `Stopped`.
 
 No operation after step 3 may assume that OHCI registers respond.

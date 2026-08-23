@@ -80,6 +80,10 @@ void HardwareInterface::LatchProviderRevokedAndDrain() noexcept {
     RevokeAndDrain();
 }
 
+void HardwareInterface::RevokeProviderAndClose() noexcept {
+    LatchProviderRevokedAndDrain();
+}
+
 void HardwareInterface::Detach() { RevokeAndDrain(); }
 
 bool HardwareInterface::Attached() const noexcept { return IsAvailable(); }

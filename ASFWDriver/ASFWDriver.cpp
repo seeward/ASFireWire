@@ -183,7 +183,9 @@ void ExecuteRuntimeTeardown(ServiceContext& ctx, const QuiescePlan& plan) {
                                  (ctx.deps.hardware && ctx.deps.hardware->HardwareGone());
 
     // A provider notification can arrive while another quiesce is in progress.
-    // Revoke first so no later software teardown can enter an OHCI MMIO scope.
+    // The PCI session was closed at the revocation boundary, before any DMA
+    // mapping release below.  Keep this idempotent fence so no later software
+    // teardown can enter an OHCI MMIO scope.
     if (providerRevoked && ctx.deps.hardware) {
         ctx.deps.hardware->LatchProviderRevokedAndDrain();
         ASFW_LOG(Controller,
@@ -575,7 +577,12 @@ kern_return_t ASFWDriver::StartRuntime(IOService* provider) {
 }
 
 kern_return_t IMPL(ASFWDriver, Stop) {
-    RequestRuntimeQuiesce(static_cast<uint32_t>(QuiesceReason::kPlannedStop));
+    // DriverKit invokes Stop while the provider is terminating.  In particular,
+    // a PCIe surprise removal can withdraw BAR decoding before this callback
+    // reaches the audio/isoch teardown path.  Treat Stop as provider revocation
+    // so RequestRuntimeQuiesce fences BAR access before any dependent service
+    // attempts an OHCI context or interrupt-mask write.
+    RequestRuntimeQuiesce(static_cast<uint32_t>(QuiesceReason::kProviderRevoked));
     if (ivars) {
         if (ivars->wakeVerifyTimer) {
             // Final stop is terminal.  DriverKit retains the timer's action
@@ -613,17 +620,23 @@ void ASFWDriver::RequestRuntimeQuiesce(uint32_t rawReason) {
     }
 
     const auto reason = static_cast<QuiesceReason>(rawReason);
+
+    // This must precede the lifecycle transition and all teardown work.  A
+    // provider-termination notification may be delayed behind an already
+    // queued Stop() callback, while a surprise PCIe removal can make even the
+    // first OHCI write fatal.  Close the PCI session immediately after the
+    // gate drains: PCIDriverKit then disables bus mastering before this
+    // teardown releases DMA-backed objects.  The rest of this terminal path
+    // must not poll or otherwise touch OHCI.
+    if (reason == QuiesceReason::kProviderRevoked && ctx.deps.hardware) {
+        ctx.deps.hardware->RevokeProviderAndClose();
+    }
+
     const auto plan = ctx.lifecycle->BeginQuiesce(reason, "runtime quiesce", mach_absolute_time());
     if (!plan.has_value()) {
         return;
     }
 
-    // A revocation request that races an already-running planned teardown must
-    // still fence OHCI immediately. The active executor will observe its
-    // state as Revoked before publishing its final transition.
-    if (plan->revokeImmediately && !plan->runTeardown && ctx.deps.hardware) {
-        ctx.deps.hardware->LatchProviderRevokedAndDrain();
-    }
     if (plan->runTeardown) {
         ExecuteRuntimeTeardown(ctx, *plan);
         ReleaseQuiescedRuntime(ctx, *plan);
@@ -1050,9 +1063,6 @@ void ASFWDriver::ProviderNotificationReady_Impl(ASFWDriver_ProviderNotificationR
         return;
     }
 
-    if (ctx.deps.hardware) {
-        ctx.deps.hardware->LatchProviderRevokedAndDrain();
-    }
     RequestRuntimeQuiesce(static_cast<uint32_t>(QuiesceReason::kProviderRevoked));
 #endif
 }

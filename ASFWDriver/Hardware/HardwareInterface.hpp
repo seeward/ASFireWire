@@ -76,6 +76,15 @@ class HardwareInterface {
     void RevokeAndDrain() noexcept;
     /// Latch a revoked PCI provider before any software teardown reaches OHCI.
     void LatchProviderRevokedAndDrain() noexcept;
+    /**
+     * Terminal surprise-removal operation.
+     *
+     * Fences and drains every admitted BAR access, then closes the PCI session
+     * while all DMA mappings are still owned by the runtime.  PCIDriverKit
+     * Close disables PCI bus-master and memory-space enable; callers must run
+     * this before releasing any DMA-backed resource after provider revocation.
+     */
+    void RevokeProviderAndClose() noexcept;
     void Detach();
     void BindAsyncControllerPort(ASFW::Async::IAsyncControllerPort* controllerPort) noexcept;
 
@@ -251,6 +260,7 @@ class HardwareInterface {
     void WriteScoped(Register32 reg, uint32_t value) const noexcept;
     void FlushPostedWritesScoped() const noexcept;
     void LatchHardwareGoneFromPresenceProbe(Register32 reg) const noexcept;
+    void CloseProvider() noexcept;
 
     mutable HardwareAccessGate accessGate_;
     OSSharedPtr<IOPCIDevice> device_;
