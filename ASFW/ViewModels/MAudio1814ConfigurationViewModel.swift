@@ -5,6 +5,7 @@ import Foundation
 @MainActor
 final class MAudio1814ConfigurationViewModel: ObservableObject {
     @Published private(set) var snapshot: AudioConfigurationSnapshot?
+    @Published private(set) var layout: AudioSemanticConsoleLayoutSnapshot?
     @Published private(set) var mixerSnapshot: AudioControlSurfaceSnapshot?
     @Published private(set) var meterSnapshot: AudioMeterSnapshot?
     @Published var selectedRateHz: UInt32 = 48_000
@@ -30,6 +31,7 @@ final class MAudio1814ConfigurationViewModel: ObservableObject {
                 guard let self else { return }
                 let configurationChanged = snapshot != state.configuration
                 snapshot = state.configuration
+                layout = state.layout
                 mixerSnapshot = state.controls
                 meterSnapshot = state.meters
                 if let topology { console.reconcile(with: topology) }
@@ -109,7 +111,7 @@ final class MAudio1814ConfigurationViewModel: ObservableObject {
         }
     }
 
-    func applyMixerControl(_ controlID: MAudio1814ControlID, value: Int32) {
+    func applyMixerControl(_ controlID: UInt32, value: Int32) {
         controlPlane.submit(control: controlID, value: value)
     }
 
@@ -122,8 +124,8 @@ final class MAudio1814ConfigurationViewModel: ObservableObject {
     }
 
     var topology: AudioTopologySnapshot? {
-        guard let snapshot, let mixerSnapshot else { return nil }
-        return MAudio1814TopologyProjector.make(configuration: snapshot, controls: mixerSnapshot)
+        guard let layout, let mixerSnapshot else { return nil }
+        return MAudio1814TopologyProjector.make(layout: layout, controls: mixerSnapshot)
     }
 
     // MARK: - Console
@@ -229,7 +231,7 @@ final class MAudio1814ConfigurationViewModel: ObservableObject {
 
     func setTopologySend(_ send: AudioTopologySend, enabled: Bool) {
         guard let mixerSnapshot else { return }
-        let current = UInt32(bitPattern: mixerSnapshot.value(for: send.control.rawValue))
+        let current = UInt32(bitPattern: mixerSnapshot.value(for: send.control))
         let next = enabled ? current | send.mask : current & ~send.mask
         applyMixerControl(send.control, value: Int32(bitPattern: next))
     }

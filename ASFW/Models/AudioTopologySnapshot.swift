@@ -1,15 +1,8 @@
 import Foundation
 
-/// Device-neutral projection consumed by the console and patchbay views.
-///
-/// A protocol family translates its confirmed hardware state into this model;
-/// the views never receive register offsets or family-specific parameter
-/// windows.
-///
-/// The unit here is the **channel**, not the pair. The device's registers are
-/// per-channel and the vendor's own console exposes them that way — two faders,
-/// two pans, two aux sends per strip, with a link button to gang them. Folding a
-/// pair behind one fader loses the balance the hardware can actually do.
+/// Device-neutral projection consumed by the shared console components. The
+/// driver owns strip identity, routes, control bindings, and meter placement;
+/// this adapter only turns the semantic layout into view-friendly arrays.
 struct AudioTopologySnapshot {
     let topologyRevision: UInt64
     let strips: [AudioTopologyStrip]
@@ -31,34 +24,26 @@ struct AudioTopologyStrip: Identifiable {
     let name: String
     let kind: AudioTopologyStripKind
     let channels: [AudioTopologyStripChannel]
-    /// Mixer destination buttons — the vendor labels these "out 1/2" and "3/4".
     let sends: [AudioTopologySend]
-    /// Source selector shown on the strip itself, as the vendor puts "mon"
-    /// under the headphone faders rather than in a separate patchbay.
     let source: AudioTopologyRoute?
 }
 
 struct AudioTopologyStripChannel: Identifiable {
     let id: String
-    /// "L" / "R", or the channel number for a mono strip.
     let label: String
-    let levelControl: MAudio1814ControlID
+    let levelControl: UInt32
     let levelRaw: Int32
-    /// Pan into the main mixer. Absent for playback and output strips, which
-    /// have no balance register.
-    let panControl: MAudio1814ControlID?
+    let panControl: UInt32?
     let panRaw: Int32
-    /// Send into the aux bus. Absent on output strips.
-    let auxControl: MAudio1814ControlID?
+    let auxControl: UInt32?
     let auxRaw: Int32
-    /// Index into the 38-point peak block.
     let meterIndex: Int?
 }
 
 struct AudioTopologySend: Identifiable {
     let id: String
     let label: String
-    let control: MAudio1814ControlID
+    let control: UInt32
     let mask: UInt32
     let isEnabled: Bool
 }
@@ -66,7 +51,7 @@ struct AudioTopologySend: Identifiable {
 struct AudioTopologyRoute: Identifiable {
     let id: String
     let name: String
-    let control: MAudio1814ControlID
+    let control: UInt32
     let choices: [AudioTopologyRouteChoice]
     let selectedValue: Int32
 }
@@ -78,177 +63,94 @@ struct AudioTopologyRouteChoice: Identifiable {
 }
 
 enum MAudio1814TopologyProjector {
-    static func make(configuration: AudioConfigurationSnapshot,
+    static func make(layout: AudioSemanticConsoleLayoutSnapshot,
                      controls: AudioControlSurfaceSnapshot) -> AudioTopologySnapshot? {
-        guard configuration.endpointID == controls.endpointID,
-              configuration.topologyRevision == controls.topologyRevision,
-              controls.isMAudioSpecialMixer else {
+        guard layout.endpointID == controls.endpointID,
+              layout.topologyRevision == controls.topologyRevision,
+              controls.isMAudioSpecialMixer else { return nil }
+
+        let strips = layout.strips.compactMap { strip($0, layout: layout, controls: controls) }
+        guard strips.count == layout.strips.count else { return nil }
+        return .init(topologyRevision: layout.topologyRevision, strips: strips,
+                     routes: strips.compactMap(\.source))
+    }
+
+    private static func strip(_ definition: AudioSemanticConsoleLayoutSnapshot.Strip,
+                              layout: AudioSemanticConsoleLayoutSnapshot,
+                              controls: AudioControlSurfaceSnapshot) -> AudioTopologyStrip? {
+        guard let kind = kind(definition.kind), let name = name(definition) else { return nil }
+        let channelCount = Int(definition.channelCount)
+        let meterCount = Int(definition.meterCount)
+        let channels = (0..<channelCount).map { index in
+            let level = definition.levelControlID + UInt32(index)
+            let pan = definition.panControlID == 0 ? nil : definition.panControlID + UInt32(index)
+            let aux = definition.auxControlID == 0 ? nil : definition.auxControlID + UInt32(index)
+            return AudioTopologyStripChannel(
+                id: "\(definition.id)-\(index)", label: channelCount == 2 ? (index == 0 ? "L" : "R") : "\(index + 1)",
+                levelControl: level, levelRaw: controls.value(for: level),
+                panControl: pan, panRaw: pan.map { controls.value(for: $0) } ?? 0,
+                auxControl: aux, auxRaw: aux.map { controls.value(for: $0) } ?? 0,
+                meterIndex: index < meterCount ? Int(definition.meterFirstIndex) + index : nil)
+        }
+        let sends = layout.crosspoints.filter { $0.sourceStripID == definition.id }
+            .sorted { $0.destinationBus.rawValue < $1.destinationBus.rawValue }
+            .map { crosspoint in
+                let current = UInt32(bitPattern: controls.value(for: crosspoint.controlID))
+                return AudioTopologySend(id: "\(definition.id)-\(crosspoint.destinationBus.rawValue)",
+                                         label: crosspoint.destinationBus == .main12 ? "1/2" : "3/4",
+                                         control: crosspoint.controlID, mask: crosspoint.enabledMask,
+                                         isEnabled: current & crosspoint.enabledMask != 0)
+            }
+        let route = route(definition, controls: controls)
+        return .init(id: "strip-\(definition.id)", name: name, kind: kind,
+                     channels: channels, sends: sends, source: route)
+    }
+
+    private static func kind(_ value: AudioSemanticConsoleLayoutSnapshot.StripKind) -> AudioTopologyStripKind? {
+        switch value {
+        case .input: .physicalInput
+        case .playback: .playback
+        case .output: .output
+        case .auxiliary: .aux
+        case .headphone: .headphone
+        }
+    }
+
+    private static func name(_ strip: AudioSemanticConsoleLayoutSnapshot.Strip) -> String? {
+        let first = strip.firstSignalIndex
+        let pair = "\(first)/\(first + UInt32(strip.channelCount) - 1)"
+        switch strip.kind {
+        case .input:
+            switch strip.signalKind {
+            case .analogLine: return "ANALOG \(pair) IN"
+            case .digitalAdat: return "ADAT \(pair) IN"
+            case .digitalSpdif: return "S/PDIF IN"
+            default: return nil
+            }
+        case .playback: return "\(pair) SW RTN"
+        case .output: return "\(pair) OUT"
+        case .auxiliary: return "AUX"
+        case .headphone: return "PHONES \((first + 1) / 2)"
+        }
+    }
+
+    private static func route(_ strip: AudioSemanticConsoleLayoutSnapshot.Strip,
+                              controls: AudioControlSurfaceSnapshot) -> AudioTopologyRoute? {
+        guard strip.sourceControlID != 0 else { return nil }
+        let choices: [String]
+        let name: String
+        switch strip.sourceKind {
+        case .mixerOrAux:
+            name = "Source"
+            choices = ["Mixer", "Aux"]
+        case .mixer12Mixer34OrAux:
+            name = "Mon"
+            choices = ["1/2", "3/4", "Aux"]
+        case .none:
             return nil
         }
-        let opticalIsADAT = configuration.committed.inputOptical == .adat
-
-        var strips: [AudioTopologyStrip] = []
-
-        // Analog inputs: four pairs, always present.
-        for pair in 0..<4 {
-            strips.append(inputStrip(
-                id: "analog-\(pair)", name: "ANALOG \(pair * 2 + 1)/\(pair * 2 + 2) IN",
-                gain: .mixerAnalogGain, pan: .mixerAnalogBalance, aux: .auxAnalogGain,
-                pair: UInt32(pair), sendBit: UInt32(pair), meterFirst: pair * 2,
-                controls: controls))
-        }
-
-        if opticalIsADAT {
-            for pair in 0..<4 {
-                strips.append(inputStrip(
-                    id: "adat-\(pair)", name: "ADAT \(pair * 2 + 1)/\(pair * 2 + 2) IN",
-                    gain: .mixerAdatGain, pan: .mixerAdatBalance, aux: .auxAdatGain,
-                    pair: UInt32(pair), sendBit: UInt32(8 + pair), meterFirst: 10 + pair * 2,
-                    controls: controls))
-            }
-        } else {
-            strips.append(inputStrip(
-                id: "spdif-0", name: "S/PDIF IN",
-                gain: .mixerSpdifGain, pan: .mixerSpdifBalance, aux: .auxSpdifGain,
-                pair: 0, sendBit: 16, meterFirst: 8, controls: controls))
-        }
-
-        // Software returns. These have a mixer gain and an aux send but no
-        // balance register, which is why the vendor's "sw rtn" strips carry no
-        // pan knobs.
-        for pair in 0..<2 {
-            strips.append(playbackStrip(pair: UInt32(pair), controls: controls))
-        }
-
-        strips.append(outputStrip(
-            id: "analog-out-0", name: "1/2 OUT", kind: .output,
-            group: .analogOutputVolume, pair: 0, meterFirst: 18, controls: controls,
-            source: route("Source", MAudio1814ControlID(.analogOutputSource, 0),
-                          controls, ["Mixer 1", "Aux"])))
-        strips.append(outputStrip(
-            id: "analog-out-1", name: "3/4 OUT", kind: .output,
-            group: .analogOutputVolume, pair: 1, meterFirst: 20, controls: controls,
-            source: route("Source", MAudio1814ControlID(.analogOutputSource, 1),
-                          controls, ["Mixer 2", "Aux"])))
-        strips.append(outputStrip(
-            id: "aux-out", name: "AUX", kind: .aux,
-            group: .auxOutputVolume, pair: 0, meterFirst: 36, controls: controls,
-            source: nil))
-        strips.append(outputStrip(
-            id: "phones-0", name: "PHONES 1", kind: .headphone,
-            group: .headphoneVolume, pair: 0, meterFirst: 32, controls: controls,
-            source: route("Mon", MAudio1814ControlID(.headphoneSource, 0),
-                          controls, ["1/2", "3/4", "Aux"])))
-        strips.append(outputStrip(
-            id: "phones-1", name: "PHONES 2", kind: .headphone,
-            group: .headphoneVolume, pair: 1, meterFirst: 34, controls: controls,
-            source: route("Mon", MAudio1814ControlID(.headphoneSource, 1),
-                          controls, ["1/2", "3/4", "Aux"])))
-
-        return AudioTopologySnapshot(
-            topologyRevision: configuration.topologyRevision,
-            strips: strips,
-            routes: strips.compactMap(\.source))
-    }
-
-    // MARK: - Strip builders
-
-    private static func inputStrip(id: String, name: String,
-                                   gain: MAudio1814ControlGroup,
-                                   pan: MAudio1814ControlGroup,
-                                   aux: MAudio1814ControlGroup,
-                                   pair: UInt32, sendBit: UInt32, meterFirst: Int,
-                                   controls: AudioControlSurfaceSnapshot) -> AudioTopologyStrip {
-        AudioTopologyStrip(
-            id: id, name: name, kind: .physicalInput,
-            channels: (0..<2).map { side in
-                let index = pair * 2 + UInt32(side)
-                return channel(
-                    id: "\(id)-\(side)", label: side == 0 ? "L" : "R",
-                    level: MAudio1814ControlID(gain, index),
-                    pan: MAudio1814ControlID(pan, index),
-                    aux: MAudio1814ControlID(aux, index),
-                    meterIndex: meterFirst + side, controls: controls)
-            },
-            sends: sends(prefix: id, control: MAudio1814ControlID(.physicalMixerSendMask),
-                         // Analog and ADAT sit in four-bit fields so their second
-                         // destination is four bits along; S/PDIF's is adjacent.
-                         firstBit: sendBit, secondBit: sendBit + (sendBit < 8 ? 4 : 1),
-                         controls: controls),
-            source: nil)
-    }
-
-    private static func playbackStrip(pair: UInt32,
-                                      controls: AudioControlSurfaceSnapshot) -> AudioTopologyStrip {
-        let id = "playback-\(pair)"
-        return AudioTopologyStrip(
-            id: id, name: "\(pair * 2 + 1)/\(pair * 2 + 2) SW RTN", kind: .playback,
-            channels: (0..<2).map { side in
-                let index = pair * 2 + UInt32(side)
-                return channel(
-                    id: "\(id)-\(side)", label: side == 0 ? "L" : "R",
-                    level: MAudio1814ControlID(.mixerStreamGain, index),
-                    pan: nil,
-                    aux: MAudio1814ControlID(.auxStreamGain, index),
-                    meterIndex: nil, controls: controls)
-            },
-            sends: sends(prefix: id, control: MAudio1814ControlID(.streamMixerSendMask),
-                         firstBit: pair, secondBit: pair + 2, controls: controls),
-            source: nil)
-    }
-
-    private static func outputStrip(id: String, name: String, kind: AudioTopologyStripKind,
-                                    group: MAudio1814ControlGroup, pair: UInt32,
-                                    meterFirst: Int, controls: AudioControlSurfaceSnapshot,
-                                    source: AudioTopologyRoute?) -> AudioTopologyStrip {
-        AudioTopologyStrip(
-            id: id, name: name, kind: kind,
-            channels: (0..<2).map { side in
-                channel(
-                    id: "\(id)-\(side)", label: side == 0 ? "L" : "R",
-                    level: MAudio1814ControlID(group, pair * 2 + UInt32(side)),
-                    pan: nil, aux: nil,
-                    meterIndex: meterFirst + side, controls: controls)
-            },
-            sends: [], source: source)
-    }
-
-    private static func channel(id: String, label: String,
-                                level: MAudio1814ControlID,
-                                pan: MAudio1814ControlID?,
-                                aux: MAudio1814ControlID?,
-                                meterIndex: Int?,
-                                controls: AudioControlSurfaceSnapshot) -> AudioTopologyStripChannel {
-        AudioTopologyStripChannel(
-            id: id, label: label,
-            levelControl: level, levelRaw: controls.value(for: level),
-            panControl: pan, panRaw: pan.map { controls.value(for: $0) } ?? 0,
-            auxControl: aux, auxRaw: aux.map { controls.value(for: $0) } ?? 0,
-            meterIndex: meterIndex)
-    }
-
-    /// The two mixer destinations. The vendor labels these by the output pair
-    /// they feed rather than by mixer number.
-    private static func sends(prefix: String, control: MAudio1814ControlID,
-                              firstBit: UInt32, secondBit: UInt32,
-                              controls: AudioControlSurfaceSnapshot) -> [AudioTopologySend] {
-        let value = UInt32(bitPattern: controls.value(for: control))
-        return [
-            AudioTopologySend(id: "\(prefix)-out12", label: "1/2", control: control,
-                              mask: 1 << firstBit, isEnabled: value & (1 << firstBit) != 0),
-            AudioTopologySend(id: "\(prefix)-out34", label: "3/4", control: control,
-                              mask: 1 << secondBit, isEnabled: value & (1 << secondBit) != 0),
-        ]
-    }
-
-    private static func route(_ name: String, _ control: MAudio1814ControlID,
-                              _ controls: AudioControlSurfaceSnapshot,
-                              _ names: [String]) -> AudioTopologyRoute {
-        AudioTopologyRoute(
-            id: "\(control.rawValue)", name: name, control: control,
-            choices: names.enumerated().map {
-                AudioTopologyRouteChoice(value: Int32($0.offset), name: $0.element)
-            },
-            selectedValue: controls.value(for: control))
+        return .init(id: "route-\(strip.id)", name: name, control: strip.sourceControlID,
+                     choices: choices.enumerated().map { .init(value: Int32($0.offset), name: $0.element) },
+                     selectedValue: controls.value(for: strip.sourceControlID))
     }
 }

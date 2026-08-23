@@ -251,6 +251,48 @@ extension ASFWDriverConnector {
         return AudioSemanticTopologyWireDecoder.decodeEndpointIDs(data)
     }
 
+    /// Reads an immutable console layout off the connector queue. Live values
+    /// continue through the asynchronous control/meter lane; this is requested
+    /// only when a topology revision changes.
+    func requestAudioSemanticConsoleLayout(
+        endpointID: AudioEndpointID,
+        completion: @escaping (AudioSemanticConsoleLayoutSnapshot?) -> Void
+    ) {
+        connectionQueue.async { [weak self] in
+            guard let self else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            let layout = self.getAudioSemanticConsoleLayout(endpointID: endpointID)
+            DispatchQueue.main.async { completion(layout) }
+        }
+    }
+
+    private func getAudioSemanticConsoleLayout(
+        endpointID: AudioEndpointID
+    ) -> AudioSemanticConsoleLayoutSnapshot? {
+        guard connection != 0, endpointID.rawValue != 0 else { return nil }
+        var scalarInput = endpointID.rawValue
+        var output = Data(count: 1480)
+        var outputLength = output.count
+        let result = output.withUnsafeMutableBytes { outputBytes in
+            IOConnectCallMethod(
+                connection,
+                Method.getAudioSemanticConsoleLayout.rawValue,
+                &scalarInput,
+                1,
+                nil,
+                0,
+                nil,
+                nil,
+                outputBytes.baseAddress,
+                &outputLength
+            )
+        }
+        guard result == KERN_SUCCESS, outputLength == output.count else { return nil }
+        return AudioSemanticConsoleLayoutWireDecoder.decode(output)
+    }
+
     func requestAudioControlValue(endpointID: AudioEndpointID,
                                   controlID: MAudio1814ControlID,
                                   value: Int32) -> kern_return_t {
@@ -583,6 +625,77 @@ enum AudioSemanticTopologyWireDecoder {
     }
 }
 
+/// Fixed ABI decoder for selector 1030. This layout is deliberately separate
+/// from the general graph reply: dense consoles retain their complete semantic
+/// strip/meter mapping without widening the 3,944-byte graph ABI.
+private enum AudioSemanticConsoleLayoutWireDecoder {
+    private static let wireSize = 1480
+    private static let layoutStart = 16
+    private static let stripOffset = 56
+    private static let crosspointOffset = 856
+    private static let maximumStrips = 20
+    private static let maximumCrosspoints = 32
+
+    static func decode(_ data: Data) -> AudioSemanticConsoleLayoutSnapshot? {
+        guard data.count == wireSize,
+              let wireVersion = data.u32(at: 0), wireVersion == 1,
+              let endpoint = data.u64(at: 8), endpoint != 0,
+              let layoutVersion = data.u32(at: layoutStart), layoutVersion == 1,
+              let deviceKind = data.u32(at: layoutStart + 4), deviceKind != 0,
+              let topologyRevision = data.u64(at: layoutStart + 8), topologyRevision != 0,
+              let stripCount = data.u32(at: layoutStart + 16), stripCount <= maximumStrips,
+              let crosspointCount = data.u32(at: layoutStart + 20),
+              crosspointCount <= maximumCrosspoints else { return nil }
+
+        let strips = (0..<Int(stripCount)).compactMap { strip(data, stripOffset + $0 * 40) }
+        let crosspoints = (0..<Int(crosspointCount)).compactMap {
+            crosspoint(data, crosspointOffset + $0 * 20)
+        }
+        guard strips.count == Int(stripCount), crosspoints.count == Int(crosspointCount),
+              Set(strips.map(\.id)).count == strips.count,
+              Set(crosspoints.map(\.id)).count == crosspoints.count else { return nil }
+        return .init(endpointID: AudioEndpointID(rawValue: endpoint), deviceKind: deviceKind,
+                     topologyRevision: topologyRevision, strips: strips, crosspoints: crosspoints)
+    }
+
+    private static func strip(_ data: Data, _ offset: Int) -> AudioSemanticConsoleLayoutSnapshot.Strip? {
+        guard let id = data.u32(at: offset), id != 0,
+              let kindRaw = data.u8(at: offset + 4),
+              let kind = AudioSemanticConsoleLayoutSnapshot.StripKind(rawValue: kindRaw),
+              let signalRaw = data.u32(at: offset + 8),
+              let signalKind = AudioSemanticTopologySnapshot.SignalKind(rawValue: signalRaw),
+              signalKind != .none,
+              let channelCount = data.u8(at: offset + 12), channelCount > 0,
+              let flags = data.u8(at: offset + 13), flags & ~15 == 0,
+              let firstSignalIndex = data.u32(at: offset + 16), firstSignalIndex != 0,
+              let levelControlID = data.u32(at: offset + 20), levelControlID != 0,
+              let panControlID = data.u32(at: offset + 24),
+              let auxControlID = data.u32(at: offset + 28),
+              let sourceControlID = data.u32(at: offset + 32),
+              let sourceKindRaw = data.u8(at: offset + 36),
+              let sourceKind = AudioSemanticConsoleLayoutSnapshot.SourceKind(rawValue: sourceKindRaw),
+              let meterCount = data.u8(at: offset + 37), meterCount <= channelCount,
+              let meterFirstIndex = data.u16(at: offset + 38),
+              (sourceControlID == 0) == (sourceKind == .none) else { return nil }
+        return .init(id: id, kind: kind, signalKind: signalKind, channelCount: channelCount,
+                     flags: flags, firstSignalIndex: firstSignalIndex, levelControlID: levelControlID,
+                     panControlID: panControlID, auxControlID: auxControlID,
+                     sourceControlID: sourceControlID, sourceKind: sourceKind,
+                     meterCount: meterCount, meterFirstIndex: meterFirstIndex)
+    }
+
+    private static func crosspoint(_ data: Data, _ offset: Int) -> AudioSemanticConsoleLayoutSnapshot.Crosspoint? {
+        guard let id = data.u32(at: offset), id != 0,
+              let sourceStripID = data.u32(at: offset + 4), sourceStripID != 0,
+              let busRaw = data.u8(at: offset + 8),
+              let destinationBus = AudioSemanticConsoleLayoutSnapshot.Bus(rawValue: busRaw),
+              let controlID = data.u32(at: offset + 12), controlID != 0,
+              let enabledMask = data.u32(at: offset + 16), enabledMask != 0 else { return nil }
+        return .init(id: id, sourceStripID: sourceStripID, destinationBus: destinationBus,
+                     controlID: controlID, enabledMask: enabledMask)
+    }
+}
+
 /// Mirrors the compact scalar layout of selectors 1023–1025. The layout is
 /// deliberately fixed-size and bounded, so the async completion queue never
 /// transports a pointer or allocates a variable-size reply.
@@ -680,6 +793,11 @@ private extension Data {
     nonisolated func u32(at offset: Int) -> UInt32? {
         guard offset >= 0, offset + 4 <= count else { return nil }
         return withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: UInt32.self) }
+    }
+
+    nonisolated func u16(at offset: Int) -> UInt16? {
+        guard offset >= 0, offset + 2 <= count else { return nil }
+        return withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: UInt16.self) }
     }
 
     nonisolated func u64(at offset: Int) -> UInt64? {

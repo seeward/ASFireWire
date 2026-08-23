@@ -108,6 +108,9 @@ public:
         // Discovery contract for mixer/router-only endpoints. Kept separate
         // from configuration endpoints, which require rate/optical support.
         kMethodGetAudioSemanticTopologyEndpoints = 1029,
+        // Compact semantic strip/crosspoint projection for a dense hardware
+        // console. Values themselves stay on the control/meter snapshots.
+        kMethodGetAudioSemanticConsoleLayout = 1030,
         // TODO(ASFW-IRM): Remove temporary IRM test method after dedicated validation tooling exists.
         kMethodTestIRMAllocation       = 26,
         kMethodTestIRMRelease          = 27,

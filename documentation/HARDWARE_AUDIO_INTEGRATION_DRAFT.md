@@ -246,6 +246,23 @@ two duplicated strips such as `DAW L` and `DAW R`, each containing another L/R
 pair.  A console layout is a projection of a matrix, not a substitute for
 understanding that matrix.
 
+The general graph reply is deliberately bounded to one 3,944-byte UserClient
+call.  Do not enlarge it opportunistically when a dense device has more
+controls or meter points than it can hold.  Instead publish a separate,
+topology-revisioned **semantic console layout**: strips, grouped channel
+bindings, meter placement, and crosspoints.  Its control IDs are opaque to the
+app; the vendor protocol remains the only place that knows their register
+packing.  The FireWire 1814/ProjectMix layout is the first use of this path:
+ADAT and S/PDIF formations publish different input strips and their actual
+crosspoint masks, while the existing control and meter snapshots carry only
+volatile values.
+
+Every topology and console-layout producer must be structurally validated at
+the driver/UI boundary before it is published.  The production validators are
+bounded and allocation-free versions of ADKVirtualAudioLab's richer model
+validator; they protect the ABI without importing the lab's heap-owning model
+into DriverKit.
+
 When a device exposes a relationship that has no common semantic analogue, add
 the smallest well-defined common concept only after evidence from more than one
 device or keep the feature as a vendor extension.  The Duet input stereo-link

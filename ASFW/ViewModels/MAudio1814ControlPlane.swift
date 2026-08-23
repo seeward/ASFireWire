@@ -4,6 +4,7 @@ import IOKit
 
 struct MAudio1814ControlPlaneSnapshot {
     let configuration: AudioConfigurationSnapshot
+    let layout: AudioSemanticConsoleLayoutSnapshot
     let controls: AudioControlSurfaceSnapshot
     let meters: AudioMeterSnapshot?
 }
@@ -29,12 +30,14 @@ final class MAudio1814ControlPlane: ObservableObject {
     private var refreshInFlight = false
     private var meterRefreshInFlight = false
     private var controlsRefreshInFlight = false
+    private var layoutRefreshInFlight = false
     private var nextControlsRefresh = Date.distantPast
     private var cachedControls: AudioControlSurfaceSnapshot?
     private var cachedMeters: AudioMeterSnapshot?
     private var cachedConfiguration: AudioConfigurationSnapshot?
+    private var cachedLayout: AudioSemanticConsoleLayoutSnapshot?
     private var nextConfigurationRefresh = Date.distantPast
-    private var pending: [MAudio1814ControlID: Int32] = [:]
+    private var pending: [UInt32: Int32] = [:]
     private var inFlightRequestID: UInt64?
     private var nextRequestID: UInt64 = 1
     private var lastDispatch = Date.distantPast
@@ -88,6 +91,7 @@ final class MAudio1814ControlPlane: ObservableObject {
         pending.removeAll()
         inFlightRequestID = nil
         cachedConfiguration = nil
+        cachedLayout = nil
         cachedControls = nil
         cachedMeters = nil
         nextConfigurationRefresh = .distantPast
@@ -95,11 +99,12 @@ final class MAudio1814ControlPlane: ObservableObject {
         refreshInFlight = false
         meterRefreshInFlight = false
         controlsRefreshInFlight = false
+        layoutRefreshInFlight = false
         isWriteInFlight = false
         latest = nil
     }
 
-    func submit(control: MAudio1814ControlID, value: Int32) {
+    func submit(control: UInt32, value: Int32) {
         pending[control] = value // latest intent wins for each semantic control.
         schedulePump()
     }
@@ -171,6 +176,25 @@ final class MAudio1814ControlPlane: ObservableObject {
         guard sessionEpoch == epoch else { return }
         refreshInFlight = false
 
+        if !layoutRefreshInFlight &&
+            (cachedLayout?.endpointID != configuration.endpointID ||
+             cachedLayout?.topologyRevision != configuration.topologyRevision) {
+            layoutRefreshInFlight = true
+            connector.requestAudioSemanticConsoleLayout(endpointID: configuration.endpointID) {
+                [weak self] layout in
+                guard let self, self.sessionEpoch == epoch else { return }
+                self.layoutRefreshInFlight = false
+                if let layout,
+                   layout.endpointID == configuration.endpointID,
+                   layout.topologyRevision == configuration.topologyRevision {
+                    self.cachedLayout = layout
+                } else {
+                    self.cachedLayout = nil
+                }
+                self.publish(configuration: configuration, epoch: epoch)
+            }
+        }
+
         if !meterRefreshInFlight {
             meterRefreshInFlight = true
             connector.requestAudioMeterSnapshotAsync(endpointID: configuration.endpointID) {
@@ -212,6 +236,9 @@ final class MAudio1814ControlPlane: ObservableObject {
         guard sessionEpoch == epoch,
               cachedConfiguration?.endpointID == configuration.endpointID,
               cachedConfiguration?.topologyRevision == configuration.topologyRevision,
+              let layout = cachedLayout,
+              layout.endpointID == configuration.endpointID,
+              layout.topologyRevision == configuration.topologyRevision,
               let controls = cachedControls,
               controls.endpointID == configuration.endpointID,
               controls.topologyRevision == configuration.topologyRevision else {
@@ -225,7 +252,7 @@ final class MAudio1814ControlPlane: ObservableObject {
             meter.topologyRevision == configuration.topologyRevision ? meter : nil
         }
         latest = MAudio1814ControlPlaneSnapshot(
-            configuration: configuration, controls: controls, meters: meters)
+            configuration: configuration, layout: layout, controls: controls, meters: meters)
         if !isWriteInFlight, pending.isEmpty {
             status = "Confirmed: \(configuration.committed.sampleRateHz.formatted()) Hz · \(configuration.committed.inputChannels) in / \(configuration.committed.outputChannels) out"
         }
@@ -253,7 +280,7 @@ final class MAudio1814ControlPlane: ObservableObject {
         let epoch = sessionEpoch
         guard !isWriteInFlight,
               let endpointID = latest?.configuration.endpointID,
-              let control = pending.keys.sorted(by: { $0.rawValue < $1.rawValue }).first,
+              let control = pending.keys.sorted().first,
               let value = pending.removeValue(forKey: control) else {
             return
         }
@@ -263,7 +290,7 @@ final class MAudio1814ControlPlane: ObservableObject {
         inFlightRequestID = requestID
         isWriteInFlight = true
         lastDispatch = Date()
-        status = "Applying \(control.label)…"
+        status = "Applying hardware control…"
         connector.submitAudioControlValue(
             endpointID: endpointID, controlID: control, value: value) { [weak self] result in
                 Task { @MainActor in

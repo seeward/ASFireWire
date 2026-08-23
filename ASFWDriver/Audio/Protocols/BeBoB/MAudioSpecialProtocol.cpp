@@ -179,6 +179,11 @@ bool MAudioSpecialProtocol::CopyAudioControlSurfaceSnapshot(
     return true;
 }
 
+bool MAudioSpecialProtocol::CopyAudioSemanticConsoleLayout(
+    AudioSemanticConsoleLayoutSnapshot& outSnapshot) const noexcept {
+    return BuildMAudioSpecialConsoleLayout(captureFormat_, outSnapshot);
+}
+
 bool MAudioSpecialProtocol::CopyAudioMeterSnapshot(
     AudioMeterSnapshot& outSnapshot) const noexcept {
     outSnapshot = {};

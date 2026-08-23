@@ -312,6 +312,11 @@ add_protocols_test(AudioSemanticTopologyValidationTests
     "${ASFW_DRIVER_DIR}/Audio/Protocols/Oxford/Apogee/ApogeeDuetSemanticTopology.cpp"
 )
 
+add_protocols_test(MAudioSpecialConsoleLayoutTests
+    MAudioSpecialConsoleLayoutTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/BeBoB/MAudioSpecialConsoleLayout.cpp"
+)
+
 add_protocols_test(MAudioSpecialMeterTests
     MAudioSpecialMeterTests.cpp
 )

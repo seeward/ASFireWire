@@ -26,6 +26,7 @@
 
 #include "BeBoBProtocol.hpp"
 #include "MAudioSpecialFormation.hpp"
+#include "MAudioSpecialConsoleLayout.hpp"
 #include "MAudioSpecialMeter.hpp"
 #include "MAudioSpecialParameters.hpp"
 #include "../Configuration/IAudioConfigurationControl.hpp"
@@ -55,6 +56,7 @@ enum class MAudioSpecialModel : uint8_t {
 class MAudioSpecialProtocol final : public BeBoBProtocol,
                                    public IAudioConfigurationControl,
                                    public IAudioControlSurface,
+                                   public IAudioSemanticConsoleLayout,
                                    public IAudioMetering {
 public:
     MAudioSpecialProtocol(Protocols::Ports::FireWireBusOps& busOps,
@@ -77,6 +79,10 @@ public:
     }
     IAudioControlSurface* AsAudioControlSurface() noexcept override { return this; }
     const IAudioControlSurface* AsAudioControlSurface() const noexcept override { return this; }
+    IAudioSemanticConsoleLayout* AsAudioSemanticConsoleLayout() noexcept override { return this; }
+    const IAudioSemanticConsoleLayout* AsAudioSemanticConsoleLayout() const noexcept override {
+        return this;
+    }
     IAudioMetering* AsAudioMetering() noexcept override { return this; }
     const IAudioMetering* AsAudioMetering() const noexcept override { return this; }
     [[nodiscard]] bool SupportsConfiguration(
@@ -87,6 +93,8 @@ public:
     CurrentConfiguration() const noexcept override;
     [[nodiscard]] bool CopyAudioControlSurfaceSnapshot(
         AudioControlSurfaceSnapshot& outSnapshot) const noexcept override;
+    [[nodiscard]] bool CopyAudioSemanticConsoleLayout(
+        AudioSemanticConsoleLayoutSnapshot& outSnapshot) const noexcept override;
     void ApplyAudioControlValue(uint32_t controlId, int32_t value,
                                 IAudioControlSurface::ApplyCallback callback) override;
     [[nodiscard]] bool CopyAudioMeterSnapshot(

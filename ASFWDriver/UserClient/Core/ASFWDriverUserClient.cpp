@@ -20,6 +20,7 @@
 #include "../WireFormats/AudioControlSurfaceWireFormats.hpp"
 #include "../WireFormats/AudioMeterWireFormats.hpp"
 #include "../WireFormats/AudioSemanticTopologyWireFormats.hpp"
+#include "../WireFormats/AudioSemanticConsoleLayoutWireFormats.hpp"
 
 #include <DriverKit/IOLib.h>
 #include <DriverKit/OSData.h>
@@ -73,6 +74,7 @@ enum {
     kMethodRequestAudioConfigurationAsync = 1027,
     kMethodGetAudioSemanticTopology = 1028,
     kMethodGetAudioSemanticTopologyEndpoints = 1029,
+    kMethodGetAudioSemanticConsoleLayout = 1030,
     kMethodSetIsochVerbosity = 40,
     // 41 retired (was the dev TX-verifier toggle)
     kMethodSetAudioAutoStart = 42,
@@ -353,6 +355,8 @@ kern_return_t HandleGetAudioSemanticTopology(
     ASFWDriver& driver, IOUserClientMethodArguments* arguments);
 kern_return_t HandleGetAudioSemanticTopologyEndpoints(
     ASFWDriver& driver, IOUserClientMethodArguments* arguments);
+kern_return_t HandleGetAudioSemanticConsoleLayout(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments);
 kern_return_t HandleRequestAudioControlValue(
     ASFWDriver& driver, IOUserClientMethodArguments* arguments);
 kern_return_t HandleGetAudioMeterSnapshot(
@@ -417,6 +421,8 @@ MethodDispatchResult DispatchDriverControlMethods(ASFWDriver& driver,
         return HandleGetAudioSemanticTopology(driver, arguments);
     case kMethodGetAudioSemanticTopologyEndpoints:
         return HandleGetAudioSemanticTopologyEndpoints(driver, arguments);
+    case kMethodGetAudioSemanticConsoleLayout:
+        return HandleGetAudioSemanticConsoleLayout(driver, arguments);
     case kMethodRequestAudioControlValue:
         return HandleRequestAudioControlValue(driver, arguments);
     case kMethodSubmitAudioControlValue:
@@ -689,6 +695,27 @@ kern_return_t HandleGetAudioSemanticTopologyEndpoints(
     for (uint32_t i = 0; i < endpointCount; ++i) {
         wire.endpointIds[i] = endpointIds[i].value;
     }
+    auto* data = OSData::withBytes(&wire, sizeof(wire));
+    if (!data) return kIOReturnNoMemory;
+    arguments->structureOutput = data;
+    arguments->structureOutputDescriptor = nullptr;
+    return kIOReturnSuccess;
+}
+
+kern_return_t HandleGetAudioSemanticConsoleLayout(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments) {
+    if (!arguments || !arguments->scalarInput || arguments->scalarInputCount != 1) {
+        return kIOReturnBadArgument;
+    }
+    auto* context = static_cast<ServiceContext*>(driver.GetServiceContext());
+    if (!context || !context->audioCoordinator) return kIOReturnNotReady;
+
+    const auto endpointId = ASFW::Audio::Devices::AudioEndpointId{arguments->scalarInput[0]};
+    ASFW::UserClient::Wire::AudioSemanticConsoleLayoutSnapshotWire wire{};
+    const kern_return_t kr = context->audioCoordinator->CopyAudioSemanticConsoleLayout(
+        endpointId, wire.layout);
+    if (kr != kIOReturnSuccess) return kr;
+    wire.endpointId = endpointId.value;
     auto* data = OSData::withBytes(&wire, sizeof(wire));
     if (!data) return kIOReturnNoMemory;
     arguments->structureOutput = data;

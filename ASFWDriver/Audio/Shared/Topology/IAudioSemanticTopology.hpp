@@ -38,6 +38,9 @@ enum class AudioSemanticSignalKind : uint32_t {
     AnalogLine = 3,
     Headphone = 4,
     HostStream = 5,
+    DigitalSpdif = 6,
+    DigitalAdat = 7,
+    Auxiliary = 8,
 };
 
 enum class AudioSemanticTargetKind : uint32_t { Port = 1, Crosspoint = 2, Device = 3 };
@@ -278,7 +281,9 @@ namespace Detail {
 [[nodiscard]] constexpr bool IsValid(AudioSemanticSignalKind value) noexcept {
     return value == AudioSemanticSignalKind::None || value == AudioSemanticSignalKind::AnalogMicXlr ||
            value == AudioSemanticSignalKind::AnalogInstrument || value == AudioSemanticSignalKind::AnalogLine ||
-           value == AudioSemanticSignalKind::Headphone || value == AudioSemanticSignalKind::HostStream;
+           value == AudioSemanticSignalKind::Headphone || value == AudioSemanticSignalKind::HostStream ||
+           value == AudioSemanticSignalKind::DigitalSpdif || value == AudioSemanticSignalKind::DigitalAdat ||
+           value == AudioSemanticSignalKind::Auxiliary;
 }
 
 [[nodiscard]] constexpr bool IsValid(AudioSemanticTargetKind value) noexcept {

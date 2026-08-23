@@ -20,7 +20,7 @@ struct AudioTopologyChannelStrip: View {
     let setPan: (AudioTopologyStripChannel, Double) -> Void
     let setAux: (AudioTopologyStripChannel, Double) -> Void
     let setSend: (AudioTopologySend, Bool) -> Void
-    let setSource: (MAudio1814ControlID, Int32) -> Void
+    let setSource: (UInt32, Int32) -> Void
     let toggleLink: () -> Void
     let toggleMute: () -> Void
     let toggleSolo: () -> Void

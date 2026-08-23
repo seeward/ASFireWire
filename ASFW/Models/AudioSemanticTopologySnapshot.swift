@@ -9,6 +9,7 @@ nonisolated struct AudioSemanticTopologySnapshot: Equatable, Sendable {
     enum PortDirection: UInt32, Sendable { case input = 1, output = 2 }
     enum SignalKind: UInt32, Sendable {
         case none = 0, analogMicXlr = 1, analogInstrument = 2, analogLine = 3, headphone = 4, hostStream = 5
+        case digitalSpdif = 6, digitalAdat = 7, auxiliary = 8
     }
     enum TargetKind: UInt32, Sendable { case port = 1, crosspoint = 2, device = 3 }
     enum ParameterKind: UInt32, Sendable {

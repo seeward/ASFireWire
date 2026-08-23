@@ -8,14 +8,14 @@ import Testing
 /// restore path.
 struct MAudio1814ConsoleStateTests {
     private func strip(_ id: String, kind: AudioTopologyStripKind,
-                       group: MAudio1814ControlGroup, pair: UInt32,
+                       controlBase: UInt32, pair: UInt32,
                        level: Int32) -> AudioTopologyStrip {
         AudioTopologyStrip(
             id: id, name: id, kind: kind,
             channels: (0..<2).map { side in
                 AudioTopologyStripChannel(
                     id: "\(id)-\(side)", label: side == 0 ? "L" : "R",
-                    levelControl: MAudio1814ControlID(group, pair * 2 + UInt32(side)),
+                    levelControl: controlBase + pair * 2 + UInt32(side),
                     levelRaw: level,
                     panControl: nil, panRaw: 0,
                     auxControl: nil, auxRaw: 0,
@@ -38,17 +38,17 @@ struct MAudio1814ConsoleStateTests {
     @Test func topologyChangePrunesHostOnlyStateForRemovedStrips() {
         var state = MAudio1814ConsoleState()
         let original = topology([
-            strip("analog-0", kind: .physicalInput, group: .mixerAnalogGain, pair: 0, level: 0),
-            strip("analog-1", kind: .physicalInput, group: .mixerAnalogGain, pair: 1, level: 0),
+            strip("analog-0", kind: .physicalInput, controlBase: 0x0300, pair: 0, level: 0),
+            strip("analog-1", kind: .physicalInput, controlBase: 0x0300, pair: 1, level: 0),
         ])
         state.reconcile(with: original)
         state.toggleMute("analog-1")
         state.toggleSolo("analog-1")
         state.toggleControl("analog-1")
-        state.setIntendedLevel(MAudio1814ControlID(.mixerAnalogGain, 2), -1024)
+        state.setIntendedLevel(0x0302, -1024)
 
         let changed = topology([
-            strip("analog-0", kind: .physicalInput, group: .mixerAnalogGain, pair: 0, level: 0),
+            strip("analog-0", kind: .physicalInput, controlBase: 0x0300, pair: 0, level: 0),
         ], revision: 2)
         state.reconcile(with: changed)
 
@@ -62,7 +62,7 @@ struct MAudio1814ConsoleStateTests {
     @Test func muteWritesSilenceAndUnmuteRestoresTheFader() {
         let unity: Int32 = 0
         let model = topology([strip("analog-0", kind: .physicalInput,
-                                    group: .mixerAnalogGain, pair: 0, level: unity)])
+                                    controlBase: 0x0300, pair: 0, level: unity)])
         var state = MAudio1814ConsoleState()
         state.reconcile(with: model)
 
@@ -73,7 +73,7 @@ struct MAudio1814ConsoleStateTests {
 
         // The device now holds silence; that is what the next snapshot reports.
         let silenced = topology([strip("analog-0", kind: .physicalInput,
-                                       group: .mixerAnalogGain, pair: 0,
+                                       controlBase: 0x0300, pair: 0,
                                        level: MAudio1814Level.rawMinimum)])
         state.toggleMute("analog-0")
         let restoreWrites = state.pendingLevelWrites(for: silenced)
@@ -85,13 +85,13 @@ struct MAudio1814ConsoleStateTests {
     /// device is currently holding, or unmute would restore nothing.
     @Test func reconcilingWhileMutedDoesNotForgetTheIntendedLevel() {
         let model = topology([strip("analog-0", kind: .physicalInput,
-                                    group: .mixerAnalogGain, pair: 0, level: -2560)])
+                                    controlBase: 0x0300, pair: 0, level: -2560)])
         var state = MAudio1814ConsoleState()
         state.reconcile(with: model)
         state.toggleMute("analog-0")
 
         let silenced = topology([strip("analog-0", kind: .physicalInput,
-                                       group: .mixerAnalogGain, pair: 0,
+                                       controlBase: 0x0300, pair: 0,
                                        level: MAudio1814Level.rawMinimum)])
         state.reconcile(with: silenced)
         state.toggleMute("analog-0")
@@ -101,9 +101,9 @@ struct MAudio1814ConsoleStateTests {
 
     @Test func soloSuppressesOtherInputsAndLeavesOutputsAlone() {
         let model = topology([
-            strip("analog-0", kind: .physicalInput, group: .mixerAnalogGain, pair: 0, level: 0),
-            strip("analog-1", kind: .physicalInput, group: .mixerAnalogGain, pair: 1, level: 0),
-            strip("out", kind: .output, group: .analogOutputVolume, pair: 0, level: 0),
+            strip("analog-0", kind: .physicalInput, controlBase: 0x0300, pair: 0, level: 0),
+            strip("analog-1", kind: .physicalInput, controlBase: 0x0300, pair: 1, level: 0),
+            strip("out", kind: .output, controlBase: 0x0200, pair: 0, level: 0),
         ])
         var state = MAudio1814ConsoleState()
         state.reconcile(with: model)
@@ -117,13 +117,13 @@ struct MAudio1814ConsoleStateTests {
 
         let writes = state.pendingLevelWrites(for: model)
         #expect(writes.count == 2)
-        #expect(writes.allSatisfy { $0.0.group == .mixerAnalogGain && $0.0.index >= 2 })
+        #expect(writes.allSatisfy { $0.0 >= 0x0302 && $0.0 < 0x0308 })
     }
 
     @Test func clearingTheLastSoloReleasesEverything() {
         let model = topology([
-            strip("analog-0", kind: .physicalInput, group: .mixerAnalogGain, pair: 0, level: 0),
-            strip("analog-1", kind: .physicalInput, group: .mixerAnalogGain, pair: 1, level: 0),
+            strip("analog-0", kind: .physicalInput, controlBase: 0x0300, pair: 0, level: 0),
+            strip("analog-1", kind: .physicalInput, controlBase: 0x0300, pair: 1, level: 0),
         ])
         var state = MAudio1814ConsoleState()
         state.reconcile(with: model)
@@ -144,7 +144,7 @@ struct MAudio1814ConsoleStateTests {
 
     @Test func producesNoWritesWhenTheDeviceAlreadyAgrees() {
         let model = topology([strip("analog-0", kind: .physicalInput,
-                                    group: .mixerAnalogGain, pair: 0, level: 0)])
+                                    controlBase: 0x0300, pair: 0, level: 0)])
         var state = MAudio1814ConsoleState()
         state.reconcile(with: model)
         #expect(state.pendingLevelWrites(for: model).isEmpty)
@@ -155,10 +155,10 @@ struct MAudio1814ConsoleStateTests {
     /// back, so a strip that kept showing a remembered value would quietly stop
     /// tracking the hardware.
     @Test func unsuppressedFadersFollowTheDeviceNotTheRememberedLevel() {
-        let control = MAudio1814ControlID(.headphoneVolume, 0)
+        let control: UInt32 = 0x0700
         var state = MAudio1814ConsoleState()
         state.reconcile(with: topology([strip("phones-0", kind: .headphone,
-                                              group: .headphoneVolume, pair: 0, level: 0)]))
+                                              controlBase: 0x0700, pair: 0, level: 0)]))
 
         // A front-panel knob has since pulled it down by 8 dB.
         #expect(state.displayLevel(control, confirmed: -2048, suppressed: false) == -2048)
@@ -172,15 +172,15 @@ struct MAudio1814ConsoleStateTests {
     /// hardware change restores where the hardware was, not where we last were.
     @Test func remembersLevelsSetByTheHardwareNotJustByUs() {
         let knobbed = topology([strip("phones-0", kind: .headphone,
-                                      group: .headphoneVolume, pair: 0, level: -2048)])
+                                      controlBase: 0x0700, pair: 0, level: -2048)])
         var state = MAudio1814ConsoleState()
         state.reconcile(with: topology([strip("phones-0", kind: .headphone,
-                                              group: .headphoneVolume, pair: 0, level: 0)]))
+                                              controlBase: 0x0700, pair: 0, level: 0)]))
         state.reconcile(with: knobbed)
         state.toggleMute("phones-0")
 
         let silenced = topology([strip("phones-0", kind: .headphone,
-                                       group: .headphoneVolume, pair: 0,
+                                       controlBase: 0x0700, pair: 0,
                                        level: MAudio1814Level.rawMinimum)])
         state.toggleMute("phones-0")
         #expect(state.pendingLevelWrites(for: silenced).allSatisfy { $0.1 == -2048 })
@@ -199,8 +199,8 @@ struct MAudio1814ConsoleStateTests {
     /// runtime scales by (vol range / rotary range), which is 1 here.
     @Test func theKnobMovesOnlyAssignedStrips() {
         let model = topology([
-            strip("analog-0", kind: .physicalInput, group: .mixerAnalogGain, pair: 0, level: 0),
-            strip("analog-1", kind: .physicalInput, group: .mixerAnalogGain, pair: 1, level: 0),
+            strip("analog-0", kind: .physicalInput, controlBase: 0x0300, pair: 0, level: 0),
+            strip("analog-1", kind: .physicalInput, controlBase: 0x0300, pair: 1, level: 0),
         ])
         var state = MAudio1814ConsoleState()
         state.reconcile(with: model)
@@ -209,15 +209,15 @@ struct MAudio1814ConsoleStateTests {
         let writes = state.applyLevelControllerDelta(-0x400, to: model)
         #expect(writes.count == 2)
         #expect(writes.allSatisfy { $0.1 == -0x400 })
-        #expect(writes.allSatisfy { $0.0.group == .mixerAnalogGain && $0.0.index < 2 })
+        #expect(writes.allSatisfy { $0.0 >= 0x0300 && $0.0 < 0x0302 })
         // -0x400 raw is -4 dB.
         #expect(MAudio1814Level.decibels(raw: writes[0].1) == -4)
     }
 
     @Test func theKnobDrivesEveryAssignedStripTogether() {
         let model = topology([
-            strip("analog-0", kind: .physicalInput, group: .mixerAnalogGain, pair: 0, level: 0),
-            strip("phones-0", kind: .headphone, group: .headphoneVolume, pair: 0, level: 0),
+            strip("analog-0", kind: .physicalInput, controlBase: 0x0300, pair: 0, level: 0),
+            strip("phones-0", kind: .headphone, controlBase: 0x0700, pair: 0, level: 0),
         ])
         var state = MAudio1814ConsoleState()
         state.reconcile(with: model)
@@ -226,12 +226,12 @@ struct MAudio1814ConsoleStateTests {
 
         let writes = state.applyLevelControllerDelta(-0x400, to: model)
         #expect(writes.count == 4)
-        #expect(Set(writes.map(\.0.group)) == [.mixerAnalogGain, .headphoneVolume])
+        #expect(Set(writes.map { $0.0 >> 8 }) == [0x03, 0x07])
     }
 
     @Test func theKnobClampsAtTheEndsOfTheRange() {
         let model = topology([strip("analog-0", kind: .physicalInput,
-                                    group: .mixerAnalogGain, pair: 0, level: 0)])
+                                    controlBase: 0x0300, pair: 0, level: 0)])
         var state = MAudio1814ConsoleState()
         state.reconcile(with: model)
         state.toggleControl("analog-0")
@@ -240,7 +240,7 @@ struct MAudio1814ConsoleStateTests {
         #expect(state.applyLevelControllerDelta(0x400, to: model).isEmpty)
 
         let floored = topology([strip("analog-0", kind: .physicalInput,
-                                      group: .mixerAnalogGain, pair: 0,
+                                      controlBase: 0x0300, pair: 0,
                                       level: MAudio1814Level.rawMinimum)])
         var atFloor = MAudio1814ConsoleState()
         atFloor.reconcile(with: floored)
@@ -252,7 +252,7 @@ struct MAudio1814ConsoleStateTests {
     /// comes back to — but nothing is written while the device holds silence.
     @Test func theKnobMovesAMutedStripWithoutWritingToIt() {
         let model = topology([strip("analog-0", kind: .physicalInput,
-                                    group: .mixerAnalogGain, pair: 0, level: 0)])
+                                    controlBase: 0x0300, pair: 0, level: 0)])
         var state = MAudio1814ConsoleState()
         state.reconcile(with: model)
         state.toggleControl("analog-0")
@@ -261,7 +261,7 @@ struct MAudio1814ConsoleStateTests {
         #expect(state.applyLevelControllerDelta(-0x400, to: model).isEmpty)
 
         let silenced = topology([strip("analog-0", kind: .physicalInput,
-                                       group: .mixerAnalogGain, pair: 0,
+                                       controlBase: 0x0300, pair: 0,
                                        level: MAudio1814Level.rawMinimum)])
         state.toggleMute("analog-0")
         #expect(state.pendingLevelWrites(for: silenced).allSatisfy { $0.1 == -0x400 })
@@ -269,7 +269,7 @@ struct MAudio1814ConsoleStateTests {
 
     @Test func aStationaryKnobWritesNothing() {
         let model = topology([strip("analog-0", kind: .physicalInput,
-                                    group: .mixerAnalogGain, pair: 0, level: 0)])
+                                    controlBase: 0x0300, pair: 0, level: 0)])
         var state = MAudio1814ConsoleState()
         state.reconcile(with: model)
         state.toggleControl("analog-0")

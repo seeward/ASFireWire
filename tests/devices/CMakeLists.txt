@@ -108,6 +108,7 @@ add_device_test(BeBoBCaptureChannelMapTests
 add_device_test(MAudioSpecialInitTests
     MAudioSpecialInitTests.cpp
     "${ASFW_DRIVER_DIR}/Audio/Protocols/BeBoB/MAudioSpecialProtocol.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/BeBoB/MAudioSpecialConsoleLayout.cpp"
     "${ASFW_DRIVER_DIR}/Audio/Protocols/BeBoB/BeBoBProtocol.cpp"
     "${ASFW_DRIVER_DIR}/Protocols/AVC/AudioFunctionBlockCommand.cpp"
     "${ASFW_DRIVER_DIR}/Protocols/AVC/CMP/CMPClient.cpp"

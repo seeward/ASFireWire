@@ -28,6 +28,7 @@ class IAudioConfigurationControl;
 class IAudioControlSurface;
 class IAudioMetering;
 class IAudioSemanticTopology;
+class IAudioSemanticConsoleLayout;
 }
 
 namespace ASFW::Audio {
@@ -172,6 +173,17 @@ public:
     }
 
     virtual const IAudioSemanticTopology* AsAudioSemanticTopology() const noexcept {
+        return nullptr;
+    }
+
+    /// Optional compact console projection for devices whose full strip/meter
+    /// vocabulary does not fit the immutable graph reply. It is still semantic:
+    /// the protocol keeps every register layout and FCP detail private.
+    virtual IAudioSemanticConsoleLayout* AsAudioSemanticConsoleLayout() noexcept {
+        return nullptr;
+    }
+
+    virtual const IAudioSemanticConsoleLayout* AsAudioSemanticConsoleLayout() const noexcept {
         return nullptr;
     }
 

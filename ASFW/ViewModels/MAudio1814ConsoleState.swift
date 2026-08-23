@@ -65,14 +65,14 @@ struct MAudio1814ConsoleState: Equatable {
     /// showing a remembered value would silently stop tracking the hardware.
     /// Only a suppressed strip falls back to the remembered level, because there
     /// the device is deliberately holding silence that is not the user's intent.
-    func displayLevel(_ control: MAudio1814ControlID, confirmed: Int32,
+    func displayLevel(_ control: UInt32, confirmed: Int32,
                       suppressed: Bool) -> Int32 {
         guard suppressed else { return confirmed }
-        return intent[control.rawValue] ?? confirmed
+        return intent[control] ?? confirmed
     }
 
-    mutating func setIntendedLevel(_ control: MAudio1814ControlID, _ value: Int32) {
-        intent[control.rawValue] = value
+    mutating func setIntendedLevel(_ control: UInt32, _ value: Int32) {
+        intent[control] = value
     }
 
     mutating func toggleLink(_ stripID: String) {
@@ -110,17 +110,17 @@ struct MAudio1814ConsoleState: Equatable {
     /// because the device is deliberately holding silence there.
     mutating func applyLevelControllerDelta(
         _ delta: Int32, to topology: AudioTopologySnapshot
-    ) -> [(MAudio1814ControlID, Int32)] {
+    ) -> [(UInt32, Int32)] {
         guard delta != 0 else { return [] }
-        var writes: [(MAudio1814ControlID, Int32)] = []
+        var writes: [(UInt32, Int32)] = []
         for strip in topology.strips where controlled.contains(strip.id) {
             let suppressed = isSuppressed(strip.id, kind: strip.kind)
             for channel in strip.channels {
-                let current = intent[channel.levelControl.rawValue] ?? channel.levelRaw
+                let current = intent[channel.levelControl] ?? channel.levelRaw
                 let next = max(MAudio1814Level.rawMinimum,
                                min(MAudio1814Level.rawMaximum, current + delta))
                 guard next != current else { continue }
-                intent[channel.levelControl.rawValue] = next
+                intent[channel.levelControl] = next
                 if !suppressed {
                     writes.append((channel.levelControl, next))
                 }
@@ -138,7 +138,7 @@ struct MAudio1814ConsoleState: Equatable {
             lastTopologyRevision = topology.topologyRevision
             let stripIDs = Set(topology.strips.map(\.id))
             let controlIDs = Set(topology.strips.flatMap(\.channels)
-                .map { $0.levelControl.rawValue })
+                .map(\.levelControl))
             unlinked.formIntersection(stripIDs)
             muted.formIntersection(stripIDs)
             soloed.formIntersection(stripIDs)
@@ -147,7 +147,7 @@ struct MAudio1814ConsoleState: Equatable {
         }
         for strip in topology.strips where !isSuppressed(strip.id, kind: strip.kind) {
             for channel in strip.channels {
-                intent[channel.levelControl.rawValue] = channel.levelRaw
+                intent[channel.levelControl] = channel.levelRaw
             }
         }
     }
@@ -155,14 +155,14 @@ struct MAudio1814ConsoleState: Equatable {
     /// Every level write the device needs to match the current state. Only
     /// controls whose confirmed value already differs are returned, so a
     /// no-op toggle costs no bus traffic.
-    func pendingLevelWrites(for topology: AudioTopologySnapshot) -> [(MAudio1814ControlID, Int32)] {
-        var writes: [(MAudio1814ControlID, Int32)] = []
+    func pendingLevelWrites(for topology: AudioTopologySnapshot) -> [(UInt32, Int32)] {
+        var writes: [(UInt32, Int32)] = []
         for strip in topology.strips {
             let suppressed = isSuppressed(strip.id, kind: strip.kind)
             for channel in strip.channels {
                 let target = suppressed
                     ? MAudio1814Level.rawMinimum
-                    : (intent[channel.levelControl.rawValue] ?? channel.levelRaw)
+                    : (intent[channel.levelControl] ?? channel.levelRaw)
                 if target != channel.levelRaw {
                     writes.append((channel.levelControl, target))
                 }
