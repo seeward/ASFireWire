@@ -169,6 +169,38 @@ void DICETransaction::ReadExtensionSections(std::function<void(IOReturn, Extensi
               });
 }
 
+void DICETransaction::ReadExtensionCaps(
+    const ExtensionSections& sections,
+    std::function<void(IOReturn, DiceExtensionCaps)> callback) {
+    auto callbackState = Common::ShareCallback(std::move(callback));
+    if (sections.caps.size < DiceExtensionCaps::kWireSize) {
+        Common::InvokeSharedCallback(callbackState, kIOReturnUnderrun, DiceExtensionCaps{});
+        return;
+    }
+
+    (void)io_.ReadBlock(
+        MakeDICEAddress(ExtensionAbsoluteOffset(sections.caps)),
+        static_cast<uint32_t>(DiceExtensionCaps::kWireSize),
+        [callbackState](Async::AsyncStatus status, std::span<const uint8_t> payload) {
+            if (status != Async::AsyncStatus::kSuccess) {
+                Common::InvokeSharedCallback(callbackState, MapReadStatus(status), DiceExtensionCaps{});
+                return;
+            }
+            DiceExtensionCaps caps{};
+            if (!DecodeDiceExtensionCaps(payload, caps)) {
+                Common::InvokeSharedCallback(callbackState, kIOReturnUnderrun, DiceExtensionCaps{});
+                return;
+            }
+            ASFW_LOG(DICE,
+                     "TCAT extension caps: router=%u/%u maxRoutes=%u mixer=%u/%u %ux%u peak=%u",
+                     caps.router.exposed ? 1U : 0U, caps.router.readOnly ? 1U : 0U,
+                     caps.router.maximumEntryCount, caps.mixer.exposed ? 1U : 0U,
+                     caps.mixer.readOnly ? 1U : 0U, caps.mixer.inputCount,
+                     caps.mixer.outputCount, caps.general.peakAvailable ? 1U : 0U);
+            Common::InvokeSharedCallback(callbackState, kIOReturnSuccess, caps);
+        });
+}
+
 // ============================================================================
 // Capability Discovery
 // ============================================================================

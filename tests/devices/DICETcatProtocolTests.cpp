@@ -82,7 +82,9 @@ constexpr uint32_t kDiceBaseLo = static_cast<uint32_t>(
 constexpr uint32_t kGlobalBaseLo = static_cast<uint32_t>(
     ASFW::Audio::DICE::DICEAbsoluteAddress(0x28) & 0xFFFFFFFFULL);
 constexpr uint32_t kAppSectionQuadletOffset = 0x1FU;
+constexpr uint32_t kCapsSectionQuadletOffset = 0x13U;
 constexpr uint32_t kAppSectionBaseLo = kExtensionBaseLo + (kAppSectionQuadletOffset * 4U);
+constexpr uint32_t kCapsSectionBaseLo = kExtensionBaseLo + (kCapsSectionQuadletOffset * 4U);
 constexpr uint32_t kGlobalReadBytes = 104U;
 constexpr uint32_t kClockSelect48kInternal =
     (ASFW::Audio::DICE::ClockRateIndex::k48000 << ASFW::Audio::DICE::ClockSelect::kRateShift) |
@@ -174,6 +176,13 @@ public:
             ++extensionReadCount;
             const auto bytes = MakeExtensionSectionsWire();
             payload.assign(bytes.begin(), bytes.end());
+        } else if (address.addressHi == 0xFFFFU && address.addressLo == kCapsSectionBaseLo &&
+                   length >= ASFW::Audio::DICE::DiceExtensionCaps::kWireSize) {
+            ++extensionCapsReadCount;
+            payload.resize(ASFW::Audio::DICE::DiceExtensionCaps::kWireSize);
+            PutBe32(payload.data(), 0x00800001U);
+            PutBe32(payload.data() + 4, 0x10101115U);
+            PutBe32(payload.data() + 8, 0x00001017U);
         } else if (address.addressHi == 0xFFFFU &&
                    address.addressLo == (kAppSectionBaseLo + kEffectGeneralOffset) &&
                    length >= sizeof(uint32_t)) {
@@ -247,6 +256,7 @@ public:
     int generalReadCount{0};
     int globalReadCount{0};
     int extensionReadCount{0};
+    int extensionCapsReadCount{0};
     int appQuadReadCount{0};
     uint32_t clockSelect_{kClockSelect48kInternal};
     uint32_t status_{kLocked48kStatus};
@@ -482,6 +492,34 @@ TEST(SPro24DspProtocolTests, VendorCallLoadsExtensionsLazily) {
     EXPECT_EQ(*callbackStatus, kIOReturnSuccess);
     EXPECT_EQ(bus.extensionReadCount, 1);
     EXPECT_EQ(bus.appQuadReadCount, 1);
+}
+
+TEST(DICETcatProtocolTests, ExtensionCapsUseTheDriverDiscoveredSectionAddress) {
+    CountingFireWireBus bus;
+    RouteState routeState;
+    DICETcatProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
+
+    std::optional<ExtensionSections> sections;
+    protocol.Transaction().ReadExtensionSections([&](IOReturn status, ExtensionSections value) {
+        ASSERT_EQ(status, kIOReturnSuccess);
+        sections = value;
+    });
+    ASSERT_TRUE(sections.has_value());
+
+    std::optional<ASFW::Audio::DICE::DiceExtensionCaps> caps;
+    protocol.Transaction().ReadExtensionCaps(*sections,
+        [&](IOReturn status, ASFW::Audio::DICE::DiceExtensionCaps value) {
+            ASSERT_EQ(status, kIOReturnSuccess);
+            caps = value;
+        });
+    ASSERT_TRUE(caps.has_value());
+    EXPECT_TRUE(caps->router.exposed);
+    EXPECT_EQ(caps->router.maximumEntryCount, 128);
+    EXPECT_TRUE(caps->mixer.exposed);
+    EXPECT_EQ(caps->mixer.inputCount, 16);
+    EXPECT_EQ(caps->mixer.outputCount, 16);
+    EXPECT_TRUE(caps->general.peakAvailable);
+    EXPECT_EQ(bus.extensionCapsReadCount, 1);
 }
 
 // ---------------------------------------------------------------------------

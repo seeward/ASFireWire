@@ -7,6 +7,7 @@
 #pragma once
 
 #include "DICETypes.hpp"
+#include "DICEExtensionState.hpp"
 #include "../../../../Protocols/Ports/ProtocolRegisterIO.hpp"
 #include "../../../../Common/WireFormat.hpp"
 #include <DriverKit/IOReturn.h>
@@ -53,6 +54,12 @@ public:
     /// Read TCAT extension sections layout from DICE device.
     /// @param callback   Callback with parsed extension sections
     void ReadExtensionSections(std::function<void(IOReturn, ExtensionSections)> callback);
+
+    /// Read and decode the TCAT extension capability words. This is the
+    /// authority for router/mixer dimensions and mutability; profiles may
+    /// annotate the result but must not substitute their own matrix shape.
+    void ReadExtensionCaps(const ExtensionSections& sections,
+                           std::function<void(IOReturn, DiceExtensionCaps)> callback);
 
     /// Read per-rate-mode stream geometry from the TCAT extension's
     /// CURRENT_CONFIG section.

@@ -31,6 +31,7 @@ add_device_test(DiceExtensionStateTests
 add_executable(DICEDuplexBringupControllerTests
     DICEDuplexBringupControllerTests.cpp
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICETransaction.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICEExtensionState.cpp"
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICEDuplexBringupController.cpp"
     "${ASFW_DRIVER_DIR}/Bus/IRM/IRMClient.cpp"
     "${ASFW_DRIVER_DIR}/Discovery/DeviceRegistry.cpp"
@@ -49,6 +50,7 @@ gtest_discover_tests(DICEDuplexBringupControllerTests)
 add_device_test(DiceExtensionGeometryTests
     DiceExtensionGeometryTests.cpp
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICETransaction.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICEExtensionState.cpp"
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICEDuplexBringupController.cpp"
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/TCAT/DICETcatProtocol.cpp"
     "${ASFW_DRIVER_DIR}/Discovery/DeviceRegistry.cpp"
@@ -58,6 +60,7 @@ add_device_test(DiceExtensionGeometryTests
 add_device_test(DICETcatProtocolTests
     DICETcatProtocolTests.cpp
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICETransaction.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICEExtensionState.cpp"
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICEDuplexBringupController.cpp"
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/TCAT/DICETcatProtocol.cpp"
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro24DspProtocol.cpp"
