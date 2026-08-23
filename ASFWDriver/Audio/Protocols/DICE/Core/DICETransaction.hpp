@@ -61,6 +61,25 @@ public:
     void ReadExtensionCaps(const ExtensionSections& sections,
                            std::function<void(IOReturn, DiceExtensionCaps)> callback);
 
+    /// Read the TCAT router section using the capability-declared record
+    /// limit. The returned routes are raw protocol records; a device profile
+    /// must map them to semantic ports before they reach the app.
+    void ReadRouterEntries(const ExtensionSections& sections,
+                           const DiceExtensionCaps& caps,
+                           std::function<void(IOReturn, DiceRouterEntries)> callback);
+
+    /// Read the fixed 16 x 18 TCAT mixer window.  The capability data selects
+    /// the active dimensions, but the wire read remains the fixed window.
+    void ReadMixerCoefficients(const ExtensionSections& sections,
+                               const DiceExtensionCaps& caps,
+                               std::function<void(IOReturn, DiceMixerCoefficients)> callback);
+
+    /// Read optional router-indexed peak records. Meter polling is policy
+    /// owned by a profile; this method performs one bounded exact snapshot.
+    void ReadPeakEntries(const ExtensionSections& sections,
+                         const DiceExtensionCaps& caps,
+                         std::function<void(IOReturn, DiceRouterEntries)> callback);
+
     /// Read per-rate-mode stream geometry from the TCAT extension's
     /// CURRENT_CONFIG section.
     ///

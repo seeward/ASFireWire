@@ -10,9 +10,12 @@ namespace {
 using ASFW::Audio::DICE::DecodeDiceExtensionCaps;
 using ASFW::Audio::DICE::DecodeDiceMixerCoefficients;
 using ASFW::Audio::DICE::DecodeDiceRouterEntry;
+using ASFW::Audio::DICE::DecodeDiceRouterEntries;
 using ASFW::Audio::DICE::DiceExtensionCaps;
 using ASFW::Audio::DICE::DiceMixerCoefficients;
 using ASFW::Audio::DICE::DiceRouterEntry;
+using ASFW::Audio::DICE::DiceRouterEntries;
+using ASFW::Audio::DICE::kDiceMaximumRouterEntries;
 using ASFW::Audio::DICE::kDiceMixerCoefficientWireBytes;
 
 TEST(DiceExtensionStateTests, DecodesCapabilityWordsWithoutProfileAssumptions) {
@@ -54,6 +57,22 @@ TEST(DiceExtensionStateTests, DecodesRouterAndPeakPacking) {
     EXPECT_EQ(entry.sourceBlock, 11);
     EXPECT_EQ(entry.sourceChannel, 1);
     EXPECT_EQ(entry.peak, 0x7F00);
+}
+
+TEST(DiceExtensionStateTests, DecodesBoundedRouterEntryArrays) {
+    std::array<uint8_t, 2 * DiceRouterEntry::kWireSize> wire{};
+    ASFW::FW::WriteBE32(wire.data(), 0x01002031U);
+    ASFW::FW::WriteBE32(wire.data() + DiceRouterEntry::kWireSize, 0x02004051U);
+
+    DiceRouterEntries entries{};
+    ASSERT_TRUE(DecodeDiceRouterEntries(wire, 2, entries));
+    EXPECT_EQ(entries.count, 2);
+    EXPECT_EQ(entries.At(0).peak, 0x0100);
+    EXPECT_EQ(entries.At(0).sourceBlock, 2);
+    EXPECT_EQ(entries.At(1).destinationBlock, 5);
+
+    EXPECT_FALSE(DecodeDiceRouterEntries(wire, kDiceMaximumRouterEntries + 1U, entries));
+    EXPECT_FALSE(DecodeDiceRouterEntries({}, 1, entries));
 }
 
 TEST(DiceExtensionStateTests, DecodesOnlyTheCapabilityDeclaredMixerArea) {

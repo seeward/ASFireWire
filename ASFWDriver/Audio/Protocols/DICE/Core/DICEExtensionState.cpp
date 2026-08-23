@@ -66,6 +66,26 @@ bool DecodeDiceRouterEntry(std::span<const uint8_t> wire,
     return true;
 }
 
+bool DecodeDiceRouterEntries(std::span<const uint8_t> wire,
+                             uint16_t count,
+                             DiceRouterEntries& outEntries) noexcept {
+    if (count > kDiceMaximumRouterEntries ||
+        wire.size() < size_t{count} * DiceRouterEntry::kWireSize) {
+        return false;
+    }
+
+    outEntries = {};
+    outEntries.count = count;
+    for (uint16_t index = 0; index < count; ++index) {
+        if (!DecodeDiceRouterEntry(wire.subspan(size_t{index} * DiceRouterEntry::kWireSize),
+                                   outEntries.entries[index])) {
+            outEntries = {};
+            return false;
+        }
+    }
+    return true;
+}
+
 bool DecodeDiceMixerCoefficients(std::span<const uint8_t> wire,
                                  const DiceMixerCaps& caps,
                                  DiceMixerCoefficients& out) noexcept {

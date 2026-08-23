@@ -65,6 +65,21 @@ struct DiceRouterEntry final {
     static constexpr size_t kWireSize = 4;
 };
 
+/// Router and peak sections are device-owned mutable state, so retain only a
+/// bounded number of records in the driver.  The Saffire Pro 24 DSP advertises
+/// 128 entries; a larger response is rejected until a profile establishes a
+/// safe, tested geometry for it.
+inline constexpr uint16_t kDiceMaximumRouterEntries = 128;
+
+struct DiceRouterEntries final {
+    uint16_t count{0};
+    std::array<DiceRouterEntry, kDiceMaximumRouterEntries> entries{};
+
+    [[nodiscard]] constexpr const DiceRouterEntry& At(uint16_t index) const noexcept {
+        return entries[index];
+    }
+};
+
 /// TCAT allocates a fixed 16 x 18 coefficient window. The capability section
 /// states how much of it a particular device exposes; never derive geometry
 /// from an application profile alone.
@@ -91,6 +106,13 @@ struct DiceMixerCoefficients final {
 /// nibble pair, and the peak occupies the high half-word.
 [[nodiscard]] bool DecodeDiceRouterEntry(std::span<const uint8_t> wire,
                                          DiceRouterEntry& outEntry) noexcept;
+
+/// Decode `count` contiguous router/peak records. The caller supplies the
+/// count because router sections carry it in a leading quadlet while peak
+/// sections do not.
+[[nodiscard]] bool DecodeDiceRouterEntries(std::span<const uint8_t> wire,
+                                           uint16_t count,
+                                           DiceRouterEntries& outEntries) noexcept;
 
 /// Decode the fixed mixer coefficient area, applying the device-discovered
 /// active matrix dimensions. Unsupported dimensions fail closed.

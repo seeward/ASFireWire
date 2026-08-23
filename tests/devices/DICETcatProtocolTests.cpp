@@ -81,10 +81,19 @@ constexpr uint32_t kDiceBaseLo = static_cast<uint32_t>(
     ASFW::Audio::DICE::DICEAbsoluteAddress(0) & 0xFFFFFFFFULL);
 constexpr uint32_t kGlobalBaseLo = static_cast<uint32_t>(
     ASFW::Audio::DICE::DICEAbsoluteAddress(0x28) & 0xFFFFFFFFULL);
-constexpr uint32_t kAppSectionQuadletOffset = 0x1FU;
+// Synthetic pointer-table layout: sections have to be physically disjoint.
+// In particular, the fixed 1152-byte mixer payload cannot be followed by the
+// peak section one quadlet later.
+constexpr uint32_t kAppSectionQuadletOffset = 0x3A0U;
 constexpr uint32_t kCapsSectionQuadletOffset = 0x13U;
+constexpr uint32_t kMixerSectionQuadletOffset = 0x20U;
+constexpr uint32_t kPeakSectionQuadletOffset = 0x150U;
+constexpr uint32_t kRouterSectionQuadletOffset = 0x1E0U;
 constexpr uint32_t kAppSectionBaseLo = kExtensionBaseLo + (kAppSectionQuadletOffset * 4U);
 constexpr uint32_t kCapsSectionBaseLo = kExtensionBaseLo + (kCapsSectionQuadletOffset * 4U);
+constexpr uint32_t kMixerSectionBaseLo = kExtensionBaseLo + (kMixerSectionQuadletOffset * 4U);
+constexpr uint32_t kPeakSectionBaseLo = kExtensionBaseLo + (kPeakSectionQuadletOffset * 4U);
+constexpr uint32_t kRouterSectionBaseLo = kExtensionBaseLo + (kRouterSectionQuadletOffset * 4U);
 constexpr uint32_t kGlobalReadBytes = 104U;
 constexpr uint32_t kClockSelect48kInternal =
     (ASFW::Audio::DICE::ClockRateIndex::k48000 << ASFW::Audio::DICE::ClockSelect::kRateShift) |
@@ -102,12 +111,12 @@ std::array<uint8_t, ExtensionSections::kWireSize> MakeExtensionSectionsWire() {
     const std::array<uint32_t, 18> quadlets{
         0x13, 0x04,  // caps
         0x17, 0x02,  // command
-        0x19, 0x10,  // mixer
-        0x1A, 0x10,  // peak
-        0x1B, 0x20,  // router
-        0x1C, 0x40,  // stream format
-        0x1D, 0x80,  // current config
-        0x1E, 0x40,  // standalone
+        kMixerSectionQuadletOffset, 0x121,  // mixer: header + fixed 16 x 18 records
+        kPeakSectionQuadletOffset, 0x080,   // 128 peak records
+        kRouterSectionQuadletOffset, 0x081, // count header + 128 router records
+        0x270, 0x40,  // stream format
+        0x2B0, 0x80,  // current config
+        0x330, 0x40,  // standalone
         kAppSectionQuadletOffset, 0x100,  // application
     };
 
@@ -181,8 +190,32 @@ public:
             ++extensionCapsReadCount;
             payload.resize(ASFW::Audio::DICE::DiceExtensionCaps::kWireSize);
             PutBe32(payload.data(), 0x00800001U);
-            PutBe32(payload.data() + 4, 0x10101115U);
+            PutBe32(payload.data() + 4, 0x10121115U);
             PutBe32(payload.data() + 8, 0x00001017U);
+        } else if (address.addressHi == 0xFFFFU && address.addressLo == kRouterSectionBaseLo &&
+                   length == sizeof(uint32_t)) {
+            ++routerHeaderReadCount;
+            PutBe32(payload.data(), 2U);
+        } else if (address.addressHi == 0xFFFFU && address.addressLo == kRouterSectionBaseLo + 4U &&
+                   length == 2U * ASFW::Audio::DICE::DiceRouterEntry::kWireSize) {
+            ++routerEntriesReadCount;
+            PutBe32(payload.data(), 0x7F00B142U);
+            PutBe32(payload.data() + 4, 0x3C00A350U);
+        } else if (address.addressHi == 0xFFFFU &&
+                   address.addressLo >= kMixerSectionBaseLo + 4U &&
+                   address.addressLo < kMixerSectionBaseLo + 4U +
+                       ASFW::Audio::DICE::kDiceMixerCoefficientWireBytes) {
+            ++mixerReadCount;
+            const uint32_t firstCoefficient =
+                (address.addressLo - (kMixerSectionBaseLo + 4U)) / sizeof(uint32_t);
+            for (uint32_t index = 0; index < length / sizeof(uint32_t); ++index) {
+                PutBe32(payload.data() + (index * sizeof(uint32_t)), firstCoefficient + index + 1U);
+            }
+        } else if (address.addressHi == 0xFFFFU && address.addressLo == kPeakSectionBaseLo &&
+                   length == 128U * ASFW::Audio::DICE::DiceRouterEntry::kWireSize) {
+            ++peakReadCount;
+            PutBe32(payload.data(), 0x2100B142U);
+            PutBe32(payload.data() + 4, 0x2200B143U);
         } else if (address.addressHi == 0xFFFFU &&
                    address.addressLo == (kAppSectionBaseLo + kEffectGeneralOffset) &&
                    length >= sizeof(uint32_t)) {
@@ -257,6 +290,10 @@ public:
     int globalReadCount{0};
     int extensionReadCount{0};
     int extensionCapsReadCount{0};
+    int routerHeaderReadCount{0};
+    int routerEntriesReadCount{0};
+    int mixerReadCount{0};
+    int peakReadCount{0};
     int appQuadReadCount{0};
     uint32_t clockSelect_{kClockSelect48kInternal};
     uint32_t status_{kLocked48kStatus};
@@ -516,10 +553,72 @@ TEST(DICETcatProtocolTests, ExtensionCapsUseTheDriverDiscoveredSectionAddress) {
     EXPECT_TRUE(caps->router.exposed);
     EXPECT_EQ(caps->router.maximumEntryCount, 128);
     EXPECT_TRUE(caps->mixer.exposed);
-    EXPECT_EQ(caps->mixer.inputCount, 16);
+    EXPECT_EQ(caps->mixer.inputCount, 18);
     EXPECT_EQ(caps->mixer.outputCount, 16);
     EXPECT_TRUE(caps->general.peakAvailable);
     EXPECT_EQ(bus.extensionCapsReadCount, 1);
+}
+
+TEST(DICETcatProtocolTests, ExtensionStateReadsAreExactAndUseDiscoveredSections) {
+    CountingFireWireBus bus;
+    RouteState routeState;
+    DICETcatProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
+
+    std::optional<ExtensionSections> sections;
+    protocol.Transaction().ReadExtensionSections([&](IOReturn status, ExtensionSections value) {
+        ASSERT_EQ(status, kIOReturnSuccess);
+        sections = value;
+    });
+    ASSERT_TRUE(sections.has_value());
+
+    std::optional<ASFW::Audio::DICE::DiceExtensionCaps> caps;
+    protocol.Transaction().ReadExtensionCaps(*sections,
+        [&](IOReturn status, ASFW::Audio::DICE::DiceExtensionCaps value) {
+            ASSERT_EQ(status, kIOReturnSuccess);
+            caps = value;
+        });
+    ASSERT_TRUE(caps.has_value());
+
+    std::optional<ASFW::Audio::DICE::DiceRouterEntries> routes;
+    protocol.Transaction().ReadRouterEntries(*sections, *caps,
+        [&](IOReturn status, ASFW::Audio::DICE::DiceRouterEntries value) {
+            ASSERT_EQ(status, kIOReturnSuccess);
+            routes = value;
+        });
+    ASSERT_TRUE(routes.has_value());
+    ASSERT_EQ(routes->count, 2);
+    EXPECT_EQ(routes->At(0).destinationBlock, 4);
+    EXPECT_EQ(routes->At(0).sourceBlock, 11);
+    EXPECT_EQ(routes->At(1).destinationChannel, 0);
+    EXPECT_EQ(routes->At(1).sourceChannel, 3);
+    EXPECT_EQ(bus.routerHeaderReadCount, 1);
+    EXPECT_EQ(bus.routerEntriesReadCount, 1);
+
+    std::optional<ASFW::Audio::DICE::DiceMixerCoefficients> mixer;
+    protocol.Transaction().ReadMixerCoefficients(*sections, *caps,
+        [&](IOReturn status, ASFW::Audio::DICE::DiceMixerCoefficients value) {
+            ASSERT_EQ(status, kIOReturnSuccess);
+            mixer = value;
+        });
+    ASSERT_TRUE(mixer.has_value());
+    EXPECT_EQ(mixer->inputCount, 18);
+    EXPECT_EQ(mixer->outputCount, 16);
+    EXPECT_EQ(mixer->At(0, 0), 1);
+    EXPECT_EQ(mixer->At(0, 17), 18);
+    EXPECT_EQ(mixer->At(15, 17), 288);
+    EXPECT_EQ(bus.mixerReadCount, 3);
+
+    std::optional<ASFW::Audio::DICE::DiceRouterEntries> peaks;
+    protocol.Transaction().ReadPeakEntries(*sections, *caps,
+        [&](IOReturn status, ASFW::Audio::DICE::DiceRouterEntries value) {
+            ASSERT_EQ(status, kIOReturnSuccess);
+            peaks = value;
+        });
+    ASSERT_TRUE(peaks.has_value());
+    ASSERT_EQ(peaks->count, 128);
+    EXPECT_EQ(peaks->At(0).peak, 0x2100);
+    EXPECT_EQ(peaks->At(1).peak, 0x2200);
+    EXPECT_EQ(bus.peakReadCount, 1);
 }
 
 // ---------------------------------------------------------------------------

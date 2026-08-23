@@ -114,6 +114,40 @@ void ReadSectionChunked(Protocols::Ports::ProtocolRegisterIO& io,
         });
 }
 
+// Control and meter snapshots must not silently use half an old read. Unlike
+// stream labels above, their state is transactional from the profile's point
+// of view: any short reply or failed chunk rejects the whole snapshot.
+void ReadSectionChunkedExact(Protocols::Ports::ProtocolRegisterIO& io,
+                             uint32_t sectionOffsetBytes,
+                             size_t totalBytes,
+                             std::shared_ptr<std::vector<uint8_t>> accumulated,
+                             std::function<void(IOReturn)> done) {
+    const size_t have = accumulated->size();
+    if (have >= totalBytes) {
+        done(kIOReturnSuccess);
+        return;
+    }
+
+    const uint32_t chunk = static_cast<uint32_t>(
+        std::min(kSectionReadChunkBytes, totalBytes - have));
+    (void)io.ReadBlock(
+        MakeDICEAddress(sectionOffsetBytes + static_cast<uint32_t>(have)),
+        chunk,
+        [&io, sectionOffsetBytes, totalBytes, accumulated,
+         done = std::move(done), chunk](Async::AsyncStatus status,
+                                        std::span<const uint8_t> payload) mutable {
+            if (status != Async::AsyncStatus::kSuccess || payload.size() != chunk) {
+                done(status == Async::AsyncStatus::kSuccess ? kIOReturnUnderrun
+                                                            : MapReadStatus(status));
+                return;
+            }
+
+            accumulated->insert(accumulated->end(), payload.begin(), payload.end());
+            ReadSectionChunkedExact(io, sectionOffsetBytes, totalBytes, accumulated,
+                                    std::move(done));
+        });
+}
+
 } // anonymous namespace
 
 DICETransaction::DICETransaction(Protocols::Ports::ProtocolRegisterIO& io)
@@ -198,6 +232,123 @@ void DICETransaction::ReadExtensionCaps(
                      caps.mixer.readOnly ? 1U : 0U, caps.mixer.inputCount,
                      caps.mixer.outputCount, caps.general.peakAvailable ? 1U : 0U);
             Common::InvokeSharedCallback(callbackState, kIOReturnSuccess, caps);
+        });
+}
+
+void DICETransaction::ReadRouterEntries(
+    const ExtensionSections& sections,
+    const DiceExtensionCaps& caps,
+    std::function<void(IOReturn, DiceRouterEntries)> callback) {
+    auto callbackState = Common::ShareCallback(std::move(callback));
+    if (!caps.router.exposed || caps.router.maximumEntryCount > kDiceMaximumRouterEntries ||
+        sections.router.size < sizeof(uint32_t)) {
+        Common::InvokeSharedCallback(callbackState, kIOReturnUnsupported, DiceRouterEntries{});
+        return;
+    }
+
+    const uint32_t routerOffset = ExtensionAbsoluteOffset(sections.router);
+    (void)io_.ReadBlock(
+        MakeDICEAddress(routerOffset), sizeof(uint32_t),
+        [this, callbackState, routerOffset, sectionSize = sections.router.size,
+         maximumEntries = caps.router.maximumEntryCount](Async::AsyncStatus status,
+                                                          std::span<const uint8_t> payload) {
+            if (status != Async::AsyncStatus::kSuccess || payload.size() != sizeof(uint32_t)) {
+                Common::InvokeSharedCallback(callbackState,
+                                              status == Async::AsyncStatus::kSuccess
+                                                  ? kIOReturnUnderrun : MapReadStatus(status),
+                                              DiceRouterEntries{});
+                return;
+            }
+
+            const uint32_t countWord = ReadBE32(payload.data());
+            if (countWord > maximumEntries || countWord > kDiceMaximumRouterEntries ||
+                countWord > ((sectionSize - sizeof(uint32_t)) / DiceRouterEntry::kWireSize)) {
+                Common::InvokeSharedCallback(callbackState, kIOReturnUnderrun, DiceRouterEntries{});
+                return;
+            }
+            const uint16_t count = static_cast<uint16_t>(countWord);
+            if (count == 0) {
+                Common::InvokeSharedCallback(callbackState, kIOReturnSuccess, DiceRouterEntries{});
+                return;
+            }
+
+            const size_t bytes = size_t{count} * DiceRouterEntry::kWireSize;
+            auto accumulated = std::make_shared<std::vector<uint8_t>>();
+            accumulated->reserve(bytes);
+            ReadSectionChunkedExact(io_, routerOffset + sizeof(uint32_t), bytes, accumulated,
+                [callbackState, accumulated, count](IOReturn readStatus) {
+                    DiceRouterEntries entries{};
+                    if (readStatus != kIOReturnSuccess ||
+                        !DecodeDiceRouterEntries(*accumulated, count, entries)) {
+                        Common::InvokeSharedCallback(callbackState,
+                                                      readStatus == kIOReturnSuccess
+                                                          ? kIOReturnUnderrun : readStatus,
+                                                      DiceRouterEntries{});
+                        return;
+                    }
+                    Common::InvokeSharedCallback(callbackState, kIOReturnSuccess, entries);
+                });
+        });
+}
+
+void DICETransaction::ReadMixerCoefficients(
+    const ExtensionSections& sections,
+    const DiceExtensionCaps& caps,
+    std::function<void(IOReturn, DiceMixerCoefficients)> callback) {
+    auto callbackState = Common::ShareCallback(std::move(callback));
+    if (!caps.mixer.exposed || caps.mixer.inputCount > kDiceMaximumMixerInputs ||
+        caps.mixer.outputCount > kDiceMaximumMixerOutputs ||
+        sections.mixer.size < sizeof(uint32_t) + kDiceMixerCoefficientWireBytes) {
+        Common::InvokeSharedCallback(callbackState, kIOReturnUnsupported, DiceMixerCoefficients{});
+        return;
+    }
+
+    const uint32_t mixerOffset = ExtensionAbsoluteOffset(sections.mixer, sizeof(uint32_t));
+    auto accumulated = std::make_shared<std::vector<uint8_t>>();
+    accumulated->reserve(kDiceMixerCoefficientWireBytes);
+    ReadSectionChunkedExact(io_, mixerOffset, kDiceMixerCoefficientWireBytes, accumulated,
+        [callbackState, accumulated, mixerCaps = caps.mixer](IOReturn readStatus) {
+            DiceMixerCoefficients coefficients{};
+            if (readStatus != kIOReturnSuccess ||
+                !DecodeDiceMixerCoefficients(*accumulated, mixerCaps, coefficients)) {
+                Common::InvokeSharedCallback(callbackState,
+                                              readStatus == kIOReturnSuccess
+                                                  ? kIOReturnUnderrun : readStatus,
+                                              DiceMixerCoefficients{});
+                return;
+            }
+            Common::InvokeSharedCallback(callbackState, kIOReturnSuccess, coefficients);
+        });
+}
+
+void DICETransaction::ReadPeakEntries(
+    const ExtensionSections& sections,
+    const DiceExtensionCaps& caps,
+    std::function<void(IOReturn, DiceRouterEntries)> callback) {
+    auto callbackState = Common::ShareCallback(std::move(callback));
+    const uint16_t count = caps.router.maximumEntryCount;
+    if (!caps.general.peakAvailable || !caps.router.exposed ||
+        count == 0 || count > kDiceMaximumRouterEntries ||
+        sections.peak.size < size_t{count} * DiceRouterEntry::kWireSize) {
+        Common::InvokeSharedCallback(callbackState, kIOReturnUnsupported, DiceRouterEntries{});
+        return;
+    }
+
+    const size_t bytes = size_t{count} * DiceRouterEntry::kWireSize;
+    auto accumulated = std::make_shared<std::vector<uint8_t>>();
+    accumulated->reserve(bytes);
+    ReadSectionChunkedExact(io_, ExtensionAbsoluteOffset(sections.peak), bytes, accumulated,
+        [callbackState, accumulated, count](IOReturn readStatus) {
+            DiceRouterEntries entries{};
+            if (readStatus != kIOReturnSuccess ||
+                !DecodeDiceRouterEntries(*accumulated, count, entries)) {
+                Common::InvokeSharedCallback(callbackState,
+                                              readStatus == kIOReturnSuccess
+                                                  ? kIOReturnUnderrun : readStatus,
+                                              DiceRouterEntries{});
+                return;
+            }
+            Common::InvokeSharedCallback(callbackState, kIOReturnSuccess, entries);
         });
 }
 
