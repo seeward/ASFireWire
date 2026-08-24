@@ -1,6 +1,70 @@
 import Combine
 import Foundation
 
+/// Owns the process's one loopback MCP listener. SwiftUI may recreate views
+/// and their observable models while the app remains alive; a listener cannot
+/// be recreated on the same port. Keeping ownership here lets every model
+/// observe the same host instead of treating EADDRINUSE as a startup failure.
+@MainActor
+private final class ASFWMCPHostCoordinator: ObservableObject {
+    static let shared = ASFWMCPHostCoordinator()
+
+    @Published private(set) var status: ASFWMCPHostStatus = .stopped
+
+    private var host: ASFWMCPHost<LiveASFWDriverControl>?
+    private var startTask: Task<ASFWMCPHostStatus, Error>?
+
+    func start(connector: ASFWDriverConnector,
+               configuration: ASFWMCPHostConfiguration) async throws -> ASFWMCPHostStatus {
+        if status.isRunning {
+            return status
+        }
+        if let startTask {
+            return try await startTask.value
+        }
+
+        let driver = LiveASFWDriverControl(backend: connector)
+        let core = ASFWMCPCore(
+            configuration: ASFWMCPRuntimeConfiguration(
+                mode: .unrestrictedWrite,
+                writePolicyAvailable: true,
+                swiftTestGatePassed: true,
+                rawDeveloperTierEnabled: true
+            ),
+            driver: driver
+        )
+        let nextHost = ASFWMCPHost(core: core)
+        nextHost.onStatusChanged = { [weak self] status in
+            self?.status = status
+        }
+        host = nextHost
+
+        let task = Task { @MainActor [weak self, nextHost] () throws -> ASFWMCPHostStatus in
+            do {
+                let nextStatus = try await nextHost.start(configuration: configuration)
+                self?.status = nextStatus
+                return nextStatus
+            } catch {
+                self?.host = nil
+                self?.status = .stopped
+                throw error
+            }
+        }
+        startTask = task
+        defer { startTask = nil }
+        return try await task.value
+    }
+
+    func stop() async {
+        if let startTask {
+            _ = try? await startTask.value
+        }
+        await host?.stop()
+        host = nil
+        status = .stopped
+    }
+}
+
 @MainActor
 final class ASFWMCPControlViewModel: ObservableObject {
     @Published var isEnabled: Bool
@@ -13,7 +77,8 @@ final class ASFWMCPControlViewModel: ObservableObject {
 
     private let connector: ASFWDriverConnector
     private let defaults: UserDefaults
-    private var host: ASFWMCPHost<LiveASFWDriverControl>?
+    private let hostCoordinator: ASFWMCPHostCoordinator
+    private var statusSubscription: AnyCancellable?
 
     private enum DefaultsKey {
         static let enabled = "asfw.mcp.enabled"
@@ -24,10 +89,15 @@ final class ASFWMCPControlViewModel: ObservableObject {
     init(connector: ASFWDriverConnector, defaults: UserDefaults = .standard) {
         self.connector = connector
         self.defaults = defaults
+        self.hostCoordinator = .shared
         let savedPort = defaults.integer(forKey: DefaultsKey.port)
         self.portText = savedPort > 0 ? "\(savedPort)" : "8765"
         self.isEnabled = defaults.bool(forKey: DefaultsKey.enabled)
         self.guardedFCPExperimentsEnabled = defaults.bool(forKey: DefaultsKey.guardedFCPExperimentsEnabled)
+        self.status = self.hostCoordinator.status
+        self.statusSubscription = self.hostCoordinator.$status.sink { [weak self] status in
+            self?.status = status
+        }
     }
 
     var endpointText: String {
@@ -83,23 +153,14 @@ final class ASFWMCPControlViewModel: ObservableObject {
         lastError = nil
         defaults.set(Int(port), forKey: DefaultsKey.port)
 
-        let driver = LiveASFWDriverControl(backend: connector)
-        let core = ASFWMCPCore(
-            configuration: runtimeConfiguration(),
-            driver: driver
-        )
-        let nextHost = ASFWMCPHost(core: core)
-        nextHost.onStatusChanged = { [weak self] status in
-            self?.status = status
-        }
-
         do {
-            status = try await nextHost.start(configuration: ASFWMCPHostConfiguration(port: port))
-            host = nextHost
+            status = try await hostCoordinator.start(
+                connector: connector,
+                configuration: ASFWMCPHostConfiguration(port: port)
+            )
         } catch {
             lastError = "Failed to start MCP host: \(error.localizedDescription)"
             status = .stopped
-            host = nil
             isEnabled = false
             defaults.set(false, forKey: DefaultsKey.enabled)
         }
@@ -110,9 +171,7 @@ final class ASFWMCPControlViewModel: ObservableObject {
     func stop() async {
         isChangingState = true
         lastError = nil
-        await host?.stop()
-        host = nil
-        status = .stopped
+        await hostCoordinator.stop()
         isChangingState = false
     }
 
@@ -129,14 +188,5 @@ final class ASFWMCPControlViewModel: ObservableObject {
             lastError = "Hardware smoke found \(report.failures.count) failure(s): \(report.conciseSummary)"
         }
         isChangingState = false
-    }
-
-    private func runtimeConfiguration() -> ASFWMCPRuntimeConfiguration {
-        return ASFWMCPRuntimeConfiguration(
-            mode: .unrestrictedWrite,
-            writePolicyAvailable: true,
-            swiftTestGatePassed: true,
-            rawDeveloperTierEnabled: true
-        )
     }
 }
