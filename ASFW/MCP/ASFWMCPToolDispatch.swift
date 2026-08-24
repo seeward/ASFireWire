@@ -72,8 +72,10 @@ extension ASFWMCPCore {
             return await dispatchReadQuadlet(name, decoder: decoder)
         case "asfw_dice_read_register":
             return await dispatchDiceReadRegister(name, decoder: decoder)
-        case "asfw_read_device_register_block", "asfw_dice_read_block", "asfw_tcat_read_application_block":
+        case "asfw_read_device_register_block":
             return await dispatchReadBlock(name, decoder: decoder)
+        case "asfw_dice_read_block", "asfw_tcat_read_application_block":
+            return await dispatchDiceReadBlock(name, decoder: decoder)
         case "asfw_write_device_register":
             return await dispatchWriteQuadlet(name, decoder: decoder)
         case "asfw_write_device_register_block":
@@ -385,6 +387,93 @@ extension ASFWMCPCore {
         }
     }
 
+    /// DICE register sections are not uniformly readable as one block: the
+    /// Saffire Pro 24 DSP rejects a block read at the first mixer coefficient
+    /// address, yet accepts the same address as quadlets.  Match the bounded
+    /// diagnostic reader: retain efficient 512-byte blocks where accepted and
+    /// fall back to quadlets only for the rejected chunk.  Generic raw block
+    /// reads remain strict; this workaround is deliberately TCAT/DICE-scoped.
+    private func dispatchDiceReadBlock(_ name: String, decoder: ASFWMCPToolArgumentDecoder) async -> ASFWMCPToolCallResult {
+        do {
+            let request = ASFWMCPReadBlockRequest(address: try decoder.address(), length: try decoder.uint32("length"))
+            if let error = request.validationError {
+                return malformedTransactionResult(name, kind: request.kind, generation: request.address.generation, code: error)
+            }
+            return transactionToolResult(name, await executeDiceReadBlock(request))
+        } catch {
+            return malformedToolResult(name, reason: error.localizedDescription)
+        }
+    }
+
+    private func executeDiceReadBlock(_ request: ASFWMCPReadBlockRequest) async -> ASFWMCPTransactionResult {
+        var payload: [UInt8] = []
+        payload.reserveCapacity(Int(request.length))
+        var offset: UInt32 = 0
+        var blockReads = 0
+        var quadletFallbacks = 0
+
+        while offset < request.length {
+            let remaining = request.length - offset
+            let chunkLength = min(remaining, 512)
+            guard let chunkAddress = addressOffset(request.address, by: offset) else {
+                return .malformed(kind: request.kind,
+                                  correlationId: "dice-read-address-overflow",
+                                  generation: request.address.generation)
+            }
+            let chunkRequest = ASFWMCPReadBlockRequest(address: chunkAddress, length: chunkLength)
+            let block = await driver.executeReadBlock(chunkRequest)
+            blockReads += 1
+
+            if block.ok, let bytes = block.payload, bytes.count == Int(chunkLength) {
+                payload.append(contentsOf: bytes)
+            } else {
+                for quadletOffset in stride(from: UInt32(0), to: chunkLength, by: 4) {
+                    guard let quadletAddress = addressOffset(chunkAddress, by: quadletOffset) else {
+                        return .malformed(kind: request.kind,
+                                          correlationId: "dice-read-address-overflow",
+                                          generation: request.address.generation)
+                    }
+                    let quadlet = await driver.executeReadQuadlet(
+                        ASFWMCPReadQuadletRequest(address: quadletAddress)
+                    )
+                    guard quadlet.ok, let bytes = quadlet.payload, bytes.count == 4 else {
+                        return quadlet
+                    }
+                    payload.append(contentsOf: bytes)
+                    quadletFallbacks += 1
+                }
+            }
+            offset += chunkLength
+        }
+
+        return ASFWMCPTransactionResult(
+            kind: request.kind,
+            ok: true,
+            status: .ok,
+            generation: request.address.generation,
+            correlationId: "dice-read-chunked",
+            rCode: "complete",
+            payload: payload,
+            decoded: .object([
+                "transfer": .string(quadletFallbacks == 0 ? "block" : "blockWithQuadletFallback"),
+                "blockReads": .int(blockReads),
+                "quadletFallbacks": .int(quadletFallbacks),
+            ])
+        )
+    }
+
+    private func addressOffset(_ address: ASFWMCPAddress, by offset: UInt32) -> ASFWMCPAddress? {
+        let (low, overflow) = address.addressLow.addingReportingOverflow(offset)
+        guard !overflow else { return nil }
+        return ASFWMCPAddress(
+            deviceInstanceId: address.deviceInstanceId,
+            nodeId: address.nodeId,
+            generation: address.generation,
+            addressHigh: address.addressHigh,
+            addressLow: low
+        )
+    }
+
     private func dispatchWriteQuadlet(
         _ name: String,
         decoder: ASFWMCPToolArgumentDecoder,
@@ -458,11 +547,38 @@ extension ASFWMCPCore {
         protocolHint: String?
     ) async -> ASFWMCPToolCallResult {
         do {
-            let request = ASFWMCPCompareSwapRequest(
-                address: try decoder.address(),
-                expected: try decoder.uint32("expected"),
-                swap: try decoder.uint32("swap")
-            )
+            let address = try decoder.address()
+            let operandSizeBytes = try decoder.int(
+                "sizeBytes", default: 4, range: 4...8)
+            guard operandSizeBytes == 4 || operandSizeBytes == 8 else {
+                return malformedToolResult(name, reason: "sizeBytes must be 4 or 8")
+            }
+            if name == "asfw_cas_quadlet" && operandSizeBytes != 4 {
+                return malformedToolResult(
+                    name, reason: "asfw_cas_quadlet is fixed at 4 bytes; use asfw_compare_swap for 8-byte CAS")
+            }
+
+            let request: ASFWMCPCompareSwapRequest
+            if operandSizeBytes == 8 {
+                request = ASFWMCPCompareSwapRequest(
+                    address: address,
+                    expected64: try decoder.fixedWidthHexUInt64("expectedHex", byteCount: 8),
+                    swap64: try decoder.fixedWidthHexUInt64("swapHex", byteCount: 8)
+                )
+            } else if decoder.contains("expectedHex") || decoder.contains("swapHex") {
+                request = ASFWMCPCompareSwapRequest(
+                    address: address,
+                    expected: UInt32(try decoder.fixedWidthHexUInt64("expectedHex", byteCount: 4)),
+                    swap: UInt32(try decoder.fixedWidthHexUInt64("swapHex", byteCount: 4))
+                )
+            } else {
+                // Backward-compatible quadlet form.
+                request = ASFWMCPCompareSwapRequest(
+                    address: address,
+                    expected: try decoder.uint32("expected"),
+                    swap: try decoder.uint32("swap")
+                )
+            }
             let policyRequest = ASFWMCPPolicyRequest.forTransaction(
                 kind: request.kind,
                 address: request.address,
@@ -2220,6 +2336,10 @@ private struct ASFWMCPToolArgumentDecoder {
         self.object = object
     }
 
+    func contains(_ key: String) -> Bool {
+        object[key] != nil
+    }
+
     func address() throws -> ASFWMCPAddress {
         let rawDeviceID = try uint64("deviceInstanceId")
         guard rawDeviceID != 0 else {
@@ -2306,6 +2426,21 @@ private struct ASFWMCPToolArgumentDecoder {
     func string(_ key: String, default defaultValue: String) throws -> String {
         guard object[key] != nil else { return defaultValue }
         return try string(key)
+    }
+
+    func fixedWidthHexUInt64(_ key: String, byteCount: Int) throws -> UInt64 {
+        let raw = try string(key).trimmingCharacters(in: .whitespacesAndNewlines)
+        let withoutPrefix = (raw.hasPrefix("0x") || raw.hasPrefix("0X"))
+            ? String(raw.dropFirst(2)) : raw
+        let cleaned = withoutPrefix
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: " ", with: "")
+        guard cleaned.count == byteCount * 2,
+              let value = UInt64(cleaned, radix: 16) else {
+            throw ASFWMCPToolArgumentError.malformed(
+                "\(key) must contain exactly \(byteCount * 2) hexadecimal digits")
+        }
+        return value
     }
 
     func optionalStrings(_ key: String) throws -> [String]? {

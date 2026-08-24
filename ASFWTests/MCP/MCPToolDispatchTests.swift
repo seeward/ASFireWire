@@ -136,6 +136,40 @@ struct MCPToolDispatchTests {
         #expect(await driver.unexpectedWriteAttemptCount() == 1)
     }
 
+    @Test func genericCompareSwapAcceptsFixedWidthOctletOperands() async throws {
+        let driver = MockASFWDriverControl()
+        let transport = ASFWMCPMockTransport(core: ASFWMCPCore(configuration: gateOpen, driver: driver))
+        var args = addressArgs(addressLow: 0xF000_0800)
+        args["sizeBytes"] = .int(8)
+        args["expectedHex"] = .string("00000000f0000800")
+        args["swapHex"] = .string("ffc0000100000000")
+
+        let result = await transport.callTool("asfw_compare_swap", arguments: .object(args))
+
+        let data = try object(result)
+        #expect(result.ok)
+        #expect(data["status"] == .string("ok"))
+        #expect(data["payload"] == .array([
+            .int(0), .int(0), .int(0), .int(0), .int(0xF0), .int(0), .int(0x08), .int(0)
+        ]))
+        #expect(await driver.unexpectedWriteAttemptCount() == 1)
+    }
+
+    @Test func octletCompareSwapRejectsNumericOperandsBeforeDriverAccess() async {
+        let driver = MockASFWDriverControl()
+        let transport = ASFWMCPMockTransport(core: ASFWMCPCore(configuration: gateOpen, driver: driver))
+        var args = addressArgs(addressLow: 0xF000_0800)
+        args["sizeBytes"] = .int(8)
+        args["expected"] = .int(0)
+        args["swap"] = .int(1)
+
+        let result = await transport.callTool("asfw_compare_swap", arguments: .object(args))
+
+        #expect(result.ok == false)
+        #expect(result.errors.first?.code == .malformedRequest)
+        #expect(await driver.unexpectedWriteAttemptCount() == 0)
+    }
+
     @Test func developerFcpCommandReturnsRouteBoundReceipt() async throws {
         let driver = MockASFWDriverControl()
         let transport = ASFWMCPMockTransport(core: ASFWMCPCore(configuration: gateOpen, driver: driver))

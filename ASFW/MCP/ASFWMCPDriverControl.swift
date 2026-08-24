@@ -59,6 +59,7 @@ actor MockASFWDriverControl: ASFWDriverControlling {
     private let topologyValid: Bool
     private let droppedEventCount: UInt32
     private let timeoutCount: UInt32
+    private let blockReadFailures: Set<UInt32>
     private var attemptedWriteCount: Int = 0
     private var duetInputFdf: UInt8 = 0x02
     private var duetOutputFdf: UInt8 = 0x02
@@ -73,7 +74,8 @@ actor MockASFWDriverControl: ASFWDriverControlling {
         linkActive: Bool = true,
         topologyValid: Bool = true,
         droppedEventCount: UInt32 = 0,
-        timeoutCount: UInt32 = 0
+        timeoutCount: UInt32 = 0,
+        blockReadFailures: Set<UInt32> = []
     ) {
         self.generation = generation
         self.nodes = nodes
@@ -84,6 +86,7 @@ actor MockASFWDriverControl: ASFWDriverControlling {
         self.topologyValid = topologyValid
         self.droppedEventCount = droppedEventCount
         self.timeoutCount = timeoutCount
+        self.blockReadFailures = blockReadFailures
     }
 
     func fetchTelemetrySnapshot(configuration: ASFWMCPRuntimeConfiguration) async -> ASFWMCPTelemetrySnapshot {
@@ -320,6 +323,16 @@ actor MockASFWDriverControl: ASFWDriverControlling {
         if request.validationError != nil {
             return .malformed(kind: request.kind, correlationId: "mock-read-block-malformed", generation: generation)
         }
+        if blockReadFailures.contains(request.address.addressLow) {
+            return ASFWMCPTransactionResult(
+                kind: request.kind,
+                ok: false,
+                status: .rcodeError,
+                generation: generation,
+                correlationId: "mock-read-block-rejected",
+                rCode: "addressError"
+            )
+        }
         let pattern = quadletBytes(mockQuadletValue(for: request.address))
         let payload = (0..<Int(request.length)).map { pattern[$0 % pattern.count] }
         return ASFWMCPTransactionResult(
@@ -367,7 +380,8 @@ actor MockASFWDriverControl: ASFWDriverControlling {
 
     func executeCompareSwap(_ request: ASFWMCPCompareSwapRequest) async -> ASFWMCPTransactionResult {
         attemptedWriteCount += 1
-        let comparePassed = request.expected == mockQuadletValue(for: request.address)
+        let current = UInt64(mockQuadletValue(for: request.address))
+        let comparePassed = request.expected == current
         return ASFWMCPTransactionResult(
             kind: request.kind,
             ok: comparePassed,
@@ -376,7 +390,9 @@ actor MockASFWDriverControl: ASFWDriverControlling {
             correlationId: "mock-compare-swap",
             rCode: comparePassed ? "complete" : "conflictError",
             durationUsec: 180,
-            payload: quadletBytes(comparePassed ? request.swap : mockQuadletValue(for: request.address))
+            // A lock response carries the value observed before the operation,
+            // regardless of whether the compare matched.
+            payload: request.busBytes(current)
         )
     }
 

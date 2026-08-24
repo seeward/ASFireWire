@@ -123,16 +123,41 @@ nonisolated struct ASFWMCPWriteBlockRequest: Equatable, Sendable {
     }
 }
 
-/// Quadlet lock / compare-and-swap (taxonomy §5.5 `asfw_cas_quadlet`). Also the
-/// primitive behind IRM and CMP mutations.
+/// 32/64-bit lock / compare-and-swap. Quadlet CAS remains the primitive behind
+/// IRM and CMP mutations; generic async transactions can also carry an octlet
+/// operand (for example DICE GLOBAL_OWNER).
 nonisolated struct ASFWMCPCompareSwapRequest: Equatable, Sendable {
     let address: ASFWMCPAddress
-    /// Expected current quadlet (host byte order).
-    let expected: UInt32
-    /// Value to store if the comparison matches (host byte order).
-    let swap: UInt32
+    /// Values are kept as integers but encoded explicitly in big-endian bus
+    /// order at the DriverConnector boundary.
+    let expected: UInt64
+    let swap: UInt64
+    let operandSizeBytes: Int
 
     var kind: ASFWMCPTransactionKind { .compareSwap }
+
+    init(address: ASFWMCPAddress, expected: UInt32, swap: UInt32) {
+        self.address = address
+        self.expected = UInt64(expected)
+        self.swap = UInt64(swap)
+        self.operandSizeBytes = 4
+    }
+
+    init(address: ASFWMCPAddress, expected64: UInt64, swap64: UInt64) {
+        self.address = address
+        self.expected = expected64
+        self.swap = swap64
+        self.operandSizeBytes = 8
+    }
+
+    var expectedBytes: [UInt8] { busBytes(expected) }
+    var swapBytes: [UInt8] { busBytes(swap) }
+
+    func busBytes(_ value: UInt64) -> [UInt8] {
+        (0..<operandSizeBytes).map { index in
+            UInt8(truncatingIfNeeded: value >> UInt64((operandSizeBytes - 1 - index) * 8))
+        }
+    }
 }
 
 /// Terminal status of a (possibly refused) async transaction.

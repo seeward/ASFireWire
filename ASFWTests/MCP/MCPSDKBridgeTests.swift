@@ -27,6 +27,26 @@ struct MCPSDKBridgeTests {
         #expect(schema["type"] == .string("object"))
     }
 
+    @Test func genericCompareSwapSchemaAdvertisesOctletHexOperands() async throws {
+        let tools = await bridge(configuration: ASFWMCPRuntimeConfiguration(
+            mode: .developerWriteEnabled,
+            writePolicyAvailable: true,
+            swiftTestGatePassed: true,
+            rawDeveloperTierEnabled: false
+        )).listTools()
+        let compareSwap = try #require(tools.first { $0.name == "asfw_compare_swap" })
+        guard case .object(let schema) = compareSwap.inputSchema,
+              case .object(let properties)? = schema["properties"],
+              case .object(let size)? = properties["sizeBytes"] else {
+            Issue.record("Compare-swap schema should publish its operand forms.")
+            return
+        }
+
+        #expect(size["enum"] == .array([.int(4), .int(8)]))
+        #expect(properties["expectedHex"] != nil)
+        #expect(properties["swapHex"] != nil)
+    }
+
     @Test func resourceMetadataMapsToJSONResources() async throws {
         let resources = await bridge().listResources()
         let health = try #require(resources.first { $0.uri == "asfw://control-plane/health" })

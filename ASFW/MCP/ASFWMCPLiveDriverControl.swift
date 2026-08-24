@@ -566,19 +566,38 @@ final class LiveASFWDriverControl: ASFWDriverControlling {
     }
 
     func executeCompareSwap(_ request: ASFWMCPCompareSwapRequest) async -> ASFWMCPTransactionResult {
-        await executeTransaction(
+        let result = await executeTransaction(
             kind: request.kind,
             address: request.address,
-            payloadCapacity: 4,
+            payloadCapacity: request.operandSizeBytes,
             issue: {
                 backend.mcpAsyncCompareSwap(
                     deviceID: request.address.deviceInstanceId,
                     addressHigh: request.address.addressHigh,
                     addressLow: request.address.addressLow,
-                    compareValue: Data(quadletBytes(request.expected)),
-                    newValue: Data(quadletBytes(request.swap))
+                    compareValue: Data(request.expectedBytes),
+                    newValue: Data(request.swapBytes)
                 )
             }
+        )
+
+        // IEEE 1394 lock responses return the pre-operation value. A transport-
+        // successful response therefore does not by itself mean that the compare
+        // matched. Surface the semantic outcome truthfully to MCP callers.
+        guard result.ok else { return result }
+        guard let payload = result.payload,
+              payload.count == request.operandSizeBytes else {
+            return result.replacingCompareOutcome(
+                ok: false,
+                status: .rcodeError,
+                rCode: "dataError"
+            )
+        }
+        let compareMatched = payload == request.expectedBytes
+        return result.replacingCompareOutcome(
+            ok: compareMatched,
+            status: compareMatched ? .ok : .compareFailed,
+            rCode: compareMatched ? result.rCode : "conflictError"
         )
     }
 
@@ -1218,6 +1237,25 @@ private extension ASFWMCPTransactionResult {
             kind: kind,
             ok: ok,
             status: ok ? status : .rcodeError,
+            generation: generation,
+            correlationId: correlationId,
+            rCode: rCode,
+            durationUsec: durationUsec,
+            payload: payload,
+            decoded: decoded,
+            policy: policy
+        )
+    }
+
+    func replacingCompareOutcome(
+        ok: Bool,
+        status: ASFWMCPTransactionStatus,
+        rCode: String?
+    ) -> ASFWMCPTransactionResult {
+        ASFWMCPTransactionResult(
+            kind: kind,
+            ok: ok,
+            status: status,
             generation: generation,
             correlationId: correlationId,
             rCode: rCode,

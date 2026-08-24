@@ -80,4 +80,18 @@ struct MCPIrmCasToolsTests {
         #expect(decide(gateOpen, req).decision == .allowed)
         #expect(decide(config(.readOnlyDeveloper), req).decision == .requiresDeveloperMode)
     }
+
+    @Test func octletCasEncodesBothOperandsInBusOrder() {
+        let cas = ASFWMCPCompareSwapRequest(
+            address: ASFWMCPAddress(deviceInstanceId: DeviceInstanceID(3), nodeId: 2,
+                                    generation: 17, addressHigh: 0xFFFF,
+                                    addressLow: 0xE000_0028),
+            expected64: 0xFFFF_0000_0000_0000,
+            swap64: 0xFFC0_0001_0000_0000
+        )
+
+        #expect(cas.operandSizeBytes == 8)
+        #expect(cas.expectedBytes == [0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        #expect(cas.swapBytes == [0xFF, 0xC0, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00])
+    }
 }

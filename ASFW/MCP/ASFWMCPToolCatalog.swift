@@ -47,7 +47,7 @@ enum ASFWMCPToolCatalog {
         ASFWMCPToolDefinition(name: "asfw_read_block", group: "async_transactions", visibility: .readOnly, readOnly: true, idempotent: false, summary: "Submit an async block read."),
         ASFWMCPToolDefinition(name: "asfw_write_quadlet", group: "async_transactions", visibility: .developerWrite, readOnly: false, idempotent: false, summary: "Policy-gated async quadlet write."),
         ASFWMCPToolDefinition(name: "asfw_write_block", group: "async_transactions", visibility: .developerWrite, readOnly: false, idempotent: false, summary: "Policy-gated async block write."),
-        ASFWMCPToolDefinition(name: "asfw_compare_swap", group: "async_transactions", visibility: .developerWrite, readOnly: false, idempotent: false, summary: "Policy-gated compare-swap transaction.")
+        ASFWMCPToolDefinition(name: "asfw_compare_swap", group: "async_transactions", visibility: .developerWrite, readOnly: false, idempotent: false, summary: "Policy-gated 32/64-bit compare-swap transaction; use fixed-width hex operands for 64-bit CAS.")
     ]
 
     // `registerTools` is owned by ASFWMCPRegisterTools.swift (FW-80) — the

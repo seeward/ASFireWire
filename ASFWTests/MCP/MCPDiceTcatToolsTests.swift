@@ -60,6 +60,32 @@ struct MCPDiceTcatToolsTests {
         #expect(ASFWMCPTcatApplicationBlockReadRequest(address: diceAddress(), length: 4096).validationError == .payloadTooLarge)
     }
 
+    @Test func diceBlockReadFallsBackToQuadletsForARejectedChunk() async {
+        let address = diceAddress(low: 0xE020_0064)
+        let driver = MockASFWDriverControl(blockReadFailures: [address.addressLow])
+        let core = ASFWMCPCore(configuration: .readOnlyDeveloper, driver: driver)
+
+        let result = await core.callTool(name: "asfw_dice_read_block", arguments: .object([
+            "deviceInstanceId": .uint64(address.deviceInstanceId.rawValue),
+            "nodeId": .uint64(UInt64(address.nodeId)),
+            "generation": .uint64(UInt64(address.generation)),
+            "addressHigh": .uint64(UInt64(address.addressHigh)),
+            "addressLow": .uint64(UInt64(address.addressLow)),
+            "length": .uint64(8),
+        ]))
+
+        #expect(result.ok)
+        guard case let .object(data) = result.data,
+              case let .array(payload)? = data["payload"],
+              case let .object(decoded)? = data["decoded"] else {
+            Issue.record("Expected a transaction payload and fallback metadata.")
+            return
+        }
+        #expect(payload.count == 8)
+        #expect(decoded["transfer"] == .string("blockWithQuadletFallback"))
+        #expect(decoded["quadletFallbacks"] == .int(2))
+    }
+
     @Test func registerWriteIsPolicyDeniedInReadOnlyAndAllowedWhenOpen() {
         let request = ASFWMCPDiceRegisterWriteRequest(address: diceAddress(), value: 0x1234_5678)
         #expect(decide(config(.readOnlyDeveloper), request.policyRequest(currentGeneration: 17)).decision == .requiresDeveloperMode)

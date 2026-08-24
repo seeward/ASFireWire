@@ -198,6 +198,60 @@ extension ASFWMCPToolDefinition {
                 ),
                 "additionalProperties": .bool(false)
             ])
+        case "asfw_compare_swap":
+            return .object([
+                "type": .string("object"),
+                "properties": .object([
+                    "deviceInstanceId": .object([
+                        "type": .string("integer"), "minimum": .int(1),
+                        "description": .string("Opaque physical instance ID from asfw://nodes.")
+                    ]),
+                    "nodeId": .object([
+                        "type": .string("integer"), "minimum": .int(0), "maximum": .int(63)
+                    ]),
+                    "generation": .object([
+                        "type": .string("integer"), "minimum": .int(0)
+                    ]),
+                    "addressHigh": .object([
+                        "type": .string("integer"), "minimum": .int(0), "maximum": .int(65535)
+                    ]),
+                    "addressLow": .object([
+                        "type": .string("integer"), "minimum": .int(0), "maximum": .int(Int(UInt32.max))
+                    ]),
+                    "sizeBytes": .object([
+                        "type": .string("integer"),
+                        "enum": .array([.int(4), .int(8)]),
+                        "default": .int(4),
+                        "description": .string("4 keeps the legacy numeric expected/swap form; 8 requires expectedHex and swapHex.")
+                    ]),
+                    "expected": .object([
+                        "type": .string("integer"), "minimum": .int(0), "maximum": .int(Int(UInt32.max)),
+                        "description": .string("Legacy 32-bit expected value; valid only when sizeBytes=4.")
+                    ]),
+                    "swap": .object([
+                        "type": .string("integer"), "minimum": .int(0), "maximum": .int(Int(UInt32.max)),
+                        "description": .string("Legacy 32-bit replacement value; valid only when sizeBytes=4.")
+                    ]),
+                    "expectedHex": .object([
+                        "type": .string("string"),
+                        "pattern": .string("^(0[xX])?[0-9a-fA-F]{8}([0-9a-fA-F]{8})?$"),
+                        "description": .string("Exactly 8 hex digits for 4-byte CAS or 16 for 8-byte CAS.")
+                    ]),
+                    "swapHex": .object([
+                        "type": .string("string"),
+                        "pattern": .string("^(0[xX])?[0-9a-fA-F]{8}([0-9a-fA-F]{8})?$"),
+                        "description": .string("Exactly 8 hex digits for 4-byte CAS or 16 for 8-byte CAS.")
+                    ]),
+                    "dryRun": .object([
+                        "type": .string("boolean"), "default": .bool(false)
+                    ])
+                ]),
+                "required": .array(
+                    ["deviceInstanceId", "nodeId", "generation", "addressHigh", "addressLow"]
+                        .map(MCP.Value.string)
+                ),
+                "additionalProperties": .bool(false)
+            ])
         default:
             return .object([
                 "type": .string("object"),

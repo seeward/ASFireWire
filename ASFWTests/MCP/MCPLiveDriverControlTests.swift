@@ -42,6 +42,55 @@ struct MCPLiveDriverControlTests {
         #expect(backend.resultPolls == 0)
     }
 
+    @Test func compareSwap64PassesOctletsAndReportsMatchedCompare() async {
+        let backend = FakeLiveDriverBackend()
+        backend.results[0x44] = ASFWDriverConnector.AsyncTransactionResult(
+            status: 0,
+            dataLength: 8,
+            responseCode: 0,
+            payload: Data([0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        )
+        let control = LiveASFWDriverControl(backend: backend, transactionTimeout: 0.1, pollIntervalNs: 1_000)
+
+        let result = await control.executeCompareSwap(
+            ASFWMCPCompareSwapRequest(
+                address: address(generation: 17),
+                expected64: 0xFFFF_0000_0000_0000,
+                swap64: 0xFFC0_0001_0000_0000
+            )
+        )
+
+        #expect(result.ok)
+        #expect(result.status == .ok)
+        #expect(backend.compareValue == Data([0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]))
+        #expect(backend.newValue == Data([0xFF, 0xC0, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]))
+        #expect(backend.compareSwaps == 1)
+    }
+
+    @Test func compareSwapReportsTransportSuccessWithDifferentOldValueAsCompareFailed() async {
+        let backend = FakeLiveDriverBackend()
+        backend.results[0x44] = ASFWDriverConnector.AsyncTransactionResult(
+            status: 0,
+            dataLength: 8,
+            responseCode: 0,
+            payload: Data(repeating: 0, count: 8)
+        )
+        let control = LiveASFWDriverControl(backend: backend, transactionTimeout: 0.1, pollIntervalNs: 1_000)
+
+        let result = await control.executeCompareSwap(
+            ASFWMCPCompareSwapRequest(
+                address: address(generation: 17),
+                expected64: 0xFFFF_0000_0000_0000,
+                swap64: 0xFFC0_0001_0000_0000
+            )
+        )
+
+        #expect(result.ok == false)
+        #expect(result.status == .compareFailed)
+        #expect(result.rCode == "conflictError")
+        #expect(result.payload == Array(repeating: 0, count: 8))
+    }
+
     @Test func nodeDiscoveryMapsProtocolHints() async {
         let backend = FakeLiveDriverBackend()
         backend.devices = [
@@ -507,6 +556,8 @@ private final class FakeLiveDriverBackend: ASFWLiveDriverBackend {
     var writes = 0
     var blockWrites = 0
     var compareSwaps = 0
+    var compareValue: Data?
+    var newValue: Data?
     var resultPolls = 0
     var fcpCommands = 0
     var fcpResponse: Data?
@@ -558,6 +609,8 @@ private final class FakeLiveDriverBackend: ASFWLiveDriverBackend {
 
     func mcpAsyncCompareSwap(deviceID: DeviceInstanceID, addressHigh: UInt16, addressLow: UInt32, compareValue: Data, newValue: Data) -> UInt16? {
         compareSwaps += 1
+        self.compareValue = compareValue
+        self.newValue = newValue
         return nextHandle
     }
 

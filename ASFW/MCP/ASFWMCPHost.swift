@@ -26,10 +26,21 @@ struct ASFWMCPHostStatus: Equatable, Sendable {
     )
 }
 
-enum ASFWMCPHostError: Error, Equatable {
+enum ASFWMCPHostError: Error, Equatable, LocalizedError {
     case alreadyRunning
     case invalidPort(UInt16)
     case listenerFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .alreadyRunning:
+            return "MCP host is already running."
+        case .invalidPort(let port):
+            return "Invalid MCP port \(port)."
+        case .listenerFailed(let reason):
+            return "MCP listener failed: \(reason)"
+        }
+    }
 }
 
 @MainActor
