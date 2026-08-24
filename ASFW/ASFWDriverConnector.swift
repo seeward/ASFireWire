@@ -86,6 +86,7 @@ final class ASFWDriverConnector: ObservableObject {
         case getAudioSemanticTopologyEndpoints = 1029
         case getAudioSemanticConsoleLayout = 1030
         case getAudioSemanticMatrix = 1031
+        case getAudioSemanticMatrixEndpoints = 1032
     }
 
     // MARK: - Re-exported Models

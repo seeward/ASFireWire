@@ -1,9 +1,9 @@
+import Foundation
 import SwiftUI
 
-/// Saffire's page is deliberately a single hardware view. The old page sent
-/// raw TCAT application writes from Swift; this one consumes only the profile's
-/// semantic matrix projection. Matrix editing follows once the driver owns its
-/// matching bounded write transaction and notice choreography.
+/// The Saffire page consumes the driver-owned active router projection. It
+/// deliberately has no DICE register knowledge and does not reconstruct a
+/// graph from raw coefficients in Swift.
 struct SaffireMixerView: View {
     private static let saffirePro24Kind: UInt32 = 0x5350_3234 // "SP24"
 
@@ -14,7 +14,7 @@ struct SaffireMixerView: View {
     var body: some View {
         Group {
             if let matrix {
-                SaffireSemanticMatrixView(matrix: matrix, status: status)
+                SaffireMixerRack(matrix: matrix, status: status)
             } else {
                 ContentUnavailableView(
                     "Saffire mixer is loading",
@@ -28,7 +28,7 @@ struct SaffireMixerView: View {
 
     private func pollMatrix() async {
         while !Task.isCancelled {
-            let endpointIDs = connector.getAudioConfigurationEndpointIDs()
+            let endpointIDs = connector.getAudioSemanticMatrixEndpointIDs()
             var found: AudioSemanticMatrixSnapshot?
             for endpointID in endpointIDs {
                 let candidate = await readMatrix(endpointID)
@@ -41,9 +41,9 @@ struct SaffireMixerView: View {
                 matrix = found
                 status = "Hardware state revision \(found.stateRevision)"
             } else if endpointIDs.isEmpty {
-                status = "No published Saffire audio endpoint."
+                status = "No published Saffire mixer endpoint."
             } else {
-                status = "Driver is reading the hardware mixer state…"
+                status = "Driver is reading the active hardware router…"
             }
             try? await Task.sleep(for: .seconds(1))
         }
@@ -58,50 +58,61 @@ struct SaffireMixerView: View {
     }
 }
 
-private struct SaffireSemanticMatrixView: View {
+/// One selected hardware stereo mix bus at a time. The Saffire has a dense
+/// 18 × 16 matrix, but presenting all sixteen destinations at once turns a
+/// console into a spreadsheet. Pair selection retains every real crosspoint
+/// while keeping each source strip readable.
+private struct SaffireMixerRack: View {
     let matrix: AudioSemanticMatrixSnapshot
     let status: String
+    @State private var selectedPair = 0
+
+    private var pairCount: Int { matrix.outputs.count / 2 }
+    private var safePair: Int { min(max(0, selectedPair), max(0, pairCount - 1)) }
+    private var leftOutput: Int { safePair * 2 }
+    private var rightOutput: Int { leftOutput + 1 }
+    private var mixName: String { "MIX \(leftOutput + 1)/\(rightOutput + 1)" }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                AudioTopologyCard(title: "Hardware Monitor Matrix",
-                                  systemImage: "square.grid.3x3.fill",
+                AudioTopologyCard(title: "Hardware Audio Console",
+                                  systemImage: "slider.vertical.3",
                                   badge: "Saffire") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Each row is a driver-resolved mixer input; each column is a hardware mixer output.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        ScrollView([.horizontal, .vertical]) {
-                            VStack(alignment: .leading, spacing: 5) {
-                                HStack(spacing: 5) {
-                                    Text("SOURCE →")
-                                        .frame(width: 132, alignment: .leading)
-                                    ForEach(matrix.outputs) { axis in
-                                        Text(axisLabel(axis))
-                                            .font(.caption2.monospaced().bold())
-                                            .foregroundStyle(.orange)
-                                            .frame(width: 54)
-                                    }
-                                }
-                                ForEach(Array(matrix.inputs.indices), id: \.self) { inputIndex in
-                                    let axis = matrix.inputs[inputIndex]
-                                    HStack(spacing: 5) {
-                                        Text(axisLabel(axis))
-                                            .font(.caption.monospaced())
-                                            .frame(width: 132, alignment: .leading)
-                                        ForEach(Array(matrix.outputs.indices), id: \.self) { outputIndex in
-                                            SaffireMatrixCell(
-                                                value: matrix.coefficient(output: outputIndex, input: inputIndex) ?? 0,
-                                                maximum: matrix.coefficientMaximum)
-                                        }
-                                    }
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack(alignment: .firstTextBaseline) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Stereo monitor mixer")
+                                    .font(.headline)
+                                Text("Choose a hardware Mix pair; each strip shows its independent L/R sends.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Text("Q2.14 · 0 dB = 0x4000")
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+
+                        mixSelector
+
+                        ScrollView(.horizontal) {
+                            AudioConsoleRackBank(title: "SOURCES", tint: .cyan) {
+                                ForEach(Array(matrix.inputs.enumerated()), id: \.element.id) { index, axis in
+                                    SaffireSourceStrip(
+                                        axis: axis,
+                                        mixName: mixName,
+                                        left: matrix.coefficient(output: leftOutput, input: index) ?? 0,
+                                        right: matrix.coefficient(output: rightOutput, input: index) ?? 0,
+                                        gainLaw: matrix.gainLaw
+                                    )
                                 }
                             }
-                            .padding(10)
+                            .padding(.vertical, 2)
                         }
-                        .frame(minHeight: 360, maxHeight: 540)
-                        Text(status)
+                        .scrollIndicators(.visible)
+
+                        Text("\(status) · Snapshot is read-only until the driver publishes a bounded mixer-write transaction and commit notice.")
                             .font(.caption.monospaced())
                             .foregroundStyle(.secondary)
                     }
@@ -110,38 +121,166 @@ private struct SaffireSemanticMatrixView: View {
             .padding(20)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .onChange(of: pairCount) { _, count in
+            selectedPair = min(selectedPair, max(0, count - 1))
+        }
     }
 
-    private func axisLabel(_ axis: AudioSemanticMatrixSnapshot.Axis) -> String {
-        switch axis.signalKind {
-        case .analogLine: return "ANALOG \(axis.signalIndex)"
-        case .hostStream: return "DAW \(axis.signalIndex)"
-        case .digitalSpdif: return "S/PDIF \(axis.signalIndex)"
-        case .digitalAdat: return "ADAT \(axis.signalIndex)"
-        case .auxiliary: return "MIX \(axis.signalIndex)"
-        default: return "SOURCE \(axis.signalIndex)"
+    private var mixSelector: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(0..<pairCount, id: \.self) { pair in
+                    let first = pair * 2 + 1
+                    AudioConsoleStripToggle(
+                        title: "MIX \(first)/\(first + 1)",
+                        accessibilityLabel: "Select Mix \(first) through \(first + 1)",
+                        isOn: safePair == pair,
+                        isEnabled: true,
+                        tint: .orange
+                    ) {
+                        selectedPair = pair
+                    }
+                    .frame(width: 86)
+                }
+            }
         }
     }
 }
 
-private struct SaffireMatrixCell: View {
-    let value: UInt16
-    let maximum: UInt16
+private struct SaffireSourceStrip: View {
+    let axis: AudioSemanticMatrixSnapshot.Axis
+    let mixName: String
+    let left: UInt16
+    let right: UInt16
+    let gainLaw: AudioSemanticMatrixSnapshot.GainLaw
 
-    private var amount: Double {
-        guard maximum != 0 else { return 0 }
-        return Double(value) / Double(maximum)
+    private enum Metrics {
+        static let width: CGFloat = 142
+        static let faderHeight: CGFloat = 194
     }
 
+    private var title: String { SaffireSignalLabel.title(axis) }
+    private var tint: Color { SaffireSignalLabel.tint(axis) }
+
     var body: some View {
-        RoundedRectangle(cornerRadius: 4)
-            .fill(Color.cyan.opacity(0.1 + amount * 0.9))
-            .overlay {
-                Text("\(Int((amount * 100).rounded()))")
-                    .font(.system(size: 9, weight: .bold).monospaced())
-                    .foregroundStyle(amount > 0.52 ? .black : .secondary)
+        AudioConsoleStripShell(title: title, tint: tint, width: Metrics.width) {
+            AudioConsoleStripSlots(controlHeight: 34, faderHeight: Metrics.faderHeight) {
+                VStack(spacing: 2) {
+                    Text(mixName)
+                        .font(.system(size: 9, weight: .bold).monospaced())
+                        .foregroundStyle(.secondary)
+                    Text(SaffireSignalLabel.detail(axis))
+                        .font(.system(size: 8).monospaced())
+                        .foregroundStyle(.secondary)
+                }
+            } faderBlock: {
+                HStack(alignment: .center, spacing: 5) {
+                    sendFader("→ L", coefficient: left)
+                    SaffireQ214FaderScale()
+                    sendFader("→ R", coefficient: right)
+                }
             }
-            .frame(width: 54, height: 28)
-            .accessibilityLabel("Mix coefficient \(Int((amount * 100).rounded())) percent")
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(title), sends to \(mixName)")
+    }
+
+    private func sendFader(_ side: String, coefficient: UInt16) -> some View {
+        VStack(spacing: 3) {
+            Text(side)
+                .font(.system(size: 9, weight: .bold).monospaced())
+                .foregroundStyle(.secondary)
+            AudioConsoleVerticalFader(
+                title: "\(title) \(side) send",
+                value: SaffireQ214.decibels(coefficient, gainLaw: gainLaw) ?? -60,
+                range: -60...12,
+                step: 0.1,
+                tint: tint,
+                trackWidth: 5,
+                thumbSize: CGSize(width: 28, height: 13),
+                fillsTrack: true,
+                isEnabled: false,
+                valueDescription: { _ in SaffireQ214.format(coefficient, gainLaw: gainLaw) }
+            )
+            Text(SaffireQ214.format(coefficient, gainLaw: gainLaw))
+                .font(.system(size: 9, weight: .semibold).monospaced())
+                .foregroundStyle(tint)
+                .lineLimit(1)
+        }
+    }
+}
+
+private enum SaffireSignalLabel {
+    static func title(_ axis: AudioSemanticMatrixSnapshot.Axis) -> String {
+        switch axis.signalKind {
+        case .analogMicXlr: return "MIC \(axis.signalIndex)"
+        case .analogInstrument: return "INST \(axis.signalIndex)"
+        case .analogLine: return "LINE \(axis.signalIndex)"
+        case .hostStream: return "DAW \(axis.signalIndex)"
+        case .digitalSpdif: return "S/PDIF \(axis.signalIndex)"
+        case .digitalAdat: return "ADAT \(axis.signalIndex)"
+        case .auxiliary:
+            return axis.signalIndex <= 2 ? "CH STRIP \(axis.signalIndex)"
+                                         : "REVERB \(axis.signalIndex - 2)"
+        default: return "SOURCE \(axis.signalIndex)"
+        }
+    }
+
+    static func detail(_ axis: AudioSemanticMatrixSnapshot.Axis) -> String {
+        switch axis.signalKind {
+        case .auxiliary: return axis.signalIndex <= 2 ? "DSP RETURN" : "FX RETURN"
+        case .hostStream: return "HOST PLAYBACK"
+        case .digitalAdat, .digitalSpdif: return "DIGITAL INPUT"
+        default: return "ANALOG INPUT"
+        }
+    }
+
+    static func tint(_ axis: AudioSemanticMatrixSnapshot.Axis) -> Color {
+        switch axis.signalKind {
+        case .hostStream: return .purple
+        case .auxiliary: return .yellow
+        case .digitalAdat, .digitalSpdif: return .cyan
+        default: return .cyan
+        }
+    }
+}
+
+private enum SaffireQ214 {
+    static func decibels(_ coefficient: UInt16,
+                         gainLaw: AudioSemanticMatrixSnapshot.GainLaw) -> Double? {
+        guard coefficient != 0 else { return nil }
+        switch gainLaw {
+        case .unsignedQ214Amplitude:
+            return 20 * log10(Double(coefficient) / 16_384)
+        case .linearNormalized:
+            return 20 * log10(Double(coefficient) / Double(UInt16.max))
+        }
+    }
+
+    static func format(_ coefficient: UInt16,
+                       gainLaw: AudioSemanticMatrixSnapshot.GainLaw) -> String {
+        guard let value = decibels(coefficient, gainLaw: gainLaw) else { return "OFF" }
+        return String(format: "%+.1f dB", value)
+    }
+}
+
+private struct SaffireQ214FaderScale: View {
+    private let ticks: [Double] = [12, 0, -12, -24, -36, -48, -60]
+
+    var body: some View {
+        GeometryReader { geometry in
+            let travel = max(10, geometry.size.height - 28)
+            ZStack(alignment: .top) {
+                ForEach(ticks, id: \.self) { db in
+                    Text(db == 0 ? "0" : "\(Int(db))")
+                        .font(.system(size: 7).monospaced())
+                        .foregroundStyle(.secondary)
+                        .offset(y: 18 + (12 - db) / 72 * travel - 4)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+        .frame(width: 22)
+        .accessibilityHidden(true)
     }
 }

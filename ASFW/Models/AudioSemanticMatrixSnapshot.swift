@@ -3,6 +3,11 @@ import Foundation
 /// Dense driver-owned mixer state. Axis identities are semantic labels, not
 /// DICE router block/channel fields or coefficient-register offsets.
 nonisolated struct AudioSemanticMatrixSnapshot: Equatable, Sendable {
+    enum GainLaw: UInt16, Equatable, Sendable {
+        case linearNormalized = 1
+        case unsignedQ214Amplitude = 2
+    }
+
     struct Axis: Identifiable, Equatable, Sendable {
         let portID: UInt32
         let signalKind: AudioSemanticTopologySnapshot.SignalKind
@@ -16,6 +21,7 @@ nonisolated struct AudioSemanticMatrixSnapshot: Equatable, Sendable {
     let topologyRevision: UInt64
     let stateRevision: UInt32
     let coefficientMaximum: UInt16
+    let gainLaw: GainLaw
     let inputs: [Axis]
     let outputs: [Axis]
     /// Row-major output × input gain cells, exactly as described by the

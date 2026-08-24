@@ -310,6 +310,17 @@ extension ASFWDriverConnector {
         }
     }
 
+    /// Enumerates only endpoints whose protocol exposes a coherent semantic
+    /// matrix. This is distinct from configuration endpoints: Saffire's mixer
+    /// does not imply a rate/optical configuration card.
+    func getAudioSemanticMatrixEndpointIDs() -> [AudioEndpointID] {
+        guard isConnected,
+              let data = callStruct(.getAudioSemanticMatrixEndpoints, initialCap: 72) else {
+            return []
+        }
+        return AudioSemanticMatrixWireDecoder.decodeEndpointIDs(data)
+    }
+
     private func getAudioSemanticMatrix(
         endpointID: AudioEndpointID
     ) -> AudioSemanticMatrixSnapshot? {
@@ -751,11 +762,29 @@ private enum AudioSemanticMatrixWireDecoder {
     private static let maximumInputs = 24
     private static let maximumOutputs = 24
 
+    static func decodeEndpointIDs(_ data: Data) -> [AudioEndpointID] {
+        guard data.count == 72,
+              let version = data.u32(at: 0), version == 1,
+              let countRaw = data.u32(at: 4), countRaw <= 8 else {
+            return []
+        }
+        let count = Int(countRaw)
+        var endpoints: [AudioEndpointID] = []
+        endpoints.reserveCapacity(count)
+        for index in 0..<count {
+            guard let raw = data.u64(at: 8 + index * MemoryLayout<UInt64>.size), raw != 0 else {
+                return []
+            }
+            endpoints.append(AudioEndpointID(rawValue: raw))
+        }
+        return endpoints
+    }
+
     static func decode(_ data: Data) -> AudioSemanticMatrixSnapshot? {
         guard data.count == wireSize,
               let wireVersion = data.u32(at: 0), wireVersion == 1,
               let endpoint = data.u64(at: 8), endpoint != 0,
-              let matrixVersion = data.u32(at: matrixStart), matrixVersion == 1,
+              let matrixVersion = data.u32(at: matrixStart), matrixVersion == 2,
               let deviceKind = data.u32(at: matrixStart + 4), deviceKind != 0,
               let topologyRevision = data.u64(at: matrixStart + 8), topologyRevision != 0,
               let stateRevision = data.u32(at: matrixStart + 16),
@@ -764,7 +793,9 @@ private enum AudioSemanticMatrixWireDecoder {
               inputCount <= maximumInputs,
               let outputCount = data.u32(at: matrixStart + 28), outputCount > 0,
               outputCount <= maximumOutputs,
-              let coefficientMaximum = data.u16(at: matrixStart + 32), coefficientMaximum > 0 else {
+              let coefficientMaximum = data.u16(at: matrixStart + 32), coefficientMaximum > 0,
+              let gainLawRaw = data.u16(at: matrixStart + 34),
+              let gainLaw = AudioSemanticMatrixSnapshot.GainLaw(rawValue: gainLawRaw) else {
             return nil
         }
         let inputs = (0..<Int(inputCount)).compactMap { axis(data, inputAxisOffset + $0 * axisSize) }
@@ -784,7 +815,7 @@ private enum AudioSemanticMatrixWireDecoder {
         }
         return .init(endpointID: AudioEndpointID(rawValue: endpoint), deviceKind: deviceKind,
                      topologyRevision: topologyRevision, stateRevision: stateRevision,
-                     coefficientMaximum: coefficientMaximum, inputs: inputs,
+                     coefficientMaximum: coefficientMaximum, gainLaw: gainLaw, inputs: inputs,
                      outputs: outputs, coefficients: coefficients)
     }
 
