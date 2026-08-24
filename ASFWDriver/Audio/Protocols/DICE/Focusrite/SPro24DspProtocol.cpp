@@ -126,6 +126,7 @@ SPro24DspProtocol::SPro24DspProtocol(Protocols::Ports::FireWireBusOps& busOps,
             PrepareStoppedForRate(clock, std::move(callback));
         });
     semanticMatrixLock_ = IOLockAlloc();
+    semanticControlLock_ = IOLockAlloc();
     ASFW_LOG(DICE, "SPro24DspProtocol created for instance=%llu node=0x%04x",
              route.deviceInstanceId.value,
              route.nodeId);
@@ -136,6 +137,10 @@ SPro24DspProtocol::~SPro24DspProtocol() {
     if (semanticMatrixLock_) {
         IOLockFree(semanticMatrixLock_);
         semanticMatrixLock_ = nullptr;
+    }
+    if (semanticControlLock_) {
+        IOLockFree(semanticControlLock_);
+        semanticControlLock_ = nullptr;
     }
 }
 
@@ -156,7 +161,10 @@ void SPro24DspProtocol::InitializeAsync(InitCallback callback) {
     ASFW_LOG(DICE, "SPro24DspProtocol::InitializeAsync defers generic DICE discovery to TCAT runtime");
     const IOReturn status = tcat_.Initialize();
     callback(status);
-    if (status == kIOReturnSuccess) PrimeSemanticMatrix();
+    if (status == kIOReturnSuccess) {
+        PrimeSemanticMatrix();
+        PrimeSemanticControls();
+    }
 }
 
 bool SPro24DspProtocol::CopyAudioSemanticMatrix(
@@ -169,6 +177,54 @@ bool SPro24DspProtocol::CopyAudioSemanticMatrix(
     if (ready) outSnapshot.stateRevision = semanticMatrixRevision_;
     IOLockUnlock(semanticMatrixLock_);
     return ready;
+}
+
+bool SPro24DspProtocol::CopyAudioControlSurfaceSnapshot(
+    Audio::AudioControlSurfaceSnapshot& outSnapshot) const noexcept {
+    outSnapshot = {};
+    if (!semanticControlLock_) return false;
+
+    IOLockLock(semanticControlLock_);
+    const auto& state = semanticControls_;
+    if (!state.valid) {
+        IOLockUnlock(semanticControlLock_);
+        return false;
+    }
+
+    outSnapshot.kind = Audio::AudioControlSurfaceKind::FocusriteSPro24Dsp;
+    outSnapshot.stateRevision = state.revision;
+    auto emit = [&outSnapshot](uint32_t id, int32_t value) {
+        outSnapshot.values[outSnapshot.valueCount++] = {.id = id, .value = value};
+    };
+    emit(SPro24DspControl::kMicInputMode1, static_cast<int32_t>(state.input.micLevels[0]));
+    emit(SPro24DspControl::kMicInputMode2, static_cast<int32_t>(state.input.micLevels[1]));
+    emit(SPro24DspControl::kLineInputLevel34, static_cast<int32_t>(state.input.lineLevels[0]));
+    emit(SPro24DspControl::kLineInputLevel56, static_cast<int32_t>(state.input.lineLevels[1]));
+    for (uint32_t index = 0; index < state.output.volumes.size(); ++index) {
+        emit(SPro24DspControl::kOutputVolumeFirst + index, state.output.volumes[index]);
+        emit(SPro24DspControl::kOutputMuteFirst + index, state.output.volMutes[index] ? 1 : 0);
+    }
+    emit(SPro24DspControl::kGlobalMute, state.output.muteEnabled ? 1 : 0);
+    emit(SPro24DspControl::kGlobalDim, state.output.dimEnabled ? 1 : 0);
+    for (uint32_t index = 0; index < 2; ++index) {
+        emit(SPro24DspControl::kChannelStripEqFirst + index, state.effects.eqEnable[index] ? 1 : 0);
+        emit(SPro24DspControl::kChannelStripCompressorFirst + index,
+             state.effects.compEnable[index] ? 1 : 0);
+        emit(SPro24DspControl::kChannelStripEqAfterCompFirst + index,
+             state.effects.eqAfterComp[index] ? 1 : 0);
+    }
+    emit(SPro24DspControl::kReverbEnabled, state.reverb.enabled ? 1 : 0);
+    emit(SPro24DspControl::kInSituMode, state.inSitu ? 1 : 0);
+    IOLockUnlock(semanticControlLock_);
+    return true;
+}
+
+void SPro24DspProtocol::ApplyAudioControlValue(
+    uint32_t /*controlId*/, int32_t /*value*/, Audio::IAudioControlSurface::ApplyCallback callback) {
+    // The existing protocol setters are intentionally not exposed yet. Their
+    // commit notices are known, but each UI mutation still needs a guarded
+    // read-modify-write/readback transaction proven against the hardware.
+    if (callback) callback(kIOReturnUnsupported);
 }
 
 void SPro24DspProtocol::HandleExtensionSectionsRead(IOReturn status,
@@ -257,6 +313,44 @@ void SPro24DspProtocol::PrimeSemanticMatrix() noexcept {
                             });
                     });
             });
+    });
+}
+
+void SPro24DspProtocol::PrimeSemanticControls() noexcept {
+    EnsureExtensionsLoaded([this](IOReturn sectionStatus) {
+        if (sectionStatus != kIOReturnSuccess) return;
+        GetInputParams([this](IOReturn inputStatus, InputParams input) {
+            if (inputStatus != kIOReturnSuccess) return;
+            GetOutputGroupState([this, input](IOReturn outputStatus, OutputGroupState output) {
+                if (outputStatus != kIOReturnSuccess) return;
+                GetEffectParams([this, input, output](IOReturn effectStatus, EffectGeneralParams effects) {
+                    if (effectStatus != kIOReturnSuccess) return;
+                    GetCompressorState([this, input, output, effects](
+                        IOReturn compressorStatus, CompressorState compressor) {
+                        if (compressorStatus != kIOReturnSuccess) return;
+                        GetReverbState([this, input, output, effects, compressor](
+                            IOReturn reverbStatus, ReverbState reverb) {
+                            if (reverbStatus != kIOReturnSuccess) return;
+                            GetInSituMode([this, input, output, effects, compressor, reverb](
+                                IOReturn inSituStatus, bool inSitu) {
+                                if (inSituStatus != kIOReturnSuccess || !semanticControlLock_) return;
+                                IOLockLock(semanticControlLock_);
+                                semanticControls_.input = input;
+                                semanticControls_.output = output;
+                                semanticControls_.effects = effects;
+                                semanticControls_.compressor = compressor;
+                                semanticControls_.reverb = reverb;
+                                semanticControls_.inSitu = inSitu;
+                                semanticControls_.valid = true;
+                                ++semanticControls_.revision;
+                                IOLockUnlock(semanticControlLock_);
+                                ASFW_LOG(DICE, "SPro24 semantic controls cached");
+                            });
+                        });
+                    });
+                });
+            });
+        });
     });
 }
 
@@ -835,6 +929,12 @@ void SPro24DspProtocol::SetInSituMode(bool enable, VoidCallback callback) {
             return;
         }
         SendSwNotice(SwNotice::InSituMode, callback);
+    });
+}
+
+void SPro24DspProtocol::GetInSituMode(ResultCallback<bool> callback) {
+    ReadAppQuad(kDspEnableOffset, [callback = std::move(callback)](IOReturn status, uint32_t value) mutable {
+        callback(status, status == kIOReturnSuccess && value != 0);
     });
 }
 

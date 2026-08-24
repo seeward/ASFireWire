@@ -21,6 +21,10 @@ enum class AudioControlSurfaceKind : uint32_t {
     /// Values are semantic parameter IDs; their definitions come from the
     /// accompanying IAudioSemanticTopology snapshot, never from this enum.
     ApogeeDuet = 0x4455'4554, // "DUET"
+    /// The Saffire Pro 24 DSP has a device-specific mixer matrix, plus a
+    /// bounded input/output/DSP control surface.  The latter travels here;
+    /// its dense mixer coefficients remain in IAudioSemanticMatrix.
+    FocusriteSPro24Dsp = 0x5350'3234, // "SP24"
 };
 
 struct AudioControlValue final {

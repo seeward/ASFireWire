@@ -745,7 +745,7 @@ TEST(DICETcatProtocolTests, ReadDuplexHealthReturnsCurrentGlobalLockState) {
     EXPECT_EQ(bus.globalReadCount, 1);
 }
 
-TEST(SPro24DspProtocolTests, InitializationPrimesSemanticMatrixWithoutDuplicatingVendorReads) {
+TEST(SPro24DspProtocolTests, InitializationPrimesSemanticMatrixAndControlReadback) {
     CountingFireWireBus bus;
     RouteState routeState;
     SPro24DspProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
@@ -757,6 +757,10 @@ TEST(SPro24DspProtocolTests, InitializationPrimesSemanticMatrixWithoutDuplicatin
     EXPECT_EQ(bus.currentConfigRouterHeaderReadCount, 1);
     EXPECT_EQ(bus.currentConfigRouterEntriesReadCount, 1);
     EXPECT_EQ(bus.mixerReadCount, 3);
+    // Channel-strip flags are one application quadlet read. The InSitu mode
+    // read is served by the fake's dedicated DICE path; remaining control
+    // state is block-read.
+    EXPECT_EQ(bus.appQuadReadCount, 1);
 
     ASFW::Audio::AudioSemanticMatrixSnapshot matrix{};
     ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(matrix));
@@ -766,6 +770,11 @@ TEST(SPro24DspProtocolTests, InitializationPrimesSemanticMatrixWithoutDuplicatin
     EXPECT_EQ(matrix.inputs[0].signalKind, ASFW::Audio::AudioSemanticSignalKind::Auxiliary);
     EXPECT_EQ(matrix.inputs[14].signalKind, ASFW::Audio::AudioSemanticSignalKind::HostStream);
 
+    ASFW::Audio::AudioControlSurfaceSnapshot controls{};
+    ASSERT_TRUE(protocol.CopyAudioControlSurfaceSnapshot(controls));
+    EXPECT_EQ(controls.kind, ASFW::Audio::AudioControlSurfaceKind::FocusriteSPro24Dsp);
+    EXPECT_EQ(controls.valueCount, 26U);
+
     std::optional<IOReturn> callbackStatus;
     protocol.GetEffectParams([&](IOReturn status, EffectGeneralParams /*params*/) {
         callbackStatus = status;
@@ -774,7 +783,7 @@ TEST(SPro24DspProtocolTests, InitializationPrimesSemanticMatrixWithoutDuplicatin
     ASSERT_TRUE(callbackStatus.has_value());
     EXPECT_EQ(*callbackStatus, kIOReturnSuccess);
     EXPECT_EQ(bus.extensionReadCount, 1);
-    EXPECT_EQ(bus.appQuadReadCount, 1);
+    EXPECT_EQ(bus.appQuadReadCount, 2);
 }
 
 void ExpectColdCountRefinement(uint32_t coldCount) {

@@ -7,12 +7,14 @@
 #pragma once
 
 #include "SaffireproCommon.hpp"
+#include "SPro24DspControls.hpp"
 #include "SPro24DspTypes.hpp"
 #include "SPro24DspSemanticMatrix.hpp"
 #include "../Core/DICETypes.hpp"
 #include "../TCAT/DICETcatProtocol.hpp"
 #include "../../IDeviceProtocol.hpp"
 #include "../../../Shared/Topology/IAudioSemanticMatrix.hpp"
+#include "../../../Shared/Controls/IAudioControlSurface.hpp"
 #include <DriverKit/IOLib.h>
 #include <array>
 #include <atomic>
@@ -50,7 +52,8 @@ class SPro24DspProtocolTestPeer;
 /// This class provides async-callback-based access to device parameters.
 /// All operations are asynchronous since they involve FireWire transactions.
 class SPro24DspProtocol : public Audio::IDeviceProtocol,
-                          public Audio::IAudioSemanticMatrix {
+                          public Audio::IAudioSemanticMatrix,
+                          public Audio::IAudioControlSurface {
 public:
     /// Callback types for async operations
     using InitCallback = std::function<void(IOReturn)>;
@@ -89,6 +92,14 @@ public:
     }
     [[nodiscard]] bool CopyAudioSemanticMatrix(
         Audio::AudioSemanticMatrixSnapshot& outSnapshot) const noexcept override;
+    Audio::IAudioControlSurface* AsAudioControlSurface() noexcept override { return this; }
+    const Audio::IAudioControlSurface* AsAudioControlSurface() const noexcept override {
+        return this;
+    }
+    [[nodiscard]] bool CopyAudioControlSurfaceSnapshot(
+        Audio::AudioControlSurfaceSnapshot& outSnapshot) const noexcept override;
+    void ApplyAudioControlValue(uint32_t controlId, int32_t value,
+                                Audio::IAudioControlSurface::ApplyCallback callback) override;
     
     /// Device has DSP effects
     bool HasDsp() const override { return true; }
@@ -129,6 +140,7 @@ public:
     /// Select the vendor's InSitu/VRM mode. This is not a generic DSP or
     /// stream-enable switch: false selects the ordinary FX signal path.
     void SetInSituMode(bool enable, VoidCallback callback);
+    void GetInSituMode(ResultCallback<bool> callback);
     
     /// Get effect general parameters
     void GetEffectParams(ResultCallback<EffectGeneralParams> callback);
@@ -187,6 +199,18 @@ private:
     DiceRouterEntries semanticRouterEntries_{};
     uint32_t semanticMatrixRevision_{0};
     bool semanticMatrixReady_{false};
+    struct SemanticControlState final {
+        InputParams input{};
+        OutputGroupState output{};
+        EffectGeneralParams effects{};
+        CompressorState compressor{};
+        ReverbState reverb{};
+        bool inSitu{false};
+        uint32_t revision{0};
+        bool valid{false};
+    };
+    IOLock* semanticControlLock_{nullptr};
+    SemanticControlState semanticControls_{};
     ::ASFW::Scheduling::ITimerScheduler* timerScheduler_{nullptr};  // driver-owned
     std::atomic<uint64_t> extensionCommandEpoch_{0};
     std::atomic<uint64_t> extensionCommandTimer_{0};
@@ -214,6 +238,7 @@ private:
                                      ExtensionSections sections,
                                      InitCallback callback);
     void PrimeSemanticMatrix() noexcept;
+    void PrimeSemanticControls() noexcept;
     void PrepareStoppedForRate(const AudioClockConfig& clock, VoidCallback callback);
     void LoadRouterStreamConfigForRate(uint32_t rateHz, VoidCallback callback);
     void PollExtensionCommand(uint64_t epoch, uint32_t attempt, VoidCallback callback);

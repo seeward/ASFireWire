@@ -9,12 +9,13 @@ struct SaffireMixerView: View {
 
     let connector: ASFWDriverConnector
     @State private var matrix: AudioSemanticMatrixSnapshot?
+    @State private var controls: AudioControlSurfaceSnapshot?
     @State private var status = "Waiting for the Saffire Pro 24 DSP profile…"
 
     var body: some View {
         Group {
             if let matrix {
-                SaffireMixerRack(matrix: matrix, status: status)
+                SaffireMixerRack(matrix: matrix, controls: SaffireControlSurface(controls), status: status)
             } else {
                 ContentUnavailableView(
                     "Saffire mixer is loading",
@@ -39,7 +40,10 @@ struct SaffireMixerView: View {
             }
             if let found {
                 matrix = found
-                status = "Hardware state revision \(found.stateRevision)"
+                controls = await readControls(found.endpointID)
+                status = controls == nil
+                    ? "Mixer revision \(found.stateRevision) · control readback is still loading"
+                    : "Mixer revision \(found.stateRevision) · hardware controls are current"
             } else if endpointIDs.isEmpty {
                 status = "No published Saffire mixer endpoint."
             } else {
@@ -56,6 +60,14 @@ struct SaffireMixerView: View {
             }
         }
     }
+
+    private func readControls(_ endpointID: AudioEndpointID) async -> AudioControlSurfaceSnapshot? {
+        await withCheckedContinuation { continuation in
+            connector.requestAudioControlSurfaceSnapshotAsync(endpointID: endpointID) { snapshot in
+                continuation.resume(returning: snapshot)
+            }
+        }
+    }
 }
 
 /// One selected hardware stereo mix bus at a time. The Saffire has a dense
@@ -64,6 +76,7 @@ struct SaffireMixerView: View {
 /// while keeping each source strip readable.
 private struct SaffireMixerRack: View {
     let matrix: AudioSemanticMatrixSnapshot
+    let controls: SaffireControlSurface?
     let status: String
     @State private var selectedPair = 0
 
@@ -76,53 +89,61 @@ private struct SaffireMixerRack: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                AudioTopologyCard(title: "Hardware Audio Console",
-                                  systemImage: "slider.vertical.3",
-                                  badge: "Saffire") {
-                    VStack(alignment: .leading, spacing: 14) {
-                        HStack(alignment: .firstTextBaseline) {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("Stereo monitor mixer")
-                                    .font(.headline)
-                                Text("Choose a hardware Mix pair; each strip shows its independent L/R sends.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Text("Q2.14 · 0 dB = 0x4000")
-                                .font(.caption.monospaced())
-                                .foregroundStyle(.secondary)
-                        }
-
-                        mixSelector
-
-                        ScrollView(.horizontal) {
-                            AudioConsoleRackBank(title: "SOURCES", tint: .cyan) {
-                                ForEach(Array(matrix.inputs.enumerated()), id: \.element.id) { index, axis in
-                                    SaffireSourceStrip(
-                                        axis: axis,
-                                        mixName: mixName,
-                                        left: matrix.coefficient(output: leftOutput, input: index) ?? 0,
-                                        right: matrix.coefficient(output: rightOutput, input: index) ?? 0,
-                                        gainLaw: matrix.gainLaw
-                                    )
-                                }
-                            }
-                            .padding(.vertical, 2)
-                        }
-                        .scrollIndicators(.visible)
-
-                        Text("\(status) · Snapshot is read-only until the driver publishes a bounded mixer-write transaction and commit notice.")
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                    }
-                }
+                SaffireConsoleStatusCard(status: status, controls: controls)
+                SaffireInputOutputSection(controls: controls)
+                mixerSection
+                SaffireDspSection(controls: controls)
+                SaffirePatchbaySection(inputs: matrix.inputs)
             }
             .padding(20)
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .onChange(of: pairCount) { _, count in
             selectedPair = min(selectedPair, max(0, count - 1))
+        }
+    }
+
+    private var mixerSection: some View {
+        AudioTopologyCard(title: "Hardware Monitor Mixer",
+                          systemImage: "slider.vertical.3",
+                          badge: mixName) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Stereo monitor sends")
+                            .font(.headline)
+                        Text("Choose a hardware Mix pair; each source strip has one independent send to L and R.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Text("Q2.14 · 0 dB = 0x4000")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+
+                mixSelector
+
+                ScrollView(.horizontal) {
+                    AudioConsoleRackBank(title: "SOURCES", tint: .cyan) {
+                        ForEach(Array(matrix.inputs.enumerated()), id: \.element.id) { index, axis in
+                            SaffireSourceStrip(
+                                axis: axis,
+                                mixName: mixName,
+                                left: matrix.coefficient(output: leftOutput, input: index) ?? 0,
+                                right: matrix.coefficient(output: rightOutput, input: index) ?? 0,
+                                gainLaw: matrix.gainLaw
+                            )
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .scrollIndicators(.visible)
+
+                Text("Mixer write is intentionally disabled until its bounded transaction, commit edge, and readback have been verified on this hardware.")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -210,7 +231,7 @@ private struct SaffireSourceStrip: View {
     }
 }
 
-private enum SaffireSignalLabel {
+enum SaffireSignalLabel {
     static func title(_ axis: AudioSemanticMatrixSnapshot.Axis) -> String {
         switch axis.signalKind {
         case .analogMicXlr: return "MIC \(axis.signalIndex)"

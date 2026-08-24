@@ -13,6 +13,7 @@ struct AudioControlSurfaceValue: Equatable, Sendable {
 enum AudioControlSurfaceKind: UInt32, Sendable {
     case mAudioSpecialMixer = 0x4D41_3134 // "MA14"
     case apogeeDuet = 0x4455_4554 // "DUET"
+    case focusriteSPro24Dsp = 0x5350_3234 // "SP24"
 }
 
 struct AudioControlSurfaceSnapshot: Equatable, Sendable {
@@ -28,4 +29,5 @@ struct AudioControlSurfaceSnapshot: Equatable, Sendable {
 
     nonisolated var isMAudioSpecialMixer: Bool { kind == .mAudioSpecialMixer }
     nonisolated var isSemanticTopologyBacked: Bool { kind == .apogeeDuet }
+    nonisolated var isFocusriteSPro24Dsp: Bool { kind == .focusriteSPro24Dsp }
 }
