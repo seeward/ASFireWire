@@ -468,7 +468,7 @@ TEST(IsochRxTimingTests,
     EXPECT_EQ(control.rxReplayEpochResets.load(std::memory_order_acquire), 1U);
 }
 
-TEST(IsochRxTimingTests, PacketProcessorAddsAM824LabelForRawSaffireCapture) {
+TEST(IsochRxTimingTests, PacketProcessorCanDecodeRawPcm24In32CaptureWhenExplicitlySelected) {
     constexpr size_t kFrames = 1;
     constexpr size_t kDbs = 2;
     alignas(4) std::array<uint8_t, 8 + 8 + (kFrames * kDbs * 4)> packet{};
