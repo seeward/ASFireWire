@@ -5,12 +5,21 @@
 
 #include "../../Audio/Shared/Topology/IAudioSemanticMatrix.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
 namespace ASFW::UserClient::Wire {
 
 inline constexpr uint32_t kAudioSemanticMatrixWireVersion = 1;
+inline constexpr uint32_t kAudioSemanticMatrixEndpointListWireVersion = 1;
+
+struct AudioSemanticMatrixEndpointListWire final {
+    uint32_t version{kAudioSemanticMatrixEndpointListWireVersion};
+    uint32_t endpointCount{0};
+    std::array<uint64_t, ASFW::Audio::kMaxAudioSemanticMatrixEndpoints> endpointIds{};
+};
+static_assert(sizeof(AudioSemanticMatrixEndpointListWire) == 72);
 
 struct AudioSemanticMatrixSnapshotWire final {
     uint32_t version{kAudioSemanticMatrixWireVersion};

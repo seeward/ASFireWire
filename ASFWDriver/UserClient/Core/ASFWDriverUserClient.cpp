@@ -77,6 +77,7 @@ enum {
     kMethodGetAudioSemanticTopologyEndpoints = 1029,
     kMethodGetAudioSemanticConsoleLayout = 1030,
     kMethodGetAudioSemanticMatrix = 1031,
+    kMethodGetAudioSemanticMatrixEndpoints = 1032,
     kMethodSetIsochVerbosity = 40,
     // 41 retired (was the dev TX-verifier toggle)
     kMethodSetAudioAutoStart = 42,
@@ -361,6 +362,8 @@ kern_return_t HandleGetAudioSemanticConsoleLayout(
     ASFWDriver& driver, IOUserClientMethodArguments* arguments);
 kern_return_t HandleGetAudioSemanticMatrix(
     ASFWDriver& driver, IOUserClientMethodArguments* arguments);
+kern_return_t HandleGetAudioSemanticMatrixEndpoints(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments);
 kern_return_t HandleRequestAudioControlValue(
     ASFWDriver& driver, IOUserClientMethodArguments* arguments);
 kern_return_t HandleGetAudioMeterSnapshot(
@@ -429,6 +432,8 @@ MethodDispatchResult DispatchDriverControlMethods(ASFWDriver& driver,
         return HandleGetAudioSemanticConsoleLayout(driver, arguments);
     case kMethodGetAudioSemanticMatrix:
         return HandleGetAudioSemanticMatrix(driver, arguments);
+    case kMethodGetAudioSemanticMatrixEndpoints:
+        return HandleGetAudioSemanticMatrixEndpoints(driver, arguments);
     case kMethodRequestAudioControlValue:
         return HandleRequestAudioControlValue(driver, arguments);
     case kMethodSubmitAudioControlValue:
@@ -743,6 +748,29 @@ kern_return_t HandleGetAudioSemanticMatrix(
         endpointId, wire.matrix);
     if (kr != kIOReturnSuccess) return kr;
     wire.endpointId = endpointId.value;
+    auto* data = OSData::withBytes(&wire, sizeof(wire));
+    if (!data) return kIOReturnNoMemory;
+    arguments->structureOutput = data;
+    arguments->structureOutputDescriptor = nullptr;
+    return kIOReturnSuccess;
+}
+
+kern_return_t HandleGetAudioSemanticMatrixEndpoints(
+    ASFWDriver& driver, IOUserClientMethodArguments* arguments) {
+    if (!arguments || arguments->scalarInputCount != 0) return kIOReturnBadArgument;
+    auto* context = static_cast<ServiceContext*>(driver.GetServiceContext());
+    if (!context || !context->audioCoordinator) return kIOReturnNotReady;
+
+    std::array<ASFW::Audio::Devices::AudioEndpointId,
+               ASFW::Audio::kMaxAudioSemanticMatrixEndpoints> endpointIds{};
+    const uint32_t endpointCount =
+        context->audioCoordinator->CopySemanticMatrixEndpointIds(endpointIds);
+
+    ASFW::UserClient::Wire::AudioSemanticMatrixEndpointListWire wire{};
+    wire.endpointCount = endpointCount;
+    for (uint32_t i = 0; i < endpointCount; ++i) {
+        wire.endpointIds[i] = endpointIds[i].value;
+    }
     auto* data = OSData::withBytes(&wire, sizeof(wire));
     if (!data) return kIOReturnNoMemory;
     arguments->structureOutput = data;

@@ -9,6 +9,7 @@
 #include "../Devices/ResolvedAudioEndpointProfile.hpp"
 #include "../Runtime/AudioTelemetrySnapshot.hpp"
 #include "../Shared/Configuration/DeviceConfigurationSnapshot.hpp"
+#include "../Shared/Topology/IAudioSemanticMatrix.hpp"
 #include "../Shared/Topology/IAudioSemanticTopology.hpp"
 
 #include <DriverKit/IOLib.h>
@@ -56,6 +57,12 @@ public:
     [[nodiscard]] uint32_t CopySemanticTopologyEndpointIds(
         std::array<Devices::AudioEndpointId,
                    kMaxAudioSemanticTopologyEndpoints>& out) noexcept;
+    /// Lists only endpoints whose protocol publishes a semantic mixer matrix.
+    /// A matrix-only device does not need rate/optical configuration support
+    /// and may not publish a full signal graph.
+    [[nodiscard]] uint32_t CopySemanticMatrixEndpointIds(
+        std::array<Devices::AudioEndpointId,
+                   kMaxAudioSemanticMatrixEndpoints>& out) noexcept;
 
     void Remove(Devices::AudioEndpointId endpointId) noexcept;
     void Clear() noexcept;

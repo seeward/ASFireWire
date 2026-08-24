@@ -91,6 +91,8 @@ public:
                    Configuration::kMaxConfigurationSnapshotCapabilities>& out) noexcept;
     [[nodiscard]] uint32_t CopySemanticTopologyEndpointIds(
         std::array<EndpointId, kMaxAudioSemanticTopologyEndpoints>& out) noexcept;
+    [[nodiscard]] uint32_t CopySemanticMatrixEndpointIds(
+        std::array<EndpointId, kMaxAudioSemanticMatrixEndpoints>& out) noexcept;
     [[nodiscard]] IOReturn CopyAudioControlSurfaceSnapshot(
         EndpointId endpointId, AudioControlSurfaceSnapshot& outSnapshot) noexcept;
     [[nodiscard]] IOReturn CopyAudioSemanticTopology(

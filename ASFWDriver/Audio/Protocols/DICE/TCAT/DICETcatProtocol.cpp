@@ -100,6 +100,7 @@ IOReturn DICETcatProtocol::Initialize() {
         duplexCtrl_->SetTeardownCancelToken(teardownCancel_);
     }
 
+    runtimeGeometryRefinementAttempted_.store(false, std::memory_order_release);
     initialized_ = true;
     ASFW_LOG(DICE, "DICETcatProtocol::Initialize defers generic discovery until runtime");
     return kIOReturnSuccess;
@@ -227,11 +228,47 @@ void DICETcatProtocol::PrepareDuplex(const AudioDuplexChannels& channels,
     duplexCtrl_->PrepareDuplex(
         channels,
         diceClock,
-        [this, callback = std::move(callback)](IOReturn status, DiceDuplexPrepareResult result) mutable {
-            if (status == kIOReturnSuccess) {
-                CacheRuntimeCaps(result.runtimeCaps);
+        [this, desiredClock, callback = std::move(callback)](
+            IOReturn status, DiceDuplexPrepareResult result) mutable {
+            if (status != kIOReturnSuccess) {
+                callback(status, result);
+                return;
             }
-            callback(status, result);
+
+            CacheRuntimeCaps(result.runtimeCaps);
+            if (!stoppedPrepareHook_) {
+                callback(kIOReturnSuccess, result);
+                return;
+            }
+
+            // DICEDuplexBringupController has claimed the device, selected the
+            // target clock and left GLOBAL_ENABLE clear.  Do not advance to
+            // ProgramRx until the product hook has completed: TCAT extension
+            // load commands invalidate the active stream image and stop the
+            // remote engine as part of their contract.
+            stoppedPrepareHook_(
+                desiredClock,
+                [this, callback = std::move(callback), result](IOReturn hookStatus) mutable {
+                    if (hookStatus != kIOReturnSuccess) {
+                        callback(hookStatus, {});
+                        return;
+                    }
+
+                    // A stopped hook may replace the active DICE stream image.
+                    // The controller's prior stream pointers then target the
+                    // inactive image and produce addressError on ProgramRx.
+                    duplexCtrl_->RefreshPreparedSectionLayout(
+                        [this, callback = std::move(callback), result](
+                            IOReturn refreshStatus, GeneralSections sections) mutable {
+                            if (refreshStatus != kIOReturnSuccess) {
+                                callback(refreshStatus, {});
+                                return;
+                            }
+                            sections_ = sections;
+                            sectionsLoaded_ = true;
+                            callback(kIOReturnSuccess, result);
+                        });
+                });
         });
 }
 
@@ -397,6 +434,7 @@ void DICETcatProtocol::UpdateRuntimeContext(const Discovery::DeviceRouteToken& r
     // without touching the current device instance.
     sections_ = {};
     sectionsLoaded_ = false;
+    runtimeGeometryRefinementAttempted_.store(false, std::memory_order_release);
     ResetRuntimeCaps();
     io_.UpdateRoute(route);
 }
@@ -498,6 +536,42 @@ void DICETcatProtocol::EnsureRuntimeCapsLoaded(VoidCallback callback) {
 
                                 state->rx = rx;
                                 LogStreamConfigSummary("RX", state->rx);
+                                // Linux DICE performs this at generic format discovery:
+                                // immediately after claiming GLOBAL_OWNER, firmware may expose
+                                // invalid formats until the current clock is explicitly selected
+                                // (references/linux-sound-firewire-stack/firewire/dice/
+                                // dice-stream.c:635-645). This is a TCAT/DICE lifecycle rule,
+                                // not a Focusrite model quirk.
+                                if ((state->tx.numStreams == 0 || state->rx.numStreams == 0) &&
+                                    !runtimeGeometryRefinementAttempted_.exchange(
+                                        true, std::memory_order_acq_rel)) {
+                                    const DiceClockConfiguration currentClock{
+                                        .sampleRateHz = state->global.sampleRate,
+                                        .clockSelect = state->global.clockSelect,
+                                    };
+                                    ASFW_LOG(DICE,
+                                             "[DiceGeom] invalid cold stream count TX=%u RX=%u; claiming owner and re-selecting current clock 0x%08x",
+                                             state->tx.numStreams, state->rx.numStreams,
+                                             currentClock.clockSelect);
+                                    duplexCtrl_->RefineClockForStreamGeometry(
+                                        currentClock,
+                                        [this, callback = std::move(callback)](
+                                            IOReturn refineStatus,
+                                            DiceClockApplyResult) mutable {
+                                            if (refineStatus != kIOReturnSuccess) {
+                                                ASFW_LOG_ERROR(
+                                                    DICE,
+                                                    "[DiceGeom] generic clock refinement failed: 0x%x",
+                                                    refineStatus);
+                                                callback(refineStatus);
+                                                return;
+                                            }
+                                            ASFW_LOG(DICE,
+                                                     "[DiceGeom] generic clock refinement complete; re-reading stream geometry");
+                                            EnsureRuntimeCapsLoaded(std::move(callback));
+                                        });
+                                    return;
+                                }
                                 if (runtimePolicy_.preferExtensionStreamGeometry) {
                                     CacheRuntimeCapsPreferringExtension(
                                         state->global, state->tx, state->rx,

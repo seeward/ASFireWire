@@ -5,16 +5,19 @@
 #include "Common/WireFormat.hpp"
 #include "Discovery/DeviceRegistry.hpp"
 #include "Audio/Protocols/DICE/Core/DICETypes.hpp"
+#include "Audio/Protocols/DICE/Core/DICENotificationMailbox.hpp"
 #include "Audio/Protocols/DICE/Core/DICETransaction.hpp"
 #include "Audio/Protocols/DICE/Focusrite/SPro24DspProtocol.hpp"
 #include "Audio/Protocols/DICE/TCAT/DICETcatProtocol.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ASFW::Audio::DICE::TCAT {
@@ -36,6 +39,19 @@ public:
 
 } // namespace ASFW::Audio::DICE::TCAT
 
+namespace ASFW::Audio::DICE::Focusrite {
+
+class SPro24DspProtocolTestPeer {
+public:
+    static void LoadRouterStreamConfigForRate(SPro24DspProtocol& protocol,
+                                               uint32_t rateHz,
+                                               SPro24DspProtocol::VoidCallback callback) {
+        protocol.LoadRouterStreamConfigForRate(rateHz, std::move(callback));
+    }
+};
+
+} // namespace ASFW::Audio::DICE::Focusrite
+
 namespace {
 
 using ASFW::Async::AsyncHandle;
@@ -44,6 +60,7 @@ using ASFW::Async::FWAddress;
 using ASFW::Async::IFireWireBus;
 using ASFW::Audio::AudioStreamRuntimeCaps;
 using ASFW::Audio::AudioClockConfig;
+using ASFW::Audio::AudioDuplexChannels;
 using ASFW::Audio::DICE::ClockSource;
 using ASFW::Audio::DICE::DecodeDiceNickname;
 using ASFW::Audio::DICE::SplitDiceLabels;
@@ -81,19 +98,36 @@ constexpr uint32_t kDiceBaseLo = static_cast<uint32_t>(
     ASFW::Audio::DICE::DICEAbsoluteAddress(0) & 0xFFFFFFFFULL);
 constexpr uint32_t kGlobalBaseLo = static_cast<uint32_t>(
     ASFW::Audio::DICE::DICEAbsoluteAddress(0x28) & 0xFFFFFFFFULL);
+constexpr uint32_t kTxSectionBaseLo = kDiceBaseLo + 420U;
+constexpr uint32_t kRxSectionBaseLo = kDiceBaseLo + 988U;
+// A product stopped hook can atomically replace the stream image. Keep its
+// stream records deliberately disjoint from the probe-time image so this fake
+// catches a controller that retains stale section pointers after the hook.
+constexpr uint32_t kReloadedTxSectionQuadletOffset = 0x280U;
+constexpr uint32_t kReloadedRxSectionQuadletOffset = 0x3D0U;
+constexpr uint32_t kReloadedTxSectionBaseLo =
+    kDiceBaseLo + (kReloadedTxSectionQuadletOffset * sizeof(uint32_t));
+constexpr uint32_t kReloadedRxSectionBaseLo =
+    kDiceBaseLo + (kReloadedRxSectionQuadletOffset * sizeof(uint32_t));
 // Synthetic pointer-table layout: sections have to be physically disjoint.
 // In particular, the fixed 1152-byte mixer payload cannot be followed by the
 // peak section one quadlet later.
 constexpr uint32_t kAppSectionQuadletOffset = 0x3A0U;
 constexpr uint32_t kCapsSectionQuadletOffset = 0x13U;
+constexpr uint32_t kCommandSectionQuadletOffset = 0x17U;
 constexpr uint32_t kMixerSectionQuadletOffset = 0x20U;
 constexpr uint32_t kPeakSectionQuadletOffset = 0x150U;
 constexpr uint32_t kRouterSectionQuadletOffset = 0x1E0U;
 constexpr uint32_t kAppSectionBaseLo = kExtensionBaseLo + (kAppSectionQuadletOffset * 4U);
 constexpr uint32_t kCapsSectionBaseLo = kExtensionBaseLo + (kCapsSectionQuadletOffset * 4U);
+constexpr uint32_t kCommandSectionBaseLo =
+    kExtensionBaseLo + (kCommandSectionQuadletOffset * 4U);
 constexpr uint32_t kMixerSectionBaseLo = kExtensionBaseLo + (kMixerSectionQuadletOffset * 4U);
 constexpr uint32_t kPeakSectionBaseLo = kExtensionBaseLo + (kPeakSectionQuadletOffset * 4U);
 constexpr uint32_t kRouterSectionBaseLo = kExtensionBaseLo + (kRouterSectionQuadletOffset * 4U);
+constexpr uint32_t kCurrentConfigSectionQuadletOffset = 0x2B0U;
+constexpr uint32_t kCurrentConfigSectionBaseLo =
+    kExtensionBaseLo + (kCurrentConfigSectionQuadletOffset * 4U);
 constexpr uint32_t kGlobalReadBytes = 104U;
 constexpr uint32_t kClockSelect48kInternal =
     (ASFW::Audio::DICE::ClockRateIndex::k48000 << ASFW::Audio::DICE::ClockSelect::kRateShift) |
@@ -106,6 +140,10 @@ void PutBe32(uint8_t* dst, uint32_t value) {
     ASFW::FW::WriteBE32(dst, value);
 }
 
+void PutBe64(uint8_t* dst, uint64_t value) {
+    ASFW::FW::WriteBE64(dst, value);
+}
+
 std::array<uint8_t, ExtensionSections::kWireSize> MakeExtensionSectionsWire() {
     std::array<uint8_t, ExtensionSections::kWireSize> bytes{};
     const std::array<uint32_t, 18> quadlets{
@@ -115,7 +153,7 @@ std::array<uint8_t, ExtensionSections::kWireSize> MakeExtensionSectionsWire() {
         kPeakSectionQuadletOffset, 0x080,   // 128 peak records
         kRouterSectionQuadletOffset, 0x081, // count header + 128 router records
         0x270, 0x40,  // stream format
-        0x2B0, 0x80,  // current config
+        0x2B0, 0x1800,  // current config: router + low/mid/high stream images
         0x330, 0x40,  // standalone
         kAppSectionQuadletOffset, 0x100,  // application
     };
@@ -126,13 +164,18 @@ std::array<uint8_t, ExtensionSections::kWireSize> MakeExtensionSectionsWire() {
     return bytes;
 }
 
-std::array<uint8_t, GeneralSections::kWireSize> MakeGeneralSectionsWire() {
+std::array<uint8_t, GeneralSections::kWireSize> MakeGeneralSectionsWire(
+    bool useReloadedStreamImage = false) {
     std::array<uint8_t, GeneralSections::kWireSize> bytes{};
     PutBe32(bytes.data() + 0x00, 0x0000000A);
     PutBe32(bytes.data() + 0x04, 0x0000005F);
-    PutBe32(bytes.data() + 0x08, 0x00000069);
+    PutBe32(bytes.data() + 0x08, useReloadedStreamImage
+                                    ? kReloadedTxSectionQuadletOffset
+                                    : 0x00000069U);
     PutBe32(bytes.data() + 0x0C, 0x00000046);
-    PutBe32(bytes.data() + 0x10, 0x000000F7);
+    PutBe32(bytes.data() + 0x10, useReloadedStreamImage
+                                    ? kReloadedRxSectionQuadletOffset
+                                    : 0x000000F7U);
     PutBe32(bytes.data() + 0x14, 0x00000046);
     return bytes;
 }
@@ -151,6 +194,67 @@ std::array<uint8_t, kGlobalReadBytes> MakeGlobalStateWire(uint32_t clockSelect,
     PutBe32(bytes.data() + ASFW::Audio::DICE::GlobalOffset::kVersion, 0x01000C00U);
     PutBe32(bytes.data() + ASFW::Audio::DICE::GlobalOffset::kClockCaps, 0x00001E06U);
     return bytes;
+}
+
+std::vector<uint8_t> CapturedSPro24CurrentConfigRouterWire() {
+    // Read-only capture from the active low-rate CURRENT_CONFIG router on a
+    // Saffire Pro 24 DSP, 2026-08-24. Keep this binary fixture at the
+    // protocol boundary: a staging-router response is not representative.
+    constexpr std::array<uint32_t, 49> words = {
+        0x00000030, 0x00004248, 0x00004349, 0x000040b2, 0x000041b3, 0x000006b4,
+        0x000007b5, 0x000010b6, 0x000011b7, 0x000012b8, 0x000013b9, 0x000014ba,
+        0x000015bb, 0x000016bc, 0x000017bd, 0x0000b040, 0x0000b141, 0x0000b042,
+        0x0000b143, 0x0000b044, 0x0000b145, 0x00002006, 0x00002107, 0x000042be,
+        0x000043bf, 0x00004820, 0x00004921, 0x00004022, 0x00004123, 0x00001024,
+        0x00001125, 0x00001226, 0x00001327, 0x00001428, 0x00001529, 0x0000162a,
+        0x0000172b, 0x0000062c, 0x0000072d, 0x0000b02e, 0x0000b12f, 0x00004e30,
+        0x00004f31, 0x000048b0, 0x000049b1, 0x0000284e, 0x0000294f, 0x000020f0,
+        0x000021f0,
+    };
+    std::vector<uint8_t> wire(words.size() * sizeof(uint32_t));
+    for (size_t index = 0; index < words.size(); ++index) {
+        PutBe32(wire.data() + index * sizeof(uint32_t), words[index]);
+    }
+    return wire;
+}
+
+std::vector<uint8_t> LoadedSPro24LowRateStreamWire() {
+    // The Focusrite load command populates CURRENT_CONFIG with this low-rate
+    // geometry. Keep enough space for the driver's bounded four-TX/four-RX
+    // read; only the two reported entries are semantically present.
+    constexpr size_t kReadBytes =
+        ASFW::Audio::DICE::CurrentConfigStream::kEntries +
+        8U * ASFW::Audio::DICE::CurrentConfigStream::kEntryStride;
+    std::vector<uint8_t> wire(kReadBytes, 0);
+    PutBe32(wire.data() + ASFW::Audio::DICE::CurrentConfigStream::kTxNumber, 1U);
+    PutBe32(wire.data() + ASFW::Audio::DICE::CurrentConfigStream::kRxNumber, 1U);
+
+    const size_t tx = ASFW::Audio::DICE::CurrentConfigStream::kEntries;
+    PutBe32(wire.data() + tx + ASFW::Audio::DICE::CurrentConfigStream::kEntryPcmChannels, 16U);
+    PutBe32(wire.data() + tx + ASFW::Audio::DICE::CurrentConfigStream::kEntryMidiPorts, 1U);
+
+    const size_t rx = tx + ASFW::Audio::DICE::CurrentConfigStream::kEntryStride;
+    PutBe32(wire.data() + rx + ASFW::Audio::DICE::CurrentConfigStream::kEntryPcmChannels, 8U);
+    PutBe32(wire.data() + rx + ASFW::Audio::DICE::CurrentConfigStream::kEntryMidiPorts, 1U);
+    return wire;
+}
+
+std::vector<uint8_t> StandardStreamWire(bool rx, uint32_t reportedCount) {
+    const size_t sectionBytes = rx ? 1128U : 568U;
+    std::vector<uint8_t> wire(sectionBytes, 0);
+    PutBe32(wire.data(), reportedCount);
+    PutBe32(wire.data() + 4, 70U);
+    const size_t entry = 8U;
+    PutBe32(wire.data() + entry, rx ? 0U : 1U);
+    if (rx) {
+        PutBe32(wire.data() + entry + 0x08U, 8U);
+        PutBe32(wire.data() + entry + 0x0CU, 1U);
+    } else {
+        PutBe32(wire.data() + entry + 0x04U, 16U);
+        PutBe32(wire.data() + entry + 0x08U, 1U);
+        PutBe32(wire.data() + entry + 0x0CU, 2U);
+    }
+    return wire;
 }
 
 class CountingFireWireBus final : public IFireWireBus {
@@ -173,13 +277,37 @@ public:
         if (address.addressHi == 0xFFFFU && address.addressLo == kDiceBaseLo &&
             length >= GeneralSections::kWireSize) {
             ++generalReadCount;
-            const auto bytes = MakeGeneralSectionsWire();
+            const auto bytes = MakeGeneralSectionsWire(hookReplacedStreamImage_);
             payload.assign(bytes.begin(), bytes.end());
+        } else if (address.addressHi == 0xFFFFU && address.addressLo == kGlobalBaseLo &&
+                   length == sizeof(uint64_t)) {
+            PutBe64(payload.data(), owner_);
         } else if (address.addressHi == 0xFFFFU && address.addressLo == kGlobalBaseLo &&
                    length >= kGlobalReadBytes) {
             ++globalReadCount;
             const auto bytes = MakeGlobalStateWire(clockSelect_, status_, extStatus_, sampleRate_, notification_);
-            payload.assign(bytes.begin(), bytes.end());
+            std::copy(bytes.begin(), bytes.end(), payload.begin());
+            PutBe64(payload.data() + ASFW::Audio::DICE::GlobalOffset::kOwnerHi, owner_);
+        } else if (address.addressHi == 0xFFFFU &&
+                   address.addressLo >= ActiveTxSectionBase() &&
+                   static_cast<uint64_t>(address.addressLo) + length <=
+                       static_cast<uint64_t>(ActiveTxSectionBase()) + 568U) {
+            const auto wire = StandardStreamWire(
+                false,
+                (!coldStreamImageRequiresClockReselect_ || clockSelectWriteCount != 0)
+                    ? 1U : coldReportedStreamCount_);
+            const size_t offset = address.addressLo - ActiveTxSectionBase();
+            payload.assign(wire.begin() + offset, wire.begin() + offset + length);
+        } else if (address.addressHi == 0xFFFFU &&
+                   address.addressLo >= ActiveRxSectionBase() &&
+                   static_cast<uint64_t>(address.addressLo) + length <=
+                       static_cast<uint64_t>(ActiveRxSectionBase()) + 1128U) {
+            const auto wire = StandardStreamWire(
+                true,
+                (!coldStreamImageRequiresClockReselect_ || clockSelectWriteCount != 0)
+                    ? 1U : coldReportedStreamCount_);
+            const size_t offset = address.addressLo - ActiveRxSectionBase();
+            payload.assign(wire.begin() + offset, wire.begin() + offset + length);
         } else if (address.addressHi == 0xFFFFU && address.addressLo == kExtensionBaseLo &&
             length >= ExtensionSections::kWireSize) {
             ++extensionReadCount;
@@ -192,6 +320,15 @@ public:
             PutBe32(payload.data(), 0x00800001U);
             PutBe32(payload.data() + 4, 0x10121115U);
             PutBe32(payload.data() + 8, 0x00001017U);
+        } else if (address.addressHi == 0xFFFFU &&
+                   address.addressLo == kCommandSectionBaseLo && length == sizeof(uint32_t)) {
+            ++commandOpcodeReadCount;
+            PutBe32(payload.data(), commandOpcodeReadback_);
+        } else if (address.addressHi == 0xFFFFU &&
+                   address.addressLo == kCommandSectionBaseLo + sizeof(uint32_t) &&
+                   length == sizeof(uint32_t)) {
+            ++commandReturnReadCount;
+            PutBe32(payload.data(), commandReturn_);
         } else if (address.addressHi == 0xFFFFU && address.addressLo == kRouterSectionBaseLo &&
                    length == sizeof(uint32_t)) {
             ++routerHeaderReadCount;
@@ -201,6 +338,36 @@ public:
             ++routerEntriesReadCount;
             PutBe32(payload.data(), 0x7F00B142U);
             PutBe32(payload.data() + 4, 0x3C00A350U);
+        } else if (address.addressHi == 0xFFFFU && address.addressLo == kCurrentConfigSectionBaseLo &&
+                   length == sizeof(uint32_t)) {
+            ++currentConfigRouterHeaderReadCount;
+            PutBe32(payload.data(), 48U);
+        } else if (address.addressHi == 0xFFFFU &&
+                   address.addressLo == kCurrentConfigSectionBaseLo + sizeof(uint32_t) &&
+                   length == 48U * ASFW::Audio::DICE::DiceRouterEntry::kWireSize) {
+            ++currentConfigRouterEntriesReadCount;
+            auto wire = CapturedSPro24CurrentConfigRouterWire();
+            payload.assign(wire.begin() + sizeof(uint32_t), wire.end());
+        } else if (address.addressHi == 0xFFFFU &&
+                   address.addressLo >=
+                       kCurrentConfigSectionBaseLo +
+                           ASFW::Audio::DICE::CurrentConfigStreamBlockOffset(
+                               ASFW::Audio::DICE::DiceRateMode::Low) &&
+                   static_cast<uint64_t>(address.addressLo) + length <=
+                       static_cast<uint64_t>(kCurrentConfigSectionBaseLo) +
+                           ASFW::Audio::DICE::CurrentConfigStreamBlockOffset(
+                               ASFW::Audio::DICE::DiceRateMode::Low) +
+                           LoadedSPro24LowRateStreamWire().size()) {
+            ++currentConfigStreamReadCount;
+            const uint32_t streamBase =
+                kCurrentConfigSectionBaseLo +
+                ASFW::Audio::DICE::CurrentConfigStreamBlockOffset(
+                    ASFW::Audio::DICE::DiceRateMode::Low);
+            if (!coldStreamImageRequiresClockReselect_ || clockSelectWriteCount != 0) {
+                const auto wire = LoadedSPro24LowRateStreamWire();
+                const size_t offset = address.addressLo - streamBase;
+                payload.assign(wire.begin() + offset, wire.begin() + offset + length);
+            }
         } else if (address.addressHi == 0xFFFFU &&
                    address.addressLo >= kMixerSectionBaseLo + 4U &&
                    address.addressLo < kMixerSectionBaseLo + 4U +
@@ -236,10 +403,42 @@ public:
                            ASFW::Async::InterfaceCompletionCallback callback) override {
         (void)generation;
         (void)nodeId;
-        (void)address;
-        (void)data;
         (void)speed;
         ++writeCount;
+        if (address.addressHi == 0xFFFFU) {
+            writeAddresses.push_back(address.addressLo);
+        }
+        if (address.addressHi == 0xFFFFU &&
+            address.addressLo ==
+                kGlobalBaseLo + ASFW::Audio::DICE::GlobalOffset::kClockSelect &&
+            data.size() == sizeof(uint32_t)) {
+            ++clockSelectWriteCount;
+            clockSelect_ = ASFW::FW::ReadBE32(data.data());
+            // The generic cold-geometry path now correctly requires the
+            // device's async CLOCK_ACCEPTED acknowledgement. Model the event
+            // at the protocol boundary rather than letting a locked status
+            // impersonate it.
+            ASFW::Audio::DICE::NotificationMailbox::Publish(
+                ASFW::Audio::DICE::Notify::kClockAccepted);
+        }
+        if (address.addressHi == 0xFFFFU && address.addressLo == kCommandSectionBaseLo &&
+            data.size() == sizeof(uint32_t)) {
+            ++commandWriteCount;
+            commandOpcodeWritten_ = ASFW::FW::ReadBE32(data.data());
+            // The synchronous host fake models a command which has completed
+            // by the first poll: hardware clears only the execute bit.
+            commandOpcodeReadback_ =
+                commandOpcodeWritten_ & ~ASFW::Audio::DICE::ExtensionCommandOpcode::kExecute;
+            // The real stopped-state command asynchronously writes this to
+            // the host notification address before its return word is read.
+            // Model that protocol edge here; a completed command alone is
+            // deliberately insufficient to unlock generic stream writes.
+            if (emitCommandConfigNotice_) {
+                ASFW::Audio::DICE::NotificationMailbox::Publish(
+                    ASFW::Audio::DICE::Notify::kRxConfigChange |
+                    ASFW::Audio::DICE::Notify::kTxConfigChange);
+            }
+        }
         callback(AsyncStatus::kSuccess, {});
         return NextHandle();
     }
@@ -254,12 +453,20 @@ public:
                      ASFW::Async::InterfaceCompletionCallback callback) override {
         (void)generation;
         (void)nodeId;
-        (void)address;
         (void)lockOp;
-        (void)operand;
         (void)speed;
         ++lockCount;
         std::vector<uint8_t> payload(responseLength, 0);
+        if (address.addressHi == 0xFFFFU && address.addressLo == kGlobalBaseLo &&
+            operand.size() == 16U && responseLength == 8U) {
+            const uint64_t expected = ASFW::FW::ReadBE64(operand.data());
+            const uint64_t desired = ASFW::FW::ReadBE64(operand.data() + 8U);
+            const uint64_t previous = owner_;
+            if (owner_ == expected) {
+                owner_ = desired;
+            }
+            PutBe64(payload.data(), previous);
+        }
         callback(AsyncStatus::kSuccess, std::span<const uint8_t>(payload.data(), payload.size()));
         return NextHandle();
     }
@@ -282,6 +489,7 @@ public:
 
     Generation GetGeneration() const override { return generation_; }
     NodeId GetLocalNodeID() const override { return localNodeId_; }
+    uint64_t Owner() const noexcept { return owner_; }
 
     int readCount{0};
     int writeCount{0};
@@ -292,16 +500,39 @@ public:
     int extensionCapsReadCount{0};
     int routerHeaderReadCount{0};
     int routerEntriesReadCount{0};
+    int currentConfigRouterHeaderReadCount{0};
+    int currentConfigRouterEntriesReadCount{0};
+    int currentConfigStreamReadCount{0};
     int mixerReadCount{0};
     int peakReadCount{0};
     int appQuadReadCount{0};
+    int commandWriteCount{0};
+    int commandOpcodeReadCount{0};
+    int commandReturnReadCount{0};
+    int clockSelectWriteCount{0};
+    uint32_t commandOpcodeWritten_{0};
+    uint32_t commandOpcodeReadback_{0};
+    uint32_t commandReturn_{0};
     uint32_t clockSelect_{kClockSelect48kInternal};
     uint32_t status_{kLocked48kStatus};
     uint32_t extStatus_{0};
     uint32_t sampleRate_{48000};
     uint32_t notification_{0x20};
+    bool coldStreamImageRequiresClockReselect_{false};
+    uint32_t coldReportedStreamCount_{0};
+    bool hookReplacedStreamImage_{false};
+    bool emitCommandConfigNotice_{true};
+    std::vector<uint32_t> writeAddresses;
 
 private:
+    [[nodiscard]] uint32_t ActiveTxSectionBase() const noexcept {
+        return hookReplacedStreamImage_ ? kReloadedTxSectionBaseLo : kTxSectionBaseLo;
+    }
+
+    [[nodiscard]] uint32_t ActiveRxSectionBase() const noexcept {
+        return hookReplacedStreamImage_ ? kReloadedRxSectionBaseLo : kRxSectionBaseLo;
+    }
+
     AsyncHandle NextHandle() {
         return AsyncHandle{static_cast<uint32_t>(nextHandle_++)};
     }
@@ -309,6 +540,7 @@ private:
     Generation generation_{1};
     NodeId localNodeId_{0};
     uint64_t nextHandle_{1};
+    uint64_t owner_{ASFW::Audio::DICE::kOwnerNoOwner};
 };
 
 TEST(DICETcatProtocolTests, InitializeIsSideEffectFree) {
@@ -520,8 +752,10 @@ TEST(SPro24DspProtocolTests, InitializationPrimesSemanticMatrixWithoutDuplicatin
     ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
     EXPECT_EQ(bus.extensionReadCount, 1);
     EXPECT_EQ(bus.extensionCapsReadCount, 1);
-    EXPECT_EQ(bus.routerHeaderReadCount, 1);
-    EXPECT_EQ(bus.routerEntriesReadCount, 1);
+    EXPECT_EQ(bus.routerHeaderReadCount, 0);
+    EXPECT_EQ(bus.routerEntriesReadCount, 0);
+    EXPECT_EQ(bus.currentConfigRouterHeaderReadCount, 1);
+    EXPECT_EQ(bus.currentConfigRouterEntriesReadCount, 1);
     EXPECT_EQ(bus.mixerReadCount, 3);
 
     ASFW::Audio::AudioSemanticMatrixSnapshot matrix{};
@@ -529,6 +763,8 @@ TEST(SPro24DspProtocolTests, InitializationPrimesSemanticMatrixWithoutDuplicatin
     EXPECT_EQ(matrix.inputCount, 18);
     EXPECT_EQ(matrix.outputCount, 16);
     EXPECT_EQ(matrix.Coefficient(0, 0), 1);
+    EXPECT_EQ(matrix.inputs[0].signalKind, ASFW::Audio::AudioSemanticSignalKind::Auxiliary);
+    EXPECT_EQ(matrix.inputs[14].signalKind, ASFW::Audio::AudioSemanticSignalKind::HostStream);
 
     std::optional<IOReturn> callbackStatus;
     protocol.GetEffectParams([&](IOReturn status, EffectGeneralParams /*params*/) {
@@ -539,6 +775,148 @@ TEST(SPro24DspProtocolTests, InitializationPrimesSemanticMatrixWithoutDuplicatin
     EXPECT_EQ(*callbackStatus, kIOReturnSuccess);
     EXPECT_EQ(bus.extensionReadCount, 1);
     EXPECT_EQ(bus.appQuadReadCount, 1);
+}
+
+void ExpectColdCountRefinement(uint32_t coldCount) {
+    SCOPED_TRACE(testing::Message() << "cold stream count=" << coldCount);
+    CountingFireWireBus bus;
+    bus.coldStreamImageRequiresClockReselect_ = true;
+    bus.coldReportedStreamCount_ = coldCount;
+    RouteState routeState;
+    DICETcatProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
+    ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+
+    std::optional<IOReturn> geometryStatus;
+    protocol.AsDuplexDeviceControl()->EnsureRuntimeStreamGeometry(
+        [&](IOReturn status) { geometryStatus = status; });
+
+    ASSERT_TRUE(geometryStatus.has_value());
+    EXPECT_EQ(*geometryStatus, kIOReturnSuccess);
+    EXPECT_EQ(bus.clockSelectWriteCount, 1);
+    EXPECT_EQ(bus.commandWriteCount, 0);
+    EXPECT_EQ(bus.Owner(), ASFW::Audio::DICE::kOwnerNoOwner);
+
+    AudioStreamRuntimeCaps caps{};
+    ASSERT_TRUE(protocol.GetRuntimeAudioStreamCaps(caps));
+    EXPECT_EQ(caps.sampleRateHz, 48000U);
+    EXPECT_EQ(caps.hostInputPcmChannels, 16U);
+    EXPECT_EQ(caps.deviceToHostAm824Slots, 17U);
+    EXPECT_EQ(caps.hostOutputPcmChannels, 8U);
+    EXPECT_EQ(caps.hostToDeviceAm824Slots, 9U);
+}
+
+TEST(DICETcatProtocolTests, ColdZeroCountsClaimOwnerReselectClockAndPublishGeometry) {
+    ExpectColdCountRefinement(0U);
+}
+
+TEST(DICETcatProtocolTests, ColdMinusOneCountsClaimOwnerReselectClockAndPublishGeometry) {
+    ExpectColdCountRefinement(UINT32_MAX);
+}
+
+TEST(SPro24DspProtocolTests, StoppedPrepareCommandLoadsLowRateRouterAndStreamImage) {
+    CountingFireWireBus bus;
+    RouteState routeState;
+    SPro24DspProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
+    ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+
+    std::optional<IOReturn> callbackStatus;
+    ASFW::Audio::DICE::Focusrite::SPro24DspProtocolTestPeer::
+        LoadRouterStreamConfigForRate(
+            protocol, 48000,
+            [&](IOReturn status) { callbackStatus = status; });
+
+    ASSERT_TRUE(callbackStatus.has_value());
+    EXPECT_EQ(*callbackStatus, kIOReturnSuccess);
+    EXPECT_EQ(bus.commandWriteCount, 1);
+    EXPECT_EQ(bus.commandOpcodeWritten_,
+              ASFW::Audio::DICE::ExtensionCommandOpcode::kExecute |
+                  ASFW::Audio::DICE::ExtensionCommandOpcode::kRateLow |
+                  ASFW::Audio::DICE::ExtensionCommandOpcode::kLoadRouterStreamConfig);
+    EXPECT_EQ(bus.commandOpcodeReadCount, 1);
+    EXPECT_EQ(bus.commandReturnReadCount, 1);
+}
+
+TEST(SPro24DspProtocolTests, StoppedPrepareCommandFailsClosedWithoutConfigNotification) {
+    CountingFireWireBus bus;
+    bus.emitCommandConfigNotice_ = false;
+    RouteState routeState;
+    SPro24DspProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
+    ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+
+    std::optional<IOReturn> callbackStatus;
+    ASFW::Audio::DICE::Focusrite::SPro24DspProtocolTestPeer::
+        LoadRouterStreamConfigForRate(
+            protocol, 48000,
+            [&](IOReturn status) { callbackStatus = status; });
+
+    ASSERT_TRUE(callbackStatus.has_value());
+    EXPECT_EQ(*callbackStatus, kIOReturnNotReady);
+}
+
+TEST(SPro24DspProtocolTests, PrepareSkipsStoppedExtensionLoadWhenGenericImageIsUsable) {
+    CountingFireWireBus bus;
+    RouteState routeState;
+    SPro24DspProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
+    ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+
+    const AudioDuplexChannels channels{
+        .deviceToHostIsoChannel = 1U,
+        .hostToDeviceIsoChannel = 0U,
+    };
+    std::optional<IOReturn> prepareStatus;
+    ASSERT_NE(protocol.AsDuplexDeviceControl(), nullptr);
+    protocol.AsDuplexDeviceControl()->PrepareDuplex(
+        channels, AudioClockConfig{.sampleRateHz = 48000U},
+        [&prepareStatus](IOReturn status, auto) { prepareStatus = status; });
+
+    ASSERT_TRUE(prepareStatus.has_value());
+    EXPECT_EQ(*prepareStatus, kIOReturnSuccess);
+    EXPECT_EQ(bus.commandWriteCount, 0);
+}
+
+TEST(DICETcatProtocolTests, StoppedPrepareHookRefreshesReplacedStreamPointersBeforeProgramRx) {
+    CountingFireWireBus bus;
+    RouteState routeState;
+    DICETcatProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
+    ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+
+    protocol.SetStoppedPrepareHook(
+        [&bus](const AudioClockConfig&, DICETcatProtocol::VoidCallback callback) {
+            // Model the Saffire's successful load-router-stream-image command:
+            // it replaces the normal DICE stream sections while the engine is
+            // stopped, not merely their coefficients.
+            bus.hookReplacedStreamImage_ = true;
+            callback(kIOReturnSuccess);
+        });
+
+    const AudioDuplexChannels channels{
+        .deviceToHostIsoChannel = 1U,
+        .hostToDeviceIsoChannel = 0U,
+    };
+    std::optional<IOReturn> prepareStatus;
+    protocol.PrepareDuplex(channels, AudioClockConfig{.sampleRateHz = 48000U},
+                           [&prepareStatus](IOReturn status, auto) {
+                               prepareStatus = status;
+                           });
+
+    ASSERT_TRUE(prepareStatus.has_value());
+    ASSERT_EQ(*prepareStatus, kIOReturnSuccess);
+    EXPECT_GE(bus.generalReadCount, 2);
+
+    std::optional<IOReturn> programRxStatus;
+    protocol.ProgramRx([&programRxStatus](IOReturn status, auto) {
+        programRxStatus = status;
+    });
+
+    ASSERT_TRUE(programRxStatus.has_value());
+    EXPECT_EQ(*programRxStatus, kIOReturnSuccess);
+    EXPECT_NE(std::find(bus.writeAddresses.begin(), bus.writeAddresses.end(),
+                        kReloadedRxSectionBaseLo +
+                            ASFW::Audio::DICE::RxOffset::kIsochronous),
+              bus.writeAddresses.end());
+    EXPECT_EQ(std::find(bus.writeAddresses.begin(), bus.writeAddresses.end(),
+                        kRxSectionBaseLo + ASFW::Audio::DICE::RxOffset::kIsochronous),
+              bus.writeAddresses.end());
 }
 
 TEST(DICETcatProtocolTests, ExtensionCapsUseTheDriverDiscoveredSectionAddress) {

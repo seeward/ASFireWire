@@ -34,11 +34,14 @@ using ASFW::Audio::AudioDuplexChannels;
 using ASFW::Audio::DICE::ClockSource;
 using ASFW::Audio::DICE::DICETransaction;
 using ASFW::Audio::DICE::DICEBringupPolicy;
+using ASFW::Audio::DICE::DiceClockApplyResult;
+using ASFW::Audio::DICE::DiceClockConfiguration;
 using ASFW::Audio::DICE::DiceDuplexConfirmResult;
 using ASFW::Audio::DICE::DiceDuplexPrepareResult;
 using ASFW::Audio::DICE::DiceDuplexStageResult;
 using ASFW::Audio::DICE::GeneralSections;
 using ASFW::Audio::DICE::kOwnerNoOwner;
+using ASFW::Audio::DICE::kDiceClockSelect48kInternal;
 using ASFW::Audio::DICE::MakeDICEAddress;
 using ASFW::Audio::DICE::DiceRestartPhase;
 using ASFW::Audio::DICE::DiceRestartReason;
@@ -358,6 +361,14 @@ public:
 
     uint32_t Enable() const {
         return enable_;
+    }
+
+    void SetEnable(uint32_t enable) {
+        enable_ = enable;
+    }
+
+    void SetClockSelect(uint32_t clockSelect) {
+        clockSelect_ = clockSelect;
     }
 
     void SetClockSelectWriteHandler(std::function<void()> handler) {
@@ -1036,26 +1047,19 @@ TEST(DICEDuplexBringupControllerTests, PrepareSequenceMatchesReferenceWindow) {
     DuplexRig rig;
     NotificationMailbox::Reset();
 
-    // The reference trace always rewrites CLOCK_SELECT during prepare. ASFW
-    // intentionally deviates in two HW-validated ways (see
-    // DICEDuplexBringupController):
-    //  1. The CLOCK_SELECT write is skipped when the pre-claim global read
-    //     already reports the target clock (0x020C here) — rewriting it
-    //     re-triggers a PLL relock mid-bring-up and fights an idle rate change.
-    //  2. DoAwaitStreamingClockLock adds one extra global-state read between
-    //     clock-confirm and stream discovery so streams are never enabled on a
-    //     still-relocking clock.
-    // Net: the Write op is replaced by a second 380-byte global read, and that
-    // read consumes one extra scripted response reporting locked-at-target.
+    // Linux DICE always writes CLOCK_SELECT as part of prepare, even when the
+    // current value already encodes the selected rate. ASFW then performs one
+    // additional full GLOBAL read to verify the selected rate/source lock
+    // before looking at the stream sections; the captured vendor window moves
+    // directly to those sections after its acknowledgement read.
     const auto& refRequests = ReferencePhase0ParityFixture::kPrepareExpectedRequests;
     const auto& refResponses = ReferencePhase0ParityFixture::kPrepareResponseSteps;
     std::vector<ExpectedRequest> requests(refRequests.begin(), refRequests.end());
-    ASSERT_GT(requests.size(), 7U);
-    ASSERT_EQ(requests[6].kind, OpKind::Write); // CLOCK_SELECT in the reference
-    requests[6] = requests[7];                  // becomes the await-lock global read
+    ASSERT_GT(requests.size(), 8U);
+    requests.insert(requests.begin() + 8, refRequests[7]);
     std::vector<ResponseStep> responses(refResponses.begin(), refResponses.end());
     ASSERT_GT(responses.size(), 6U);
-    responses.insert(responses.begin() + 7, responses[6]); // second locked global read
+    responses.insert(responses.begin() + 7, refResponses[6]);
 
     rig.bus.SetScript(requests, responses);
 
@@ -1115,6 +1119,36 @@ TEST(DICEDuplexBringupControllerTests, ProgramTxEnableWritesGlobalEnableOnce) {
     ExpectRequests(rig.bus.Operations(), txEnableRequests);
     EXPECT_TRUE(rig.bus.ScriptConsumed());
     EXPECT_EQ(rig.bus.Enable(), 1U);
+}
+
+TEST(DICEDuplexBringupControllerTests, PrepareForcesRestartEdgeForInheritedEnabledDevice) {
+    DuplexRig rig;
+    NotificationMailbox::Reset();
+    rig.bus.SetEnable(1);
+
+    const AudioDuplexChannels channels{
+        .deviceToHostIsoChannel = 1,
+        .hostToDeviceIsoChannel = 0,
+    };
+    std::optional<IOReturn> prepareStatus;
+    rig.controller.PrepareDuplex48k(
+        channels,
+        [&prepareStatus](IOReturn status) { prepareStatus = status; });
+
+    ASSERT_TRUE(prepareStatus.has_value());
+    ASSERT_EQ(*prepareStatus, kIOReturnSuccess);
+    EXPECT_EQ(rig.bus.Enable(), 0U);
+
+    const auto inheritedStop = std::find_if(
+        rig.bus.Operations().begin(),
+        rig.bus.Operations().end(),
+        [](const RecordedOp& op) {
+            return op.kind == OpKind::Write &&
+                   op.addressLo == 0xE0000078U &&
+                   op.payload.size() == sizeof(uint32_t) &&
+                   ASFW::FW::ReadBE32(op.payload.data()) == 0U;
+        });
+    EXPECT_NE(inheritedStop, rig.bus.Operations().end());
 }
 
 TEST(DICEDuplexBringupControllerTests, ProgramRxMatchesReferenceSegment) {
@@ -1429,29 +1463,15 @@ TEST(DICEDuplexBringupControllerTests,
     EXPECT_EQ(rig.timer.PendingCount(), 0U);
 }
 
-TEST(DICEDuplexBringupControllerTests, LateClockAcceptedNotifyDoesNotTriggerRollback) {
-    // With active clock check, even when the mailbox notification is delayed,
-    // the controller reads global state immediately after clock select write
-    // and short-circuits if already locked at 48kHz.
+TEST(DICEDuplexBringupControllerTests, ClockAcceptedNotificationIsRequiredAfterClockWrite) {
+    // The device can report a target-rate lock before it has consumed this
+    // CLOCK_SELECT write.  That state is not permission to advance: require
+    // the asynchronous CLOCK_ACCEPTED acknowledgement inside the 150 ms
+    // vendor/reference deadline.
+    DuplexRig rig;
     NotificationMailbox::Reset();
-    HostClockResetGuard clockReset;
-
-    uint64_t nowNs = 0;
-    ASFW::Testing::SetHostMonotonicClockForTesting([&nowNs]() { return nowNs; });
-
-    RecordingFireWireBus bus;
-    IODispatchQueue queue;
-    queue.SetManualDispatchForTesting(true);
-    bus.SetClockSelectWriteHandler([&queue, &bus]() {
-        queue.DispatchAsyncAfter(3'250'000'000ULL, [&bus]() { bus.PublishClockAccepted(); });
-    });
-
-    RouteState routeState;
-    ProtocolRegisterIO io(bus, bus, routeState.registry, routeState.route);
-    DICETransaction tx(io);
-    IRMClient irm(bus);
-    irm.SetIRMNode(0x03, Generation{1});
-    DICEDuplexBringupController controller(tx, io, bus, &queue, MakeGeneralSections());
+    rig.bus.SetGlobalClockState(kLocked48kStatus, 48000U);
+    rig.bus.SetClockSelectWriteHandler([] {});
 
     std::optional<IOReturn> startStatus;
     const AudioDuplexChannels channels{
@@ -1459,41 +1479,63 @@ TEST(DICEDuplexBringupControllerTests, LateClockAcceptedNotifyDoesNotTriggerRoll
         .hostToDeviceIsoChannel = 0,
     };
 
-    controller.PrepareDuplex48k(channels, [&startStatus](IOReturn status) { startStatus = status; });
+    rig.controller.PrepareDuplex48k(channels, [&startStatus](IOReturn status) { startStatus = status; });
 
-    // Active clock check reads global state immediately after write —
-    // bus is already locked at 48kHz, so it short-circuits without waiting for mailbox.
-    for (size_t i = 0; i < 600 && !startStatus.has_value(); ++i) {
-        nowNs += 10'000'000ULL;
-        while (queue.DrainReadyForTesting() > 0) {
-        }
-    }
+    EXPECT_FALSE(startStatus.has_value());
+    EXPECT_EQ(rig.timer.PendingCount(), 1U);
+
+    rig.timer.Advance(90'000'000ULL);
+    EXPECT_FALSE(startStatus.has_value());
+
+    rig.bus.PublishClockAccepted();
+    rig.timer.Advance(10'000'000ULL);
 
     ASSERT_TRUE(startStatus.has_value());
     EXPECT_EQ(*startStatus, kIOReturnSuccess);
-    EXPECT_TRUE(controller.IsPrepared());
+    EXPECT_TRUE(rig.controller.IsPrepared());
 }
 
-TEST(DICEDuplexBringupControllerTests, GlobalStateConfirmationRecoversIfMailboxMissesClockAccepted) {
-    // When the mailbox notification never arrives but the device is already locked
-    // at 48kHz, the active clock check after the write short-circuits immediately.
+TEST(DICEDuplexBringupControllerTests, EqualClockWriteUsesLinuxStatusFallbackAfterTimeout) {
+    // DICE requires the equal-value write. A device may omit CLOCK_ACCEPTED for
+    // it, in which case Linux accepts the unchanged, locked target state after
+    // the standard notification timeout.
+    DuplexRig rig;
     NotificationMailbox::Reset();
-    HostClockResetGuard clockReset;
+    rig.bus.SetClockSelect(kDiceClockSelect48kInternal);
+    rig.bus.SetGlobalClockState(kLocked48kStatus, 48000U);
+    rig.bus.SetClockSelectWriteHandler([] {});
 
-    uint64_t nowNs = 0;
-    ASFW::Testing::SetHostMonotonicClockForTesting([&nowNs]() { return nowNs; });
+    std::optional<IOReturn> status;
+    rig.controller.RefineClockForStreamGeometry(
+        DiceClockConfiguration{
+            .sampleRateHz = 48000U,
+            .clockSelect = kDiceClockSelect48kInternal,
+        },
+        [&status](IOReturn result, const DiceClockApplyResult&) { status = result; });
 
-    RecordingFireWireBus bus;
-    IODispatchQueue queue;
-    queue.SetManualDispatchForTesting(true);
-    bus.SetClockSelectWriteHandler([&bus]() { bus.LatchClockAccepted(); });
+    EXPECT_FALSE(status.has_value());
+    EXPECT_EQ(rig.timer.PendingCount(), 1U);
 
-    RouteState routeState;
-    ProtocolRegisterIO io(bus, bus, routeState.registry, routeState.route);
-    DICETransaction tx(io);
-    IRMClient irm(bus);
-    irm.SetIRMNode(0x03, Generation{1});
-    DICEDuplexBringupController controller(tx, io, bus, &queue, MakeGeneralSections());
+    rig.timer.Advance(150'000'000ULL);
+
+    ASSERT_TRUE(status.has_value());
+    EXPECT_EQ(*status, kIOReturnSuccess);
+    EXPECT_TRUE(std::any_of(rig.bus.Operations().begin(), rig.bus.Operations().end(),
+                            [](const RecordedOp& op) {
+                                return op.kind == OpKind::Write &&
+                                       op.addressHi == 0xFFFF &&
+                                       op.addressLo == 0xE0000074U;
+                            }));
+}
+
+TEST(DICEDuplexBringupControllerTests, GlobalStateLockDoesNotReplaceClockAcceptedNotification) {
+    // CLOCK_ACCEPTED must be delivered through the notification path.  A
+    // device-local status/global bit is not enough evidence that this write was
+    // accepted; accepting it caused cold DICE geometry to be read too early.
+    DuplexRig rig;
+    NotificationMailbox::Reset();
+    rig.bus.SetGlobalClockState(kLocked48kStatus, 48000U);
+    rig.bus.SetClockSelectWriteHandler([&rig] { rig.bus.LatchClockAccepted(); });
 
     std::optional<IOReturn> startStatus;
     const AudioDuplexChannels channels{
@@ -1501,19 +1543,15 @@ TEST(DICEDuplexBringupControllerTests, GlobalStateConfirmationRecoversIfMailboxM
         .hostToDeviceIsoChannel = 0,
     };
 
-    controller.PrepareDuplex48k(channels, [&startStatus](IOReturn status) { startStatus = status; });
+    rig.controller.PrepareDuplex48k(channels, [&startStatus](IOReturn status) { startStatus = status; });
 
-    // Active clock check reads global state and finds locked+48k —
-    // completes without waiting for mailbox notification at all.
-    for (size_t i = 0; i < 700 && !startStatus.has_value(); ++i) {
-        nowNs += 10'000'000ULL;
-        while (queue.DrainReadyForTesting() > 0) {
-        }
-    }
+    // The state remains locked at 48 kHz, but no notification is published to
+    // the host mailbox; therefore the mandatory acknowledgement wait expires.
+    rig.timer.Advance(150'000'000ULL);
 
     ASSERT_TRUE(startStatus.has_value());
-    EXPECT_EQ(*startStatus, kIOReturnSuccess);
-    EXPECT_TRUE(controller.IsPrepared());
+    EXPECT_EQ(*startStatus, kIOReturnTimeout);
+    EXPECT_FALSE(rig.controller.IsPrepared());
 }
 
 TEST(DICEDuplexBringupControllerTests, IRMReadResourcesSnapshotUsesQuadletReads) {

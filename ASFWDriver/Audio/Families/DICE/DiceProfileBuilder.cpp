@@ -26,10 +26,10 @@ BuildProfile(const Devices::ProfileBuildContext& context) noexcept {
     using DeviceProfiles::Audio::ProfileBuilderId;
     switch (context.staticPlan.profileBuilder) {
         case ProfileBuilderId::FocusriteSPro24Dsp:
-            if (facts->streams.hostInputPcmChannels == 8 &&
-                facts->streams.deviceToHostAm824Slots == 9) {
-                profile.captureWireFormat = Encoding::AudioWireFormat::kRawPcm24In32;
-            }
+            // Wire capture from the original Saffire.kext shows asymmetric
+            // encoding: device TX/capture uses ordinary 0x40-labelled AM824,
+            // while host TX/playback uses raw signed 24-bit PCM in 32-bit
+            // slots. Keep the default AM824 capture format from BuildBase.
             if (facts->streams.hostOutputPcmChannels == 8 &&
                 facts->streams.hostToDeviceAm824Slots == 9) {
                 profile.playbackWireFormat = Encoding::AudioWireFormat::kRawPcm24In32;

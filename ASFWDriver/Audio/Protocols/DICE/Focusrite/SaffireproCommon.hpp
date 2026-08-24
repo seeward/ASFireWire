@@ -22,7 +22,7 @@ namespace Offsets {
     constexpr uint32_t kOutputGroup     = 0x000c;  ///< Output group state
     constexpr uint32_t kInputParams     = 0x0058;  ///< Input parameters
     constexpr uint32_t kIoParams        = 0x0040;  ///< I/O configuration
-    constexpr uint32_t kDspEnable       = 0x0070;  ///< DSP enable/disable (SPro24DSP)
+    constexpr uint32_t kDspEnable       = 0x0070;  ///< InSitu/VRM mode select (SPro24DSP)
     constexpr uint32_t kChStripFlags    = 0x0078;  ///< Channel strip flags (SPro24DSP)
     constexpr uint32_t kCoefBase        = 0x0190;  ///< DSP coefficient base (SPro24DSP)
     constexpr uint32_t kEffectGeneral   = 0x0078;  ///< Effect general params offset
@@ -55,22 +55,29 @@ enum class SwNotice : uint32_t {
     ChStripFlags    = 0x05,
     CompCh0         = 0x06,
     CompCh1         = 0x07,
-    MicTransformer0 = 0x08,
+    // MixControl applies both channel-strip compressors with this aggregate
+    // notice after writing the active-rate coefficient bank.
+    CompressorAll   = 0x08,
     EqOutputCh0     = 0x09,
     EqOutputCh1     = 0x0A,
+    EqOutputAll     = 0x0B,
     EqLowCh0        = 0x0C,
     EqLowCh1        = 0x0D,
+    EqLowAll        = 0x0E,
     EqLowMidCh0     = 0x0F,
     EqLowMidCh1     = 0x10,
+    EqLowMidAll     = 0x11,
     EqHighMidCh0    = 0x12,
     EqHighMidCh1    = 0x13,
+    EqHighMidAll    = 0x14,
     EqHighCh0       = 0x15,
     EqHighCh1       = 0x16,
+    EqHighAll       = 0x17,
     Reverb          = 0x1A,
-    DspEnable       = 0x1C,
+    InSituMode      = 0x1C,
     RoutingRefresh  = 0x20,
     // Aliases for cleaner naming
-    DspChanged         = 0x1C,  // Same as DspEnable
+    DspChanged         = 0x1C,  // Deprecated alias for InSituMode.
     EffectChanged      = 0x05,  // Same as ChStripFlags
     InputChanged       = 0x04,  // Same as InputParams
     OutputGroupChanged = 0x02,  // Same as DimMute

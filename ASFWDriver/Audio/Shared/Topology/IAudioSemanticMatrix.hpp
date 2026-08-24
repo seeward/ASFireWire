@@ -23,6 +23,16 @@ enum class AudioSemanticMatrixKind : uint32_t {
     Mixer = 1,
 };
 
+/// How mixer coefficients map to audible gain. A matrix snapshot carries this
+/// explicitly so clients never relabel vendor integers as percentages.
+enum class AudioSemanticMatrixGainLaw : uint16_t {
+    None = 0,
+    LinearNormalized = 1,
+    /// DICE mixer coefficients are unsigned Q2.14 amplitudes: 0x4000 is
+    /// unity (0 dB), zero is mute, and 0xffff is approximately +12 dB.
+    UnsignedQ214Amplitude = 2,
+};
+
 /// A single channel on one side of a semantic matrix. `portId` is opaque but
 /// stable for a topology revision; it never encodes a DICE block/channel or a
 /// vendor register address.
@@ -33,15 +43,19 @@ struct AudioSemanticMatrixAxis final {
 };
 static_assert(sizeof(AudioSemanticMatrixAxis) == 12);
 
-inline constexpr uint32_t kAudioSemanticMatrixVersion = 1;
+inline constexpr uint32_t kAudioSemanticMatrixVersion = 2;
+// Endpoint discovery is bounded independently from the dimensions of any one
+// matrix. A client must enumerate only protocols which actually publish this
+// semantic surface; configuration-capability discovery is a different API.
+inline constexpr size_t kMaxAudioSemanticMatrixEndpoints = 8;
 inline constexpr size_t kMaxAudioSemanticMatrixInputs = 24;
 inline constexpr size_t kMaxAudioSemanticMatrixOutputs = 24;
 inline constexpr size_t kMaxAudioSemanticMatrixCoefficients =
     kMaxAudioSemanticMatrixInputs * kMaxAudioSemanticMatrixOutputs;
 
-/// Coefficients are unsigned native gain units. `coefficientMaximum` declares
-/// their complete domain (TCAT/DICE exposes 0...65535); this preserves device
-/// precision without making the app understand a vendor gain encoding.
+/// Coefficients are unsigned native gain units. `gainLaw` and
+/// `coefficientMaximum` declare their complete domain without exposing a
+/// vendor register layout to the app.
 struct AudioSemanticMatrixSnapshot final {
     uint32_t version{kAudioSemanticMatrixVersion};
     uint32_t deviceKind{0};
@@ -51,7 +65,7 @@ struct AudioSemanticMatrixSnapshot final {
     uint32_t inputCount{0};
     uint32_t outputCount{0};
     uint16_t coefficientMaximum{0};
-    uint16_t _reserved{0};
+    AudioSemanticMatrixGainLaw gainLaw{AudioSemanticMatrixGainLaw::None};
     std::array<AudioSemanticMatrixAxis, kMaxAudioSemanticMatrixInputs> inputs{};
     std::array<AudioSemanticMatrixAxis, kMaxAudioSemanticMatrixOutputs> outputs{};
     std::array<uint16_t, kMaxAudioSemanticMatrixCoefficients> coefficients{};
@@ -80,6 +94,7 @@ enum class AudioSemanticMatrixValidationError : uint32_t {
     InvalidKind,
     CountOutOfRange,
     MissingCoefficientDomain,
+    InvalidGainLaw,
     CoefficientOutOfRange,
     InvalidInput,
     DuplicateInputPort,
@@ -91,6 +106,11 @@ namespace Detail {
 
 [[nodiscard]] constexpr bool IsValid(AudioSemanticMatrixKind kind) noexcept {
     return kind == AudioSemanticMatrixKind::Mixer;
+}
+
+[[nodiscard]] constexpr bool IsValid(AudioSemanticMatrixGainLaw gainLaw) noexcept {
+    return gainLaw == AudioSemanticMatrixGainLaw::LinearNormalized ||
+           gainLaw == AudioSemanticMatrixGainLaw::UnsignedQ214Amplitude;
 }
 
 [[nodiscard]] constexpr bool IsValid(const AudioSemanticMatrixAxis& axis) noexcept {
@@ -116,6 +136,7 @@ ValidateAudioSemanticMatrix(const AudioSemanticMatrixSnapshot& snapshot) noexcep
     if (snapshot.coefficientMaximum == 0) {
         return std::unexpected(Error::MissingCoefficientDomain);
     }
+    if (!Detail::IsValid(snapshot.gainLaw)) return std::unexpected(Error::InvalidGainLaw);
     for (uint32_t input = 0; input < snapshot.inputCount; ++input) {
         if (!Detail::IsValid(snapshot.inputs[input])) return std::unexpected(Error::InvalidInput);
         for (uint32_t earlier = 0; earlier < input; ++earlier) {

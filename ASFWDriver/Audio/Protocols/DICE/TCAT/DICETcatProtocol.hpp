@@ -15,6 +15,7 @@
 #include <atomic>
 #include <functional>
 #include <optional>
+#include <utility>
 
 namespace ASFW::IRM {
 class IRMClient;
@@ -65,6 +66,8 @@ public:
     using ConfirmCallback = IDuplexDeviceControl::ConfirmCallback;
     using ClockApplyCallback = IDuplexDeviceControl::ClockApplyCallback;
     using HealthCallback = IDuplexDeviceControl::HealthCallback;
+    using StoppedPrepareHook =
+        std::function<void(const AudioClockConfig&, VoidCallback)>;
 
     DICETcatProtocol(Protocols::Ports::FireWireBusOps& busOps,
                      Protocols::Ports::FireWireBusInfo& busInfo,
@@ -110,6 +113,15 @@ public:
     [[nodiscard]] Protocols::Ports::ProtocolRegisterIO& IO() noexcept { return io_; }
     [[nodiscard]] DICETransaction& Transaction() noexcept { return diceReader_; }
 
+    // Product profiles can insert device-specific work after generic DICE has
+    // selected and confirmed the clock, but before the coordinator programs
+    // RX/TX stream registers and asserts GLOBAL_ENABLE.  The hook therefore
+    // runs with the remote engine stopped and is the only safe place for TCAT
+    // extension commands which replace the active router/stream image.
+    void SetStoppedPrepareHook(StoppedPrepareHook hook) {
+        stoppedPrepareHook_ = std::move(hook);
+    }
+
 private:
     friend class DICETcatProtocolTestPeer;
 
@@ -147,6 +159,10 @@ private:
     const std::atomic<bool>* teardownCancel_{nullptr};
     ::ASFW::Scheduling::ITimerScheduler* timerScheduler_{nullptr};  // driver-owned
     DICETcatRuntimePolicy runtimePolicy_{};
+    StoppedPrepareHook stoppedPrepareHook_{};
+    // Generic DICE firmware may expose stream counts as 0 or -1 until the
+    // current clock is explicitly re-selected after ownership is claimed.
+    std::atomic<bool> runtimeGeometryRefinementAttempted_{false};
     GeneralSections sections_{};
     bool initialized_{false};
     bool sectionsLoaded_{false};

@@ -291,6 +291,65 @@ void DICETransaction::ReadRouterEntries(
         });
 }
 
+void DICETransaction::ReadCurrentConfigRouterEntries(
+    const ExtensionSections& sections,
+    const DiceExtensionCaps& caps,
+    DiceRateMode mode,
+    std::function<void(IOReturn, DiceRouterEntries)> callback) {
+    auto callbackState = Common::ShareCallback(std::move(callback));
+    const uint32_t modeOffset = CurrentConfigRouterBlockOffset(mode);
+    if (!caps.router.exposed || caps.router.maximumEntryCount > kDiceMaximumRouterEntries ||
+        sections.currentConfig.size < modeOffset + sizeof(uint32_t)) {
+        Common::InvokeSharedCallback(callbackState, kIOReturnUnsupported, DiceRouterEntries{});
+        return;
+    }
+
+    const uint32_t routerOffset = ExtensionAbsoluteOffset(sections.currentConfig, modeOffset);
+    (void)io_.ReadBlock(
+        MakeDICEAddress(routerOffset), sizeof(uint32_t),
+        [this, callbackState, routerOffset,
+         sectionBytes = sections.currentConfig.size - modeOffset,
+         maximumEntries = caps.router.maximumEntryCount](Async::AsyncStatus status,
+                                                          std::span<const uint8_t> payload) {
+            if (status != Async::AsyncStatus::kSuccess || payload.size() != sizeof(uint32_t)) {
+                Common::InvokeSharedCallback(callbackState,
+                                              status == Async::AsyncStatus::kSuccess
+                                                  ? kIOReturnUnderrun : MapReadStatus(status),
+                                              DiceRouterEntries{});
+                return;
+            }
+
+            const uint32_t countWord = ReadBE32(payload.data());
+            if (countWord > maximumEntries || countWord > kDiceMaximumRouterEntries ||
+                countWord > ((sectionBytes - sizeof(uint32_t)) / DiceRouterEntry::kWireSize)) {
+                Common::InvokeSharedCallback(callbackState, kIOReturnUnderrun, DiceRouterEntries{});
+                return;
+            }
+            const uint16_t count = static_cast<uint16_t>(countWord);
+            if (count == 0) {
+                Common::InvokeSharedCallback(callbackState, kIOReturnSuccess, DiceRouterEntries{});
+                return;
+            }
+
+            const size_t bytes = size_t{count} * DiceRouterEntry::kWireSize;
+            auto accumulated = std::make_shared<std::vector<uint8_t>>();
+            accumulated->reserve(bytes);
+            ReadSectionChunkedExact(io_, routerOffset + sizeof(uint32_t), bytes, accumulated,
+                [callbackState, accumulated, count](IOReturn readStatus) {
+                    DiceRouterEntries entries{};
+                    if (readStatus != kIOReturnSuccess ||
+                        !DecodeDiceRouterEntries(*accumulated, count, entries)) {
+                        Common::InvokeSharedCallback(callbackState,
+                                                      readStatus == kIOReturnSuccess
+                                                          ? kIOReturnUnderrun : readStatus,
+                                                      DiceRouterEntries{});
+                        return;
+                    }
+                    Common::InvokeSharedCallback(callbackState, kIOReturnSuccess, entries);
+                });
+        });
+}
+
 void DICETransaction::ReadMixerCoefficients(
     const ExtensionSections& sections,
     const DiceExtensionCaps& caps,
@@ -479,6 +538,12 @@ void CopyLabelBlob(char (&dst)[256], const uint8_t* src, size_t bytesAvailable) 
 }
 
 uint32_t ClampStreamCount(uint32_t count) noexcept {
+    // DICE firmware commonly publishes -1 immediately after cold ownership,
+    // before CLOCK_SELECT has been explicitly selected. It is an invalid
+    // sentinel, not four streams.
+    if (count == UINT32_MAX) {
+        return 0;
+    }
     return (count > 4u) ? 4u : count;
 }
 
@@ -652,7 +717,8 @@ ExtensionStreamGeometry ParseExtensionStreamBlock(const uint8_t* data, size_t si
     };
 
     const bool txComplete = parseInto(geometry.tx, txCount, 0);
-    const bool rxComplete = parseInto(geometry.rx, rxCount, reportedTx);
+    const uint32_t reportedTxEntries = reportedTx == UINT32_MAX ? 0 : reportedTx;
+    const bool rxComplete = parseInto(geometry.rx, rxCount, reportedTxEntries);
     if (!txComplete || !rxComplete) {
         // The read was capped (section size, or our 4096-byte transaction cap)
         // before every entry landed. Report the shortfall so a device that needs

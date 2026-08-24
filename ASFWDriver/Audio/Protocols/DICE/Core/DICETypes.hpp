@@ -862,6 +862,14 @@ enum class DiceRateMode : uint8_t {
            0x2000U * static_cast<uint32_t>(mode);
 }
 
+/// Byte offset of a rate mode's active router image inside CURRENT_CONFIG.
+/// Each mode owns a router image followed by its stream-description block.
+[[nodiscard]] constexpr uint32_t CurrentConfigRouterBlockOffset(
+    DiceRateMode mode) noexcept {
+    return CurrentConfigOffset::kLowRouter +
+           0x2000U * static_cast<uint32_t>(mode);
+}
+
 /// Layout inside one CURRENT_CONFIG stream block: a two-quadlet header followed
 /// by `txCount` TX entries and then `rxCount` RX entries of equal stride.
 namespace CurrentConfigStream {

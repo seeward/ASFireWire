@@ -68,6 +68,16 @@ public:
                            const DiceExtensionCaps& caps,
                            std::function<void(IOReturn, DiceRouterEntries)> callback);
 
+    /// Read the active router image from CURRENT_CONFIG for a rate mode. Some
+    /// Focusrite devices leave the editable router section empty and expose
+    /// their live routing only here. This is still raw protocol state; the
+    /// device profile owns semantic mapping of the result.
+    void ReadCurrentConfigRouterEntries(
+        const ExtensionSections& sections,
+        const DiceExtensionCaps& caps,
+        DiceRateMode mode,
+        std::function<void(IOReturn, DiceRouterEntries)> callback);
+
     /// Read the fixed 16 x 18 TCAT mixer window.  The capability data selects
     /// the active dimensions, but the wire read remains the fixed window.
     void ReadMixerCoefficients(const ExtensionSections& sections,

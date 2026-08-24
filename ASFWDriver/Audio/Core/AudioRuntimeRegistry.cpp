@@ -137,6 +137,25 @@ uint32_t AudioRuntimeRegistry::CopySemanticTopologyEndpointIds(
     return count;
 }
 
+uint32_t AudioRuntimeRegistry::CopySemanticMatrixEndpointIds(
+    std::array<Devices::AudioEndpointId,
+               kMaxAudioSemanticMatrixEndpoints>& out) noexcept {
+    out.fill({});
+    if (!lock_) return 0;
+
+    uint32_t count = 0;
+    IOLockLock(lock_);
+    for (const auto& [endpointId, entry] : endpoints_) {
+        if (!entry.runtime || !entry.protocol || !entry.protocol->AsAudioSemanticMatrix()) {
+            continue;
+        }
+        out[count++] = endpointId;
+        if (count == out.size()) break;
+    }
+    IOLockUnlock(lock_);
+    return count;
+}
+
 void AudioRuntimeRegistry::Remove(Devices::AudioEndpointId endpointId) noexcept {
     Entry removed{};
     if (!lock_ || !endpointId) return;

@@ -32,11 +32,36 @@ AudioSemanticSignalKind SignalKindForSource(uint8_t block) noexcept {
     }
 }
 
+AudioSemanticSignalKind SignalKindForSPro24Source(const DiceRouterEntry& entry) noexcept {
+    // SPro24 DSP's Ins0 block has profile-defined sub-ranges. Keep the DSP
+    // returns out of the physical-line presentation even though they share a
+    // TCAT source block. Cross-validated with the local
+    // snd-firewire-ctl-services spro24dsp Tcd22xx specification.
+    if (entry.sourceBlock == 4) {
+        if (entry.sourceChannel < 2) return AudioSemanticSignalKind::AnalogLine;
+        if (entry.sourceChannel < 4) return AudioSemanticSignalKind::AnalogMicXlr;
+        return AudioSemanticSignalKind::Auxiliary; // channel-strip/reverb return
+    }
+    return SignalKindForSource(entry.sourceBlock);
+}
+
 uint32_t SignalIndexForSource(const DiceRouterEntry& entry) noexcept {
     // Signal indices are one-based user-facing channel numbers. Distinct TCAT
     // source blocks of one signal kind need disjoint identities as well.
     switch (entry.sourceBlock) {
-    case 4: return uint32_t{entry.sourceChannel} + 1U;
+    case 0:
+        // The Pro 24 DSP exposes its coax S/PDIF pair at AES 6/7; keep the
+        // user-facing pair numbered 1/2 rather than leaking router offsets.
+        return entry.sourceChannel >= 6 ? uint32_t{entry.sourceChannel} - 5U
+                                        : uint32_t{entry.sourceChannel} + 1U;
+    case 4:
+        if (entry.sourceChannel < 2) return uint32_t{entry.sourceChannel} + 1U;
+        if (entry.sourceChannel < 4) return uint32_t{entry.sourceChannel} - 1U;
+        if (entry.sourceChannel >= 8 && entry.sourceChannel < 10) {
+            return uint32_t{entry.sourceChannel} - 7U; // channel strip 1/2
+        }
+        if (entry.sourceChannel >= 14) return uint32_t{entry.sourceChannel} - 11U; // reverb 1/2
+        return uint32_t{entry.sourceChannel} + 1U;
     case 5: return uint32_t{entry.sourceChannel} + 17U;
     case 11: return uint32_t{entry.sourceChannel} + 1U;
     case 12: return uint32_t{entry.sourceChannel} + 17U;
@@ -80,13 +105,14 @@ bool BuildSPro24DspSemanticMatrix(const DiceMixerCoefficients& coefficients,
     outSnapshot.inputCount = coefficients.inputCount;
     outSnapshot.outputCount = coefficients.outputCount;
     outSnapshot.coefficientMaximum = 65535;
+    outSnapshot.gainLaw = AudioSemanticMatrixGainLaw::UnsignedQ214Amplitude;
 
     for (uint32_t input = 0; input < coefficients.inputCount; ++input) {
         DiceRouterEntry route{};
         const bool found = FindMixerInputRoute(routes, input, route);
         outSnapshot.inputs[input] = {
             .portId = kMixerInputPortBase + input + 1U,
-            .signalKind = found ? SignalKindForSource(route.sourceBlock)
+            .signalKind = found ? SignalKindForSPro24Source(route)
                                 : AudioSemanticSignalKind::Auxiliary,
             .signalIndex = found ? SignalIndexForSource(route) : input + 1U,
         };

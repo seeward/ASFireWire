@@ -15,6 +15,7 @@
 #include "../../../Shared/Topology/IAudioSemanticMatrix.hpp"
 #include <DriverKit/IOLib.h>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 
@@ -37,6 +38,8 @@ constexpr uint32_t kFocusriteVendorId = 0x00130e;
 
 /// Saffire Pro 24 DSP model ID
 constexpr uint32_t kSPro24DspModelId = 0x000008;
+
+class SPro24DspProtocolTestPeer;
 
 // ============================================================================
 // SPro24DspProtocol
@@ -123,8 +126,9 @@ public:
     // DSP Control (Async)
     // ========================================================================
     
-    /// Enable/disable DSP
-    void EnableDsp(bool enable, VoidCallback callback);
+    /// Select the vendor's InSitu/VRM mode. This is not a generic DSP or
+    /// stream-enable switch: false selects the ordinary FX signal path.
+    void SetInSituMode(bool enable, VoidCallback callback);
     
     /// Get effect general parameters
     void GetEffectParams(ResultCallback<EffectGeneralParams> callback);
@@ -169,6 +173,8 @@ public:
     void StartStreamTest(VoidCallback callback);
 
 private:
+    friend class SPro24DspProtocolTestPeer;
+
     TCAT::DICETcatProtocol tcat_;
     ExtensionSections extensionSections_{};
     uint32_t appSectionBase_{0};
@@ -181,6 +187,22 @@ private:
     DiceRouterEntries semanticRouterEntries_{};
     uint32_t semanticMatrixRevision_{0};
     bool semanticMatrixReady_{false};
+    ::ASFW::Scheduling::ITimerScheduler* timerScheduler_{nullptr};  // driver-owned
+    std::atomic<uint64_t> extensionCommandEpoch_{0};
+    std::atomic<uint64_t> extensionCommandTimer_{0};
+
+    // One active-rate Pro 24 DSP coefficient image spans the two channel
+    // strips and reverb. It is not laid out as independent 0x88-byte effect
+    // blocks; see the per-rate table in spro24dsp.rs.
+    static constexpr size_t kFxCoefficientBankSize = 0x110;
+    enum class FxWriteGroup : uint8_t { Equalizer, Compressor, Reverb };
+    struct FxRearmSnapshot {
+        std::array<uint8_t, kInputParamsSize> input{};
+        uint32_t channelStripFlags{0};
+        uint32_t coefficientBankOffset{0};
+        std::shared_ptr<std::array<uint8_t, kFxCoefficientBankSize>> coefficientBank{
+            std::make_shared<std::array<uint8_t, kFxCoefficientBankSize>>()};
+    };
     
     /// Send software notice to commit changes
     void SendSwNotice(SwNotice notice, VoidCallback callback);
@@ -192,6 +214,38 @@ private:
                                      ExtensionSections sections,
                                      InitCallback callback);
     void PrimeSemanticMatrix() noexcept;
+    void PrepareStoppedForRate(const AudioClockConfig& clock, VoidCallback callback);
+    void LoadRouterStreamConfigForRate(uint32_t rateHz, VoidCallback callback);
+    void PollExtensionCommand(uint64_t epoch, uint32_t attempt, VoidCallback callback);
+    void ScheduleExtensionCommandPoll(uint64_t epoch,
+                                      uint32_t attempt,
+                                      VoidCallback callback);
+    void WaitForRouterStreamConfigNotice(uint64_t epoch,
+                                         uint32_t attempt,
+                                         uint32_t observedBits,
+                                         VoidCallback callback);
+    void CancelExtensionCommandPoll() noexcept;
+    void RearmFxForRate(uint32_t rateHz, VoidCallback callback);
+    void ReadFxRearmSnapshot(const std::shared_ptr<FxRearmSnapshot>& snapshot,
+                             VoidCallback callback);
+    void ReplayFxSnapshot(const std::shared_ptr<FxRearmSnapshot>& snapshot,
+                          VoidCallback callback);
+    void ReplayFxGroup(const std::shared_ptr<FxRearmSnapshot>& snapshot,
+                       FxWriteGroup group,
+                       const SwNotice* notices,
+                       size_t noticeCount,
+                       VoidCallback callback);
+    void ReplayChannelStripFlags(const std::shared_ptr<FxRearmSnapshot>& snapshot,
+                                 VoidCallback callback);
+    void WriteFxFragments(const std::shared_ptr<std::array<uint8_t, kFxCoefficientBankSize>>& bank,
+                          uint32_t bankOffset,
+                          FxWriteGroup group,
+                          size_t index,
+                          VoidCallback callback);
+    void SendSwNotices(const SwNotice* notices,
+                       size_t count,
+                       size_t index,
+                       VoidCallback callback);
     
     /// Read from application section
     void ReadAppSection(uint32_t offset, size_t size, DICEReadCallback callback);

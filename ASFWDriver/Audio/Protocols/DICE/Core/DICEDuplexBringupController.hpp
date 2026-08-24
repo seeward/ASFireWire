@@ -15,8 +15,10 @@
 #include <DriverKit/IODispatchQueue.h>
 #include <DriverKit/IOReturn.h>
 #include <atomic>
+#include <concepts>
 #include <cstdint>
 #include <functional>
+#include <variant>
 
 namespace ASFW::Audio::DICE {
 
@@ -43,6 +45,7 @@ public:
     using StageCallback = IDuplexDeviceControl::StageCallback;
     using ConfirmCallback = IDuplexDeviceControl::ConfirmCallback;
     using ClockApplyCallback = IDuplexDeviceControl::ClockApplyCallback;
+    using SectionLayoutCallback = std::function<void(IOReturn, GeneralSections)>;
 
     DICEDuplexBringupController(
         DICETransaction& diceReader,
@@ -67,6 +70,12 @@ public:
     void ConfirmDuplexStart(ConfirmCallback callback);
     void ApplyClockConfig(const DiceClockConfiguration& desiredClock,
                           ClockApplyCallback callback);
+    void RefineClockForStreamGeometry(const DiceClockConfiguration& currentClock,
+                                      ClockApplyCallback callback);
+    /// A product stopped-prepare hook may replace the active DICE stream
+    /// image. Refresh its general section pointers before ProgramRx/ProgramTx
+    /// so their register writes address the replacement image.
+    void RefreshPreparedSectionLayout(SectionLayoutCallback callback);
     void SetTeardownCancelToken(const std::atomic<bool>* cancel) noexcept {
         teardownCancel_ = cancel;
     }
@@ -79,10 +88,10 @@ public:
     [[nodiscard]] IOReturn StopDuplex();       // stays sync — pure writes, no HW wait
     void ReleaseOwner(VoidCallback callback);
 
-    [[nodiscard]] bool IsPrepared() const noexcept { return restartSession_.devicePrepared; }
-    [[nodiscard]] bool IsArmed() const noexcept { return restartSession_.deviceTxArmed; }
-    [[nodiscard]] bool IsRunning() const noexcept { return restartSession_.deviceRunning; }
-    [[nodiscard]] bool IsOwnerClaimed() const noexcept { return restartSession_.ownerClaimed; }
+    [[nodiscard]] bool IsPrepared() const noexcept;
+    [[nodiscard]] bool IsArmed() const noexcept;
+    [[nodiscard]] bool IsRunning() const noexcept;
+    [[nodiscard]] bool IsOwnerClaimed() const noexcept;
 
 private:
     enum class FlowMode : uint8_t {
@@ -91,13 +100,89 @@ private:
         kClockApply,
     };
 
+    // The former controller state was a restart-session bag with a phase enum
+    // and several independently mutable booleans.  That admitted impossible
+    // combinations such as "idle but owner claimed" and (critically) allowed a
+    // forced CLOCK_SELECT write to complete from an unrelated locked status.
+    //
+    // Keep the generic DuplexRestartPhase at the public result boundary, but
+    // model the DICE device workflow internally as a closed set of states.  A
+    // state which can wait for CLOCK_ACCEPTED is distinct from ordinary
+    // preparation, so a status poll can never bypass that required transition.
+    struct Operation final {
+        FW::Generation generation{0};
+        AudioDuplexChannels channels{};
+        DiceRestartReason reason{DiceRestartReason::kInitialStart};
+        AudioClockConfig desiredClock{};
+        AudioClockConfig appliedClock{};
+        FlowMode flow{FlowMode::kNone};
+        bool ownerClaimed{false};
+        bool forceClockSelectWrite{false};
+        uint32_t preClaimClockSelect{0};
+        bool preClaimDeviceEnabled{false};
+    };
+
+    struct IdleState final {};
+    struct PreparingState final { Operation operation{}; };
+    struct AwaitingClockAcceptedState final { Operation operation{}; };
+    struct PreparedState final { Operation operation{}; };
+    struct ProgrammingRxState final { Operation operation{}; };
+    struct RxProgrammedState final { Operation operation{}; };
+    struct ProgrammingTxState final { Operation operation{}; };
+    struct TxArmedState final { Operation operation{}; };
+    struct ConfirmingState final { Operation operation{}; };
+    struct RunningState final { Operation operation{}; };
+    struct StoppingState final { Operation operation{}; };
+    struct FailedState final { Operation operation{}; IOReturn error{kIOReturnSuccess}; };
+
+    using State = std::variant<IdleState,
+                               PreparingState,
+                               AwaitingClockAcceptedState,
+                               PreparedState,
+                               ProgrammingRxState,
+                               RxProgrammedState,
+                               ProgrammingTxState,
+                               TxArmedState,
+                               ConfirmingState,
+                               RunningState,
+                               StoppingState,
+                               FailedState>;
+
+    [[nodiscard]] Operation* ActiveOperation() noexcept;
+    [[nodiscard]] const Operation* ActiveOperation() const noexcept;
+    [[nodiscard]] bool HasActiveOperation() const noexcept;
+    [[nodiscard]] DiceRestartPhase CurrentPhase() const noexcept;
+    void ResetOperation() noexcept;
+
+    template <typename NextState>
+    void TransitionTo() noexcept {
+        static_assert(!std::same_as<NextState, IdleState>);
+        Operation* operation = ActiveOperation();
+        if (operation == nullptr) {
+            return;
+        }
+        Operation next = std::move(*operation);
+        state_ = NextState{.operation = std::move(next)};
+    }
+
+    void BeginOperation(FW::Generation generation,
+                        const AudioDuplexChannels& channels,
+                        DiceRestartReason reason,
+                        const DiceClockConfiguration& clock,
+                        FlowMode flow,
+                        bool forceClockSelectWrite) noexcept;
+
     // Async step chain for PrepareDuplex48k raw-parity path
+    void BeginClockApply(const DiceClockConfiguration& desiredClock,
+                         bool forceClockSelectWrite,
+                         ClockApplyCallback callback);
     void DoReadGlobalStatus(AudioDuplexChannels channels, VoidCallback cb);
     void DoRefreshSectionLayout(AudioDuplexChannels channels, VoidCallback cb);
     void DoReadGlobalBeforeClaim(AudioDuplexChannels channels, VoidCallback cb);
     void DoReadOwnerBeforeClaim(AudioDuplexChannels channels, VoidCallback cb);
     void DoClaimOwner(AudioDuplexChannels channels, VoidCallback cb);
     void DoReadOwnerAfterClaim(AudioDuplexChannels channels, VoidCallback cb);
+    void DoNormalizeGlobalEnable(AudioDuplexChannels channels, VoidCallback cb);
     void DoWriteClockSelect(AudioDuplexChannels channels, VoidCallback cb);
     void DoActiveClockCheck(AudioDuplexChannels channels, uint32_t accumulatedNotify, VoidCallback cb);
     void DoWaitClockAccepted(AudioDuplexChannels channels, uint32_t attempt, VoidCallback cb);
@@ -167,20 +252,17 @@ private:
     std::atomic<Scheduling::TimerToken> scheduledRetry_{Scheduling::kInvalidTimerToken};
     std::atomic<uint64_t> scheduledRetryEpoch_{0};
 
-    DiceRestartSession restartSession_{};
+    State state_{IdleState{}};
     DiceClockConfiguration diceClock_{};
-    FlowMode flowMode_{FlowMode::kNone};
     AudioStreamRuntimeCaps runtimeCaps_{};
     uint32_t confirmNotification_{0};
     uint32_t confirmStatus_{0};
     uint32_t confirmExtStatus_{0};
     IOReturn stopSequenceError_{kIOReturnSuccess};
     bool refreshRuntimeCapsOnPrepare_{true};
-    // CLOCK_SELECT read at the start of the current bring-up (DoReadGlobalBeforeClaim).
-    // Lets DoWriteClockSelect skip a redundant write when the device is already at the
-    // target clock, so the PLL relock happens once (during the idle ApplyClockConfig)
-    // instead of again mid-bring-up where it disrupts the streams being enabled.
-    uint32_t preClaimClockSelect_{0};
+    // Retains the reason for an equal-value clock reselect. Every DICE clock
+    // operation writes CLOCK_SELECT; the flag only annotates cold-geometry
+    // refinement in diagnostics.
     const std::atomic<bool>* teardownCancel_{nullptr};
 };
 
