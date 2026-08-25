@@ -31,37 +31,59 @@ struct SaffireConsoleStatusCard: View {
 }
 
 struct SaffireInputOutputSection: View {
+    let endpointID: AudioEndpointID
+    let connector: ASFWDriverConnector
     let controls: SaffireControlSurface?
+    @State private var writeInFlight = false
+    @State private var writeStatus: String?
 
     var body: some View {
         HStack(alignment: .top, spacing: 18) {
-            AudioTopologyCard(title: "Physical Inputs", systemImage: "mic.fill", badge: "Readback") {
+            AudioTopologyCard(title: "Physical Inputs", systemImage: "mic.fill", badge: "Hardware") {
                 if let controls {
                     HStack(alignment: .top, spacing: 8) {
-                        inputCard("INPUT 1", value: controls.micInputModes[0].label)
-                        inputCard("INPUT 2", value: controls.micInputModes[1].label)
-                        inputCard("LINE 3/4", value: controls.lineInputLevels[0].label)
-                        inputCard("LINE 5/6", value: controls.lineInputLevels[1].label)
+                        inputCard("INPUT 1", value: controls.micInputModes[0].label,
+                                  controlID: SaffireControlID.micInputMode1,
+                                  nextValue: controls.micInputModes[0] == .line ? 1 : 0)
+                        inputCard("INPUT 2", value: controls.micInputModes[1].label,
+                                  controlID: SaffireControlID.micInputMode2,
+                                  nextValue: controls.micInputModes[1] == .line ? 1 : 0)
+                        inputCard("LINE 3/4", value: controls.lineInputLevels[0].label,
+                                  controlID: SaffireControlID.lineInputLevel34,
+                                  nextValue: controls.lineInputLevels[0] == .low ? 1 : 0)
+                        inputCard("LINE 5/6", value: controls.lineInputLevels[1].label,
+                                  controlID: SaffireControlID.lineInputLevel56,
+                                  nextValue: controls.lineInputLevels[1] == .low ? 1 : 0)
                     }
+                    controlStatus
                 } else {
                     SaffirePendingState(message: "Reading the input-parameter block…")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
 
-            AudioTopologyCard(title: "Physical Outputs", systemImage: "speaker.wave.3.fill", badge: "Readback") {
+            AudioTopologyCard(title: "Physical Outputs", systemImage: "speaker.wave.3.fill", badge: "Hardware") {
                 if let controls {
                     VStack(alignment: .leading, spacing: 7) {
                         HStack(spacing: 7) {
-                            SaffireStatePill(title: "GLOBAL MUTE", isOn: controls.globalMute, tint: .orange)
-                            SaffireStatePill(title: "DIM", isOn: controls.globalDim, tint: .orange)
+                            actionButton(title: "GLOBAL MUTE", isOn: controls.globalMute, tint: .orange) {
+                                submit(SaffireControlID.globalMute, controls.globalMute ? 0 : 1)
+                            }
+                            actionButton(title: "DIM", isOn: controls.globalDim, tint: .orange) {
+                                submit(SaffireControlID.globalDim, controls.globalDim ? 0 : 1)
+                            }
                         }
                         ForEach(controls.outputPairs) { pair in
-                            SaffireOutputPairRow(pair: pair)
+                            SaffireOutputPairRow(pair: pair, isEnabled: !writeInFlight) { lane, value in
+                                submit(SaffireControlID.outputVolumeFirst + UInt32(pair.id * 2 + lane), value)
+                            } onMute: { lane, muted in
+                                submit(SaffireControlID.outputMuteFirst + UInt32(pair.id * 2 + lane), muted ? 1 : 0)
+                            }
                         }
                         Text("Volume is the device's 0…127 logical output control; its calibrated dB law is not published yet.")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                        controlStatus
                     }
                 } else {
                     SaffirePendingState(message: "Reading output groups and mute state…")
@@ -71,13 +93,15 @@ struct SaffireInputOutputSection: View {
         }
     }
 
-    private func inputCard(_ title: String, value: String) -> some View {
+    private func inputCard(_ title: String, value: String, controlID: UInt32, nextValue: Int32) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title)
                 .font(.caption.monospaced().bold())
                 .foregroundStyle(.cyan)
-            Text(value)
-                .font(.subheadline.weight(.semibold))
+            Button(value) { submit(controlID, nextValue) }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(writeInFlight)
             Text("hardware mode")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -85,6 +109,45 @@ struct SaffireInputOutputSection: View {
         .padding(9)
         .frame(minWidth: 104, alignment: .leading)
         .background(Color.cyan.opacity(0.1), in: RoundedRectangle(cornerRadius: 7))
+    }
+
+    @ViewBuilder
+    private var controlStatus: some View {
+        if let writeStatus {
+            Text(writeStatus)
+                .font(.caption2.monospaced())
+                .foregroundStyle(writeStatus.hasPrefix("Could not") ? .red : .secondary)
+        }
+    }
+
+    private func actionButton(title: String, isOn: Bool, tint: Color,
+                              action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text("\(title)  \(isOn ? "ON" : "OFF")")
+                .font(.caption2.bold())
+                .foregroundStyle(isOn ? Color.black : Color.secondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background(isOn ? tint : Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
+        }
+        .buttonStyle(.plain)
+        .disabled(writeInFlight)
+        .accessibilityLabel(title)
+        .accessibilityValue(isOn ? "On" : "Off")
+    }
+
+    private func submit(_ controlID: UInt32, _ value: Int32) {
+        guard !writeInFlight else { return }
+        writeInFlight = true
+        writeStatus = "Applying hardware control…"
+        connector.submitAudioControlValue(endpointID: endpointID, controlID: controlID, value: value) { result in
+            Task { @MainActor in
+                writeInFlight = false
+                writeStatus = result == KERN_SUCCESS
+                    ? "Hardware write confirmed."
+                    : "Could not apply control: \(connector.interpretIOReturn(result))"
+            }
+        }
     }
 }
 
@@ -156,6 +219,9 @@ struct SaffirePatchbaySection: View {
 
 private struct SaffireOutputPairRow: View {
     let pair: SaffireControlSurface.OutputPair
+    let isEnabled: Bool
+    let onVolume: (Int, Int32) -> Void
+    let onMute: (Int, Bool) -> Void
 
     var body: some View {
         HStack(spacing: 8) {
@@ -163,8 +229,12 @@ private struct SaffireOutputPairRow: View {
                 .font(.caption.monospaced().bold())
                 .foregroundStyle(.orange)
                 .frame(width: 158, alignment: .leading)
-            SaffireOutputLane(title: "L", volume: pair.leftVolume, muted: pair.leftMuted)
-            SaffireOutputLane(title: "R", volume: pair.rightVolume, muted: pair.rightMuted)
+            SaffireOutputLane(title: "L", volume: pair.leftVolume, muted: pair.leftMuted,
+                              isEnabled: isEnabled,
+                              onVolume: { onVolume(0, $0) }, onMute: { onMute(0, $0) })
+            SaffireOutputLane(title: "R", volume: pair.rightVolume, muted: pair.rightMuted,
+                              isEnabled: isEnabled,
+                              onVolume: { onVolume(1, $0) }, onMute: { onMute(1, $0) })
         }
     }
 }
@@ -173,16 +243,23 @@ private struct SaffireOutputLane: View {
     let title: String
     let volume: Int32
     let muted: Bool
+    let isEnabled: Bool
+    let onVolume: (Int32) -> Void
+    let onMute: (Bool) -> Void
 
     var body: some View {
         HStack(spacing: 4) {
             Text(title).font(.caption2.monospaced().bold()).foregroundStyle(.secondary)
-            Text("\(volume)").font(.caption.monospaced().bold())
-            if muted {
-                Text("MUTE").font(.caption2.bold()).foregroundStyle(.red)
-            }
+            Button { onVolume(max(0, volume - 1)) } label: { Image(systemName: "minus") }
+                .buttonStyle(.borderless).controlSize(.mini).disabled(!isEnabled || volume == 0)
+            Text("\(volume)").font(.caption.monospaced().bold()).frame(minWidth: 23)
+            Button { onVolume(min(127, volume + 1)) } label: { Image(systemName: "plus") }
+                .buttonStyle(.borderless).controlSize(.mini).disabled(!isEnabled || volume == 127)
+            Button(muted ? "MUTE" : "mute") { onMute(!muted) }
+                .buttonStyle(.borderless).controlSize(.mini).disabled(!isEnabled)
+                .foregroundStyle(muted ? .red : .secondary)
         }
-        .frame(minWidth: 58, alignment: .leading)
+        .frame(minWidth: 130, alignment: .leading)
     }
 }
 

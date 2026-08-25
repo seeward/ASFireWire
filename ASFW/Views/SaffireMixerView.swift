@@ -15,7 +15,8 @@ struct SaffireMixerView: View {
     var body: some View {
         Group {
             if let matrix {
-                SaffireMixerRack(matrix: matrix, controls: SaffireControlSurface(controls), status: status)
+                SaffireMixerRack(matrix: matrix, connector: connector,
+                                  controls: SaffireControlSurface(controls), status: status)
             } else {
                 ContentUnavailableView(
                     "Saffire mixer is loading",
@@ -76,6 +77,7 @@ struct SaffireMixerView: View {
 /// while keeping each source strip readable.
 private struct SaffireMixerRack: View {
     let matrix: AudioSemanticMatrixSnapshot
+    let connector: ASFWDriverConnector
     let controls: SaffireControlSurface?
     let status: String
     @State private var selectedPair = 0
@@ -90,7 +92,9 @@ private struct SaffireMixerRack: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 SaffireConsoleStatusCard(status: status, controls: controls)
-                SaffireInputOutputSection(controls: controls)
+                SaffireInputOutputSection(endpointID: matrix.endpointID,
+                                          connector: connector,
+                                          controls: controls)
                 mixerSection
                 SaffireDspSection(controls: controls)
                 SaffirePatchbaySection(inputs: matrix.inputs)

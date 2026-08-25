@@ -95,7 +95,9 @@ nonisolated struct SaffireControlSurface: Equatable, Sendable {
 
 /// Shared semantic IDs. Their numerical encoding is private to the app/driver
 /// ABI and intentionally does not mirror a register map.
-private enum SaffireControlID {
+/// App-side ABI names for the driver-owned Saffire control surface. These are
+/// semantic IDs, not vendor application-section offsets.
+enum SaffireControlID {
     static let micInputMode1: UInt32 = 0x5350_0001
     static let micInputMode2: UInt32 = 0x5350_0002
     static let lineInputLevel34: UInt32 = 0x5350_0003

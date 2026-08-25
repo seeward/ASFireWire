@@ -75,6 +75,109 @@ constexpr std::array<SwNotice, 1> kChannelStripNotice{{SwNotice::ChStripFlags}};
 constexpr std::array<SwNotice, 1> kCompressorNotice{{SwNotice::CompressorAll}};
 constexpr std::array<SwNotice, 1> kReverbNotice{{SwNotice::Reverb}};
 
+[[nodiscard]] constexpr bool IsInputControl(uint32_t controlId) noexcept {
+    return controlId >= SPro24DspControl::kMicInputMode1 &&
+           controlId <= SPro24DspControl::kLineInputLevel56;
+}
+
+[[nodiscard]] constexpr bool IsOutputControl(uint32_t controlId) noexcept {
+    return (controlId >= SPro24DspControl::kOutputVolumeFirst &&
+            controlId < SPro24DspControl::kOutputVolumeFirst + 6U) ||
+           (controlId >= SPro24DspControl::kOutputMuteFirst &&
+            controlId < SPro24DspControl::kOutputMuteFirst + 6U) ||
+           controlId == SPro24DspControl::kGlobalMute ||
+           controlId == SPro24DspControl::kGlobalDim;
+}
+
+[[nodiscard]] bool ApplyInputControl(InputParams& input,
+                                     uint32_t controlId,
+                                     int32_t value) noexcept {
+    switch (controlId) {
+    case SPro24DspControl::kMicInputMode1:
+    case SPro24DspControl::kMicInputMode2:
+        if (value < static_cast<int32_t>(MicInputLevel::Line) ||
+            value > static_cast<int32_t>(MicInputLevel::Instrument)) return false;
+        input.micLevels[controlId - SPro24DspControl::kMicInputMode1] =
+            static_cast<MicInputLevel>(value);
+        return true;
+    case SPro24DspControl::kLineInputLevel34:
+    case SPro24DspControl::kLineInputLevel56:
+        if (value < static_cast<int32_t>(LineInputLevel::Low) ||
+            value > static_cast<int32_t>(LineInputLevel::High)) return false;
+        input.lineLevels[controlId - SPro24DspControl::kLineInputLevel34] =
+            static_cast<LineInputLevel>(value);
+        return true;
+    default:
+        return false;
+    }
+}
+
+[[nodiscard]] bool InputControlMatches(const InputParams& input,
+                                        uint32_t controlId,
+                                        int32_t value) noexcept {
+    switch (controlId) {
+    case SPro24DspControl::kMicInputMode1:
+    case SPro24DspControl::kMicInputMode2:
+        return static_cast<int32_t>(
+                   input.micLevels[controlId - SPro24DspControl::kMicInputMode1]) == value;
+    case SPro24DspControl::kLineInputLevel34:
+    case SPro24DspControl::kLineInputLevel56:
+        return static_cast<int32_t>(
+                   input.lineLevels[controlId - SPro24DspControl::kLineInputLevel34]) == value;
+    default:
+        return false;
+    }
+}
+
+[[nodiscard]] bool ApplyOutputControl(OutputGroupState& output,
+                                      uint32_t controlId,
+                                      int32_t value) noexcept {
+    if (controlId >= SPro24DspControl::kOutputVolumeFirst &&
+        controlId < SPro24DspControl::kOutputVolumeFirst + output.volumes.size()) {
+        if (value < OutputGroupState::kVolMin || value > OutputGroupState::kVolMax) return false;
+        output.volumes[controlId - SPro24DspControl::kOutputVolumeFirst] =
+            static_cast<int8_t>(value);
+        return true;
+    }
+    if (controlId >= SPro24DspControl::kOutputMuteFirst &&
+        controlId < SPro24DspControl::kOutputMuteFirst + output.volMutes.size()) {
+        if (value != 0 && value != 1) return false;
+        output.volMutes[controlId - SPro24DspControl::kOutputMuteFirst] = value != 0;
+        return true;
+    }
+    if (value != 0 && value != 1) return false;
+    if (controlId == SPro24DspControl::kGlobalMute) {
+        output.muteEnabled = value != 0;
+        return true;
+    }
+    if (controlId == SPro24DspControl::kGlobalDim) {
+        output.dimEnabled = value != 0;
+        return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool OutputControlMatches(const OutputGroupState& output,
+                                         uint32_t controlId,
+                                         int32_t value) noexcept {
+    if (controlId >= SPro24DspControl::kOutputVolumeFirst &&
+        controlId < SPro24DspControl::kOutputVolumeFirst + output.volumes.size()) {
+        return output.volumes[controlId - SPro24DspControl::kOutputVolumeFirst] == value;
+    }
+    if (controlId >= SPro24DspControl::kOutputMuteFirst &&
+        controlId < SPro24DspControl::kOutputMuteFirst + output.volMutes.size()) {
+        return static_cast<int32_t>(
+                   output.volMutes[controlId - SPro24DspControl::kOutputMuteFirst]) == value;
+    }
+    if (controlId == SPro24DspControl::kGlobalMute) {
+        return static_cast<int32_t>(output.muteEnabled) == value;
+    }
+    if (controlId == SPro24DspControl::kGlobalDim) {
+        return static_cast<int32_t>(output.dimEnabled) == value;
+    }
+    return false;
+}
+
 [[nodiscard]] bool HasUsableGenericStreamImage(
     const Audio::AudioStreamRuntimeCaps& caps) noexcept {
     return caps.sampleRateHz != 0 &&
@@ -220,11 +323,123 @@ bool SPro24DspProtocol::CopyAudioControlSurfaceSnapshot(
 }
 
 void SPro24DspProtocol::ApplyAudioControlValue(
-    uint32_t /*controlId*/, int32_t /*value*/, Audio::IAudioControlSurface::ApplyCallback callback) {
-    // The existing protocol setters are intentionally not exposed yet. Their
-    // commit notices are known, but each UI mutation still needs a guarded
-    // read-modify-write/readback transaction proven against the hardware.
-    if (callback) callback(kIOReturnUnsupported);
+    uint32_t controlId, int32_t value, Audio::IAudioControlSurface::ApplyCallback callback) {
+    if (!callback) return;
+    if (!IsInputControl(controlId) && !IsOutputControl(controlId)) {
+        callback(kIOReturnUnsupported);
+        return;
+    }
+    if (!BeginSemanticControlWrite(callback)) return;
+
+    if (IsInputControl(controlId)) {
+        GetInputParams([this, controlId, value, callback = std::move(callback)](
+                           IOReturn readStatus, InputParams current) mutable {
+            if (readStatus != kIOReturnSuccess) {
+                FinishSemanticControlWrite(readStatus, std::move(callback));
+                return;
+            }
+            if (!ApplyInputControl(current, controlId, value)) {
+                FinishSemanticControlWrite(kIOReturnBadArgument, std::move(callback));
+                return;
+            }
+            SetInputParams(current, [this, controlId, value, callback = std::move(callback)](
+                                        IOReturn writeStatus) mutable {
+                if (writeStatus != kIOReturnSuccess) {
+                    FinishSemanticControlWrite(writeStatus, std::move(callback));
+                    return;
+                }
+                GetInputParams([this, controlId, value, callback = std::move(callback)](
+                                   IOReturn verifyStatus, InputParams readback) mutable {
+                    if (verifyStatus == kIOReturnSuccess &&
+                        InputControlMatches(readback, controlId, value)) {
+                        PublishInputControlReadback(readback);
+                        FinishSemanticControlWrite(kIOReturnSuccess, std::move(callback));
+                    } else {
+                        // Never advance driver belief on a lost software notice or a
+                        // device-side rejected field. The next ordinary poll keeps the
+                        // UI tied to the hardware, rather than to the requested value.
+                        FinishSemanticControlWrite(
+                            verifyStatus == kIOReturnSuccess ? kIOReturnError : verifyStatus,
+                            std::move(callback));
+                    }
+                });
+            });
+        });
+        return;
+    }
+
+    GetOutputGroupState([this, controlId, value, callback = std::move(callback)](
+                            IOReturn readStatus, OutputGroupState current) mutable {
+        if (readStatus != kIOReturnSuccess) {
+            FinishSemanticControlWrite(readStatus, std::move(callback));
+            return;
+        }
+        if (!ApplyOutputControl(current, controlId, value)) {
+            FinishSemanticControlWrite(kIOReturnBadArgument, std::move(callback));
+            return;
+        }
+        CommitOutputControlState(current, controlId,
+                                 [this, controlId, value, callback = std::move(callback)](
+                                     IOReturn writeStatus) mutable {
+            if (writeStatus != kIOReturnSuccess) {
+                FinishSemanticControlWrite(writeStatus, std::move(callback));
+                return;
+            }
+            GetOutputGroupState([this, controlId, value, callback = std::move(callback)](
+                                    IOReturn verifyStatus, OutputGroupState readback) mutable {
+                if (verifyStatus == kIOReturnSuccess &&
+                    OutputControlMatches(readback, controlId, value)) {
+                    PublishOutputControlReadback(readback);
+                    FinishSemanticControlWrite(kIOReturnSuccess, std::move(callback));
+                } else {
+                    FinishSemanticControlWrite(
+                        verifyStatus == kIOReturnSuccess ? kIOReturnError : verifyStatus,
+                        std::move(callback));
+                }
+            });
+        });
+    });
+}
+
+bool SPro24DspProtocol::BeginSemanticControlWrite(
+    const Audio::IAudioControlSurface::ApplyCallback& callback) noexcept {
+    if (!semanticControlLock_) {
+        callback(kIOReturnNotReady);
+        return false;
+    }
+    IOLockLock(semanticControlLock_);
+    const IOReturn status = !semanticControls_.valid ? kIOReturnNotReady :
+        semanticControls_.writeInFlight ? kIOReturnBusy : kIOReturnSuccess;
+    if (status == kIOReturnSuccess) semanticControls_.writeInFlight = true;
+    IOLockUnlock(semanticControlLock_);
+    if (status != kIOReturnSuccess) callback(status);
+    return status == kIOReturnSuccess;
+}
+
+void SPro24DspProtocol::FinishSemanticControlWrite(
+    IOReturn status, Audio::IAudioControlSurface::ApplyCallback callback) noexcept {
+    if (semanticControlLock_) {
+        IOLockLock(semanticControlLock_);
+        semanticControls_.writeInFlight = false;
+        IOLockUnlock(semanticControlLock_);
+    }
+    if (callback) callback(status);
+}
+
+void SPro24DspProtocol::PublishInputControlReadback(const InputParams& input) noexcept {
+    if (!semanticControlLock_) return;
+    IOLockLock(semanticControlLock_);
+    semanticControls_.input = input;
+    ++semanticControls_.revision;
+    IOLockUnlock(semanticControlLock_);
+}
+
+void SPro24DspProtocol::PublishOutputControlReadback(const OutputGroupState& output) noexcept {
+    if (!semanticControlLock_) return;
+    IOLockLock(semanticControlLock_);
+    semanticControls_.output = output;
+    ++semanticControls_.revision;
+    IOLockUnlock(semanticControlLock_);
 }
 
 void SPro24DspProtocol::HandleExtensionSectionsRead(IOReturn status,
@@ -1081,6 +1296,31 @@ void SPro24DspProtocol::SetOutputGroupState(const OutputGroupState& state, VoidC
             }
             SendSwNotice(SwNotice::OutputSrc, callback);
         });
+    });
+}
+
+void SPro24DspProtocol::CommitOutputControlState(const OutputGroupState& state,
+                                                 uint32_t controlId,
+                                                 VoidCallback callback) {
+    auto buffer = std::make_shared<std::array<uint8_t, kOutputGroupStateSize>>();
+    state.Serialize(buffer->data());
+
+    WriteAppSection(kOutputGroupOffset, buffer->data(), buffer->size(),
+                    [this, controlId, callback = std::move(callback), buffer](IOReturn status) mutable {
+        if (status != kIOReturnSuccess) {
+            callback(status);
+            return;
+        }
+        // Cross-validated with snd-firewire-ctl-services focusrite.rs:298-303:
+        // mute/dim occupies the first two quadlets; lane volume/mute occupies
+        // the subsequent group state.  A one-field semantic write sends only
+        // the notice for the touched domain, avoiding an unrelated output
+        // source refresh.
+        const SwNotice notice = controlId == SPro24DspControl::kGlobalMute ||
+                                     controlId == SPro24DspControl::kGlobalDim
+            ? SwNotice::DimMute
+            : SwNotice::OutputSrc;
+        SendSwNotice(notice, std::move(callback));
     });
 }
 

@@ -384,11 +384,15 @@ public:
             PutBe32(payload.data(), 0x2100B142U);
             PutBe32(payload.data() + 4, 0x2200B143U);
         } else if (address.addressHi == 0xFFFFU &&
-                   address.addressLo == (kAppSectionBaseLo + kEffectGeneralOffset) &&
-                   length >= sizeof(uint32_t)) {
-            ++appQuadReadCount;
-            payload.resize(sizeof(uint32_t));
-            PutBe32(payload.data(), 0U);
+                   address.addressLo >= kAppSectionBaseLo &&
+                   static_cast<uint64_t>(address.addressLo) + length <=
+                       static_cast<uint64_t>(kAppSectionBaseLo) + application_.size()) {
+            if (address.addressLo == kAppSectionBaseLo + kEffectGeneralOffset &&
+                length >= sizeof(uint32_t)) {
+                ++appQuadReadCount;
+            }
+            const size_t offset = address.addressLo - kAppSectionBaseLo;
+            std::copy_n(application_.begin() + offset, length, payload.begin());
         }
 
         callback(AsyncStatus::kSuccess, std::span<const uint8_t>(payload.data(), payload.size()));
@@ -407,6 +411,13 @@ public:
         ++writeCount;
         if (address.addressHi == 0xFFFFU) {
             writeAddresses.push_back(address.addressLo);
+        }
+        if (address.addressHi == 0xFFFFU &&
+            address.addressLo >= kAppSectionBaseLo &&
+            static_cast<uint64_t>(address.addressLo) + data.size() <=
+                static_cast<uint64_t>(kAppSectionBaseLo) + application_.size()) {
+            const size_t offset = address.addressLo - kAppSectionBaseLo;
+            std::copy(data.begin(), data.end(), application_.begin() + offset);
         }
         if (address.addressHi == 0xFFFFU &&
             address.addressLo ==
@@ -518,6 +529,7 @@ public:
     uint32_t extStatus_{0};
     uint32_t sampleRate_{48000};
     uint32_t notification_{0x20};
+    std::array<uint8_t, 0x600> application_{};
     bool coldStreamImageRequiresClockReselect_{false};
     uint32_t coldReportedStreamCount_{0};
     bool hookReplacedStreamImage_{false};
@@ -784,6 +796,73 @@ TEST(SPro24DspProtocolTests, InitializationPrimesSemanticMatrixAndControlReadbac
     EXPECT_EQ(*callbackStatus, kIOReturnSuccess);
     EXPECT_EQ(bus.extensionReadCount, 1);
     EXPECT_EQ(bus.appQuadReadCount, 2);
+}
+
+TEST(SPro24DspProtocolTests, InputAndOutputControlsRoundTripThroughVendorBlocks) {
+    CountingFireWireBus bus;
+    RouteState routeState;
+    SPro24DspProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
+    ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+
+    std::optional<IOReturn> status;
+    const size_t inputWriteStart = bus.writeAddresses.size();
+    protocol.ApplyAudioControlValue(0x5350'0002U, 1, [&](IOReturn result) { status = result; });
+    ASSERT_TRUE(status.has_value());
+    EXPECT_EQ(*status, kIOReturnSuccess);
+    EXPECT_EQ(bus.application_[ASFW::Audio::DICE::Focusrite::kInputOffset + 1U], 0x02U);
+    EXPECT_EQ(bus.writeAddresses[inputWriteStart],
+              kAppSectionBaseLo + ASFW::Audio::DICE::Focusrite::kInputOffset);
+    EXPECT_EQ(bus.writeAddresses[inputWriteStart + 1U],
+              kAppSectionBaseLo + ASFW::Audio::DICE::Focusrite::kSwNoticeOffset);
+
+    ASFW::Audio::AudioControlSurfaceSnapshot controls{};
+    ASSERT_TRUE(protocol.CopyAudioControlSurfaceSnapshot(controls));
+    const auto inputIt = std::find_if(controls.values.begin(),
+                                      controls.values.begin() + controls.valueCount,
+                                      [](const auto& control) { return control.id == 0x5350'0002U; });
+    ASSERT_NE(inputIt, controls.values.begin() + controls.valueCount);
+    EXPECT_EQ(inputIt->value, 1);
+
+    status.reset();
+    const size_t outputWriteStart = bus.writeAddresses.size();
+    protocol.ApplyAudioControlValue(0x5350'0120U, 1, [&](IOReturn result) { status = result; });
+    ASSERT_TRUE(status.has_value());
+    EXPECT_EQ(*status, kIOReturnSuccess);
+    EXPECT_EQ(ASFW::FW::ReadBE32(bus.application_.data() +
+                                 ASFW::Audio::DICE::Focusrite::kOutputGroupOffset), 1U);
+    EXPECT_EQ(bus.writeAddresses[outputWriteStart],
+              kAppSectionBaseLo + ASFW::Audio::DICE::Focusrite::kOutputGroupOffset);
+    EXPECT_EQ(bus.writeAddresses[outputWriteStart + 1U],
+              kAppSectionBaseLo + ASFW::Audio::DICE::Focusrite::kSwNoticeOffset);
+
+    ASSERT_TRUE(protocol.CopyAudioControlSurfaceSnapshot(controls));
+    const auto muteIt = std::find_if(controls.values.begin(),
+                                     controls.values.begin() + controls.valueCount,
+                                     [](const auto& control) { return control.id == 0x5350'0120U; });
+    ASSERT_NE(muteIt, controls.values.begin() + controls.valueCount);
+    EXPECT_EQ(muteIt->value, 1);
+
+    status.reset();
+    const size_t laneWriteStart = bus.writeAddresses.size();
+    protocol.ApplyAudioControlValue(0x5350'0100U, 25,
+                                    [&](IOReturn result) { status = result; });
+    ASSERT_TRUE(status.has_value());
+    EXPECT_EQ(*status, kIOReturnSuccess);
+    EXPECT_EQ(ASFW::FW::ReadBE32(bus.application_.data() +
+                                 ASFW::Audio::DICE::Focusrite::kOutputGroupOffset + 0x08U),
+              102U);
+    EXPECT_EQ(bus.writeAddresses[laneWriteStart],
+              kAppSectionBaseLo + ASFW::Audio::DICE::Focusrite::kOutputGroupOffset);
+    EXPECT_EQ(bus.writeAddresses[laneWriteStart + 1U],
+              kAppSectionBaseLo + ASFW::Audio::DICE::Focusrite::kSwNoticeOffset);
+
+    const int writesBeforeInvalid = bus.writeCount;
+    status.reset();
+    protocol.ApplyAudioControlValue(0x5350'0100U, 128,
+                                    [&](IOReturn result) { status = result; });
+    ASSERT_TRUE(status.has_value());
+    EXPECT_EQ(*status, kIOReturnBadArgument);
+    EXPECT_EQ(bus.writeCount, writesBeforeInvalid);
 }
 
 void ExpectColdCountRefinement(uint32_t coldCount) {

@@ -208,6 +208,10 @@ private:
         bool inSitu{false};
         uint32_t revision{0};
         bool valid{false};
+        // The application section is formed from multi-field blocks. Serialize
+        // one semantic mutation at a time so a second UI action cannot race a
+        // read-modify-write transaction and restore stale sibling fields.
+        bool writeInFlight{false};
     };
     IOLock* semanticControlLock_{nullptr};
     SemanticControlState semanticControls_{};
@@ -239,6 +243,15 @@ private:
                                      InitCallback callback);
     void PrimeSemanticMatrix() noexcept;
     void PrimeSemanticControls() noexcept;
+    [[nodiscard]] bool BeginSemanticControlWrite(
+        const Audio::IAudioControlSurface::ApplyCallback& callback) noexcept;
+    void FinishSemanticControlWrite(IOReturn status,
+                                    Audio::IAudioControlSurface::ApplyCallback callback) noexcept;
+    void PublishInputControlReadback(const InputParams& input) noexcept;
+    void PublishOutputControlReadback(const OutputGroupState& output) noexcept;
+    void CommitOutputControlState(const OutputGroupState& state,
+                                  uint32_t controlId,
+                                  VoidCallback callback);
     void PrepareStoppedForRate(const AudioClockConfig& clock, VoidCallback callback);
     void LoadRouterStreamConfigForRate(uint32_t rateHz, VoidCallback callback);
     void PollExtensionCommand(uint64_t epoch, uint32_t attempt, VoidCallback callback);
