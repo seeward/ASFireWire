@@ -223,10 +223,15 @@ summing bus does when several channels sum past full scale.
 
 ### 3.1 The matrix is eight stereo mixes, and pan is per-mix
 
-The 18 × 16 matrix is better read as **eight stereo mixes of eighteen sources**.
-Rows pair up as `MIX 1/2` … `MIX 15/16` — the same eight tabs MixControl and the
-ASFW console present — and within one mix a source's two cells are its *level and
-pan in that mix*. The router then decides what each mix pair drives.
+The 18 × 16 matrix is better read as **stereo mixes of eighteen sources**: rows
+pair up, and within one mix a source's two cells are its *level and pan in that
+mix*. The router then decides what each pair drives.
+
+Sixteen rows form eight pairs, but the vendor signal table (§5.0) exposes only
+`Mixer:0`…`9` as router sources — **four monitor pairs plus one reverb-send
+pair**. Rows 10–15 are computed and stored but can reach no destination, which
+is why they read as permanently zero and why the console's `MIX 11/12` onward
+address nothing. **[derived]**
 
 On this unit only two of the eight are in use: **rows 0/1 (`MIX 1/2`)** feed every
 analog output and S/PDIF out, and **rows 8/9 (`MIX 9/10`)** feed the reverb input
@@ -445,6 +450,49 @@ pinned by `SPro24AnalogInputsUseVendorNumbering`.
 The same table carries each signal's `(block, channel)` at low, mid and high
 rate, with `0xff` marking a signal absent at that rate — ADAT In 5–8 are absent
 at 96 kHz, the ordinary S/MUX halving, recorded per-signal rather than derived.
+
+### 5.0 Vendor input signal table (complete)
+
+All 41 entries of `Pro24DSP_IpSigTab`, decoded. Each entry is ten `uint32`:
+category, index-in-category, signal index, then `(block, channel)` at low, mid
+and high rate, then a `const char*` name. `0xff` in a block field means the
+signal does not exist at that rate. **[derived]**
+
+| # | vendor name | low (44.1/48) | mid (88.2/96) |
+|---:|---|---|---|
+| 0–3 | `Anlg In 1`…`4` | `Ins0:2,3,0,1` | same |
+| 4–5 | `SPDIF 1`, `SPDIF 2` | `Aes:6,7` | same |
+| 6–9 | `ADAT In 1`…`4` | `Adat:0`…`3` | same |
+| 10–13 | `ADAT In 5`…`8` | `Adat:4`…`7` | **absent** |
+| 14–21 | `DAW 1`…`8` | `Avs0:0`…`7` | same |
+| 22–29 | `FromMix1`…`8` | `Mixer:0`…`7` | same |
+| 30–31 | `RvbSend-1`, `RvbSend-2` | `Mixer:8,9` | same |
+| 32–33 | `SPDIF 3`, `SPDIF 4` | `Aes:4,5` | same |
+| 34–35 | `FX(Anlg 1)`, `FX(Anlg 2)` | `Ins0:8,9` | **`Ins0:4,5`** |
+| 36–37 | `FmRvb 0`, `FmRvb 1` | `Ins0:14,15` | **`Ins0:6,7`** |
+| 38–39 | `FromArm-0`, `FromArm-1` | `ArmApr:0,1` | same |
+| 40 | `Off` | `Mute:0` | same |
+
+Three things follow that were previously wrong or unknown here.
+
+**`RvbSend-1/2` is the vendor's own name for `Mixer:8/9`.** Mixer rows 8/9 being
+the reverb send was deduced in §3.1 from the router and confirmed by ear; the
+vendor names them that way outright.
+
+**Only ten of the sixteen mixer rows are routable.** The table exposes
+`Mixer:0`…`9` as router sources and nothing above. Rows 10–15 are computed by
+the mixer and carried in the coefficient image, but no router source reaches
+them, which is why they read as permanently zero. §3.1's "eight stereo mixes"
+overstates it: there are **four monitor pairs plus one reverb-send pair**, and
+the console's `MIX 11/12`…`MIX 15/16` tabs address rows that cannot reach any
+destination.
+
+**The DSP returns move router channel with rate.** `FX(Anlg 1/2)` is `Ins0:8/9`
+at low rate but `Ins0:4/5` at mid; `FmRvb 0/1` is `Ins0:14/15` then `Ins0:6/7`.
+`SignalIndexForSource` currently hardcodes the low-rate channels, so at 88.2/96
+kHz both DSP return pairs would fall through to the generic auxiliary branch and
+be mislabelled. A latent defect, reachable only above 48 kHz, recorded rather
+than fixed while work is scoped to 44.1/48. **[derived]**
 
 ### 5.1 Measured signal fan-out
 
