@@ -784,12 +784,23 @@ low-rate channels does not merely lose a label at high rate — it reports the
 **channel-strip send as a line output and vice versa**. Together with the input
 side's `FX(Anlg)` / `FmRvb` shift (§5.0), this is the substantive reason the
 profile must consult a rate-scoped table rather than a `switch` on channel
-number. The **input** side is now table-driven (§5.0). This output table is
-**not** yet transcribed: the mixer projection does not need it, because its
-output axes are `Mixer:0`…`9` rows whose identity does not move with rate. The
-surfaces that do consume router destinations — the patchbay and monitor
-assignment — still read low-rate positions, so `Line 5/6` and `ToFX 0/1` remain
-swappable there above 48 kHz. **[derived, open]**
+number. **Both tables are now transcribed** into
+`ASFWDriver/Audio/Protocols/DICE/Focusrite/SPro24DspSignalTables.{hpp,cpp}` — 41
+sources and 47 destinations, each carrying its own `(block, channel)` per rate
+mode — so destination naming is rate-correct by construction. A regression test
+pins the swap in both directions: at 2x, `Ins0:8/9` names `Line 5/6` and
+`Ins0:4/5` names `ToFX 0/1`, the exact inverse of the 1x reading.
+**[implemented]**
+
+Note that the two directions are **separate index spaces**. `Auxiliary` carries
+no sub-kind, so both tables allocate disjoint auxiliary numbers within
+themselves, and the same number means different things depending on which table
+produced it — auxiliary 1 is `FX(Anlg 1)` as a source and `ToFX 0` as a
+destination. **[implemented]**
+
+`Off` is a *destination* as well as a source: block 15 channel 0, a route that
+reaches nowhere. That is what the captured router's duplicate `blk15:0` entries
+are — `Mixer:0/1` sent nowhere so they occupy a peak slot (§4.1).
 
 ### 5.1 Measured signal fan-out
 
@@ -1070,7 +1081,7 @@ ASFW meter policy:
 | Generic TCAT router/mixer join | input identity and output reachability come from the active router; inactive rows are omitted; native raw row survives semantic compaction | reuse for other TCD22xx profiles; keep product labels and pairing out of the generic layer |
 | SPro mixer buses | active state publishes monitor rows 0/1 and reverb-send rows 8/9 as separate UI sections | hardware-check both grouped write paths after each topology change |
 | Mixer mute / solo | driver-owned policy over remembered nominal levels; solo writes the whole bus and confirms every cell; stale records dropped when hardware contradicts them; **exact restore verified on hardware by coefficient readback**, including fader-moved-while-muted and a 288-cell bit-identical un-solo | consider a bus-wide "clear all solos" gesture; PFL needs a spare routed bus (section 4) |
-| SPro input signal identity | all 41 vendor table entries transcribed with per-rate router coordinates; kind, index and stereo pairing resolved against the mode the router image was read at | transcribe the output table when the patchbay becomes rate-aware |
+| SPro signal identity | **both** vendor tables transcribed — 41 sources and 47 destinations — with per-rate router coordinates in one shared table module; kind, index and stereo pairing resolved against the mode the router image was read at | none outstanding; reuse for the patchbay surface |
 | Patchbay | generic router-image build/edit/encode plus the full commit transaction: rebuild from the active copy, write the staging image, `LoadRouter` (router-only opcode), poll, and re-read the active image to verify before publishing. An unchanged request costs no bus traffic. Fixture-tested only | **exercise on hardware with audio stopped**, then check whether a load mid-stream drops audio; then the semantic patchbay surface and UI |
 | DSP control surface | readback published | add ordinary DSP transactions only after RMW/fragment path replaces legacy setters |
 | VRM | status only | defer until full bank transition is designed |
