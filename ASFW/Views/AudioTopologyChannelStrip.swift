@@ -60,8 +60,8 @@ struct AudioTopologyChannelStrip: View {
                     AudioTopologyKnob(
                         value: MAudio1814Level.position(raw: channel.auxRaw),
                         tint: .yellow,
-                        caption: MAudio1814Level.format(raw: channel.auxRaw)
-                    ) { setAux(channel, $0) }
+                        caption: MAudio1814Level.format(raw: channel.auxRaw),
+                        onChanged: { setAux(channel, $0) })
                 }
 
                 knobSlot("pan", present: hasPan) { channel in
@@ -69,8 +69,8 @@ struct AudioTopologyChannelStrip: View {
                         value: (MAudio1814Level.panPosition(raw: channel.panRaw) + 1) / 2,
                         tint: .blue,
                         caption: MAudio1814Level.formatPan(raw: channel.panRaw),
-                        isBipolar: true
-                    ) { setPan(channel, $0 * 2 - 1) }
+                        isBipolar: true,
+                        onChanged: { setPan(channel, $0 * 2 - 1) })
                 }
 
             // Faders flank the shared dB scale; meters sit alongside at the same

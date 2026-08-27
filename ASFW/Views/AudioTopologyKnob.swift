@@ -7,6 +7,11 @@ struct AudioTopologyKnob: View {
     let tint: Color
     let caption: String
     var isBipolar = false
+    /// Called once when the gesture ends. Devices whose write is a multi-step
+    /// bus transaction commit here instead of on every drag sample; the default
+    /// no-op keeps continuous-write call sites unchanged. Declared ahead of
+    /// `onChanged` so an unlabelled trailing closure still binds to `onChanged`.
+    var onCommitted: (Double) -> Void = { _ in }
     let onChanged: (Double) -> Void
 
     @State private var dragStart: Double?
@@ -45,6 +50,7 @@ struct AudioTopologyKnob: View {
                 onChanged(next)
             }
             .onEnded { _ in
+                onCommitted(shown)
                 dragStart = nil
                 live = nil
             })
