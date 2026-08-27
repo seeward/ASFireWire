@@ -8,10 +8,25 @@ nonisolated struct AudioSemanticMatrixSnapshot: Equatable, Sendable {
         case unsignedQ214Amplitude = 2
     }
 
+    enum ChannelRole: UInt8, Equatable, Sendable {
+        case mono = 1
+        case left = 2
+        case right = 3
+    }
+
+    enum OutputRole: UInt8, Equatable, Sendable {
+        case monitorMix = 1
+        case effectSend = 2
+    }
+
     struct Axis: Identifiable, Equatable, Sendable {
         let portID: UInt32
         let signalKind: AudioSemanticTopologySnapshot.SignalKind
         let signalIndex: UInt32
+        let presentationGroupID: UInt32
+        let channelRole: ChannelRole
+        /// Present only on an output axis. Inputs never expose a destination role.
+        let outputRole: OutputRole?
 
         var id: UInt32 { portID }
     }

@@ -326,7 +326,7 @@ extension ASFWDriverConnector {
     ) -> AudioSemanticMatrixSnapshot? {
         guard connection != 0, endpointID.rawValue != 0 else { return nil }
         var scalarInput = endpointID.rawValue
-        var output = Data(count: 1784)
+        var output = Data(count: 2168)
         var outputLength = output.count
         let result = output.withUnsafeMutableBytes { outputBytes in
             IOConnectCallMethod(
@@ -753,12 +753,12 @@ private enum AudioSemanticConsoleLayoutWireDecoder {
 /// control values: a matrix is a dense state snapshot with driver-declared
 /// axes, not an app-side reconstruction of DICE records.
 private enum AudioSemanticMatrixWireDecoder {
-    private static let wireSize = 1784
+    private static let wireSize = 2168
     private static let matrixStart = 16
-    private static let axisSize = 12
+    private static let axisSize = 20
     private static let inputAxisOffset = matrixStart + 36
-    private static let outputAxisOffset = matrixStart + 324
-    private static let coefficientOffset = matrixStart + 612
+    private static let outputAxisOffset = matrixStart + 516
+    private static let coefficientOffset = matrixStart + 996
     private static let maximumInputs = 24
     private static let maximumOutputs = 24
 
@@ -784,7 +784,7 @@ private enum AudioSemanticMatrixWireDecoder {
         guard data.count == wireSize,
               let wireVersion = data.u32(at: 0), wireVersion == 1,
               let endpoint = data.u64(at: 8), endpoint != 0,
-              let matrixVersion = data.u32(at: matrixStart), matrixVersion == 2,
+              let matrixVersion = data.u32(at: matrixStart), matrixVersion == 4,
               let deviceKind = data.u32(at: matrixStart + 4), deviceKind != 0,
               let topologyRevision = data.u64(at: matrixStart + 8), topologyRevision != 0,
               let stateRevision = data.u32(at: matrixStart + 16),
@@ -824,8 +824,18 @@ private enum AudioSemanticMatrixWireDecoder {
               let signalRaw = data.u32(at: offset + 4),
               let signalKind = AudioSemanticTopologySnapshot.SignalKind(rawValue: signalRaw),
               signalKind != .none,
-              let signalIndex = data.u32(at: offset + 8), signalIndex != 0 else { return nil }
-        return .init(portID: portID, signalKind: signalKind, signalIndex: signalIndex)
+              let signalIndex = data.u32(at: offset + 8), signalIndex != 0,
+              let presentationGroupID = data.u32(at: offset + 12), presentationGroupID != 0,
+              let roleRaw = data.u8(at: offset + 16),
+              let channelRole = AudioSemanticMatrixSnapshot.ChannelRole(rawValue: roleRaw) else {
+            return nil
+        }
+        guard let outputRoleRaw = data.u8(at: offset + 17) else { return nil }
+        let outputRole = AudioSemanticMatrixSnapshot.OutputRole(rawValue: outputRoleRaw)
+        guard outputRoleRaw == 0 || outputRole != nil else { return nil }
+        return .init(portID: portID, signalKind: signalKind, signalIndex: signalIndex,
+                     presentationGroupID: presentationGroupID, channelRole: channelRole,
+                     outputRole: outputRole)
     }
 }
 

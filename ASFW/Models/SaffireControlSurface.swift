@@ -18,6 +18,39 @@ nonisolated struct SaffireControlSurface: Equatable, Sendable {
         var label: String { self == .low ? "+16 dBu" : "−10 dBV" }
     }
 
+    /// A read-only, driver-resolved route identity for one physical stereo
+    /// output. It deliberately does not expose a DICE block/channel or imply
+    /// that the route can be changed from this surface.
+    enum OutputRouteSource: Int32, Equatable, Sendable {
+        case unknown = 0
+        case hostPlayback12 = 1
+        case hostPlayback34 = 2
+        case hostPlayback56 = 3
+        case hostPlayback78 = 4
+        case mixer12 = 16
+        case mixer34 = 17
+        case mixer56 = 18
+        case mixer78 = 19
+        case analog12 = 32
+        case spdif12 = 48
+
+        var label: String {
+            switch self {
+            case .unknown: "Route not resolved"
+            case .hostPlayback12: "DAW 1/2"
+            case .hostPlayback34: "DAW 3/4"
+            case .hostPlayback56: "DAW 5/6"
+            case .hostPlayback78: "DAW 7/8"
+            case .mixer12: "Mixer 1/2"
+            case .mixer34: "Mixer 3/4"
+            case .mixer56: "Mixer 5/6"
+            case .mixer78: "Mixer 7/8"
+            case .analog12: "Analog 1/2"
+            case .spdif12: "S/PDIF 1/2"
+            }
+        }
+    }
+
     struct OutputPair: Equatable, Sendable, Identifiable {
         let id: Int
         let title: String
@@ -25,6 +58,7 @@ nonisolated struct SaffireControlSurface: Equatable, Sendable {
         let rightVolume: Int32
         let leftMuted: Bool
         let rightMuted: Bool
+        let routeSource: OutputRouteSource
     }
 
     struct ChannelStrip: Equatable, Sendable, Identifiable {
@@ -63,11 +97,14 @@ nonisolated struct SaffireControlSurface: Equatable, Sendable {
             guard let leftVolume = value(SaffireControlID.outputVolumeFirst + UInt32(left)),
                   let rightVolume = value(SaffireControlID.outputVolumeFirst + UInt32(left + 1)),
                   let leftMute = value(SaffireControlID.outputMuteFirst + UInt32(left)),
-                  let rightMute = value(SaffireControlID.outputMuteFirst + UInt32(left + 1)) else {
+                  let rightMute = value(SaffireControlID.outputMuteFirst + UInt32(left + 1)),
+                  let routeRaw = value(SaffireControlID.outputRouteSourceFirst + UInt32(pair)),
+                  let routeSource = OutputRouteSource(rawValue: routeRaw) else {
                 return nil
             }
             return .init(id: pair, title: title, leftVolume: leftVolume, rightVolume: rightVolume,
-                         leftMuted: leftMute != 0, rightMuted: rightMute != 0)
+                         leftMuted: leftMute != 0, rightMuted: rightMute != 0,
+                         routeSource: routeSource)
         }
         guard pairs.count == names.count else { return nil }
 
@@ -106,6 +143,7 @@ enum SaffireControlID {
     static let outputMuteFirst: UInt32 = 0x5350_0110
     static let globalMute: UInt32 = 0x5350_0120
     static let globalDim: UInt32 = 0x5350_0121
+    static let outputRouteSourceFirst: UInt32 = 0x5350_0130
     static let channelStripEqFirst: UInt32 = 0x5350_0200
     static let channelStripCompressorFirst: UInt32 = 0x5350_0210
     static let channelStripEqAfterCompressorFirst: UInt32 = 0x5350_0220

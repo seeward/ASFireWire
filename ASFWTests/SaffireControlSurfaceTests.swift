@@ -13,6 +13,9 @@ struct SaffireControlSurfaceTests {
             values.append(.init(id: 0x5350_0100 + index, value: Int32(100 + index)))
             values.append(.init(id: 0x5350_0110 + index, value: index == 1 ? 1 : 0))
         }
+        for index: UInt32 in 0..<3 {
+            values.append(.init(id: 0x5350_0130 + index, value: 1))
+        }
         for index: UInt32 in 0..<2 {
             values.append(.init(id: 0x5350_0200 + index, value: 1))
             values.append(.init(id: 0x5350_0210 + index, value: index == 0 ? 1 : 0))
@@ -27,6 +30,7 @@ struct SaffireControlSurfaceTests {
         #expect(surface.lineInputLevels == [.high, .low])
         #expect(surface.outputPairs[0].leftVolume == 100)
         #expect(surface.outputPairs[0].rightMuted)
+        #expect(surface.outputPairs[0].routeSource == .hostPlayback12)
         #expect(surface.globalMute)
         #expect(surface.channelStrips[0].compressorEnabled)
         #expect(!surface.channelStrips[1].compressorEnabled)

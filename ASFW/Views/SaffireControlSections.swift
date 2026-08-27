@@ -80,7 +80,7 @@ struct SaffireInputOutputSection: View {
                                 submit(SaffireControlID.outputMuteFirst + UInt32(pair.id * 2 + lane), muted ? 1 : 0)
                             }
                         }
-                        Text("Volume is the device's 0…127 logical output control; its calibrated dB law is not published yet.")
+                        Text("Source is active-router readback. Volume is the device's 0…127 logical output control; its calibrated dB law is not published yet.")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                         controlStatus
@@ -187,7 +187,7 @@ struct SaffirePatchbaySection: View {
     let inputs: [AudioSemanticMatrixSnapshot.Axis]
 
     var body: some View {
-        AudioTopologyCard(title: "Patchbay", systemImage: "point.3.connected.trianglepath.dotted", badge: "Active mixer inputs") {
+        AudioTopologyCard(title: "Mixer Source Patchbay", systemImage: "point.3.connected.trianglepath.dotted", badge: "Active router readback") {
             Text("These are the active router assignments feeding the monitor mixer. They are not mixer gains and they are not physical-output routes.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -210,7 +210,7 @@ struct SaffirePatchbaySection: View {
                     .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 5))
                 }
             }
-            Text("Patchbay writing stays unavailable until a single-route mutation and exact vendor commit/readback sequence are verified through MCP.")
+            Text("Route editing stays unavailable until a complete vendor route mutation and exact commit/readback sequence are verified through MCP.")
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
         }
@@ -225,10 +225,15 @@ private struct SaffireOutputPairRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(pair.title)
-                .font(.caption.monospaced().bold())
-                .foregroundStyle(.orange)
-                .frame(width: 158, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(pair.title)
+                    .font(.caption.monospaced().bold())
+                    .foregroundStyle(.orange)
+                Text("← \(pair.routeSource.label)")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(pair.routeSource == .unknown ? Color.secondary : Color.cyan)
+            }
+            .frame(width: 158, alignment: .leading)
             SaffireOutputLane(title: "L", volume: pair.leftVolume, muted: pair.leftMuted,
                               isEnabled: isEnabled,
                               onVolume: { onVolume(0, $0) }, onMute: { onMute(0, $0) })

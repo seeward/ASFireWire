@@ -87,6 +87,8 @@ final class ASFWDriverConnector: ObservableObject {
         case getAudioSemanticConsoleLayout = 1030
         case getAudioSemanticMatrix = 1031
         case getAudioSemanticMatrixEndpoints = 1032
+        case submitAudioSemanticMatrixCrosspoint = 1033
+        case submitAudioSemanticMatrixStereoStrip = 1034
     }
 
     // MARK: - Re-exported Models
@@ -255,6 +257,85 @@ final class ASFWDriverConnector: ObservableObject {
                           UInt64(UInt32(bitPattern: value)), requestID]
             let kr = IOConnectCallAsyncScalarMethod(
                 self.connection, Method.submitAudioControlValue.rawValue,
+                self.asyncPort, &reference, UInt32(reference.count),
+                &inputs, UInt32(inputs.count), nil, nil)
+            if kr != KERN_SUCCESS {
+                let callback = self.audioControlCompletions.removeValue(forKey: requestID)
+                DispatchQueue.main.async { callback?(kr) }
+            }
+        }
+    }
+
+    /// Changes one semantic mixer crosspoint. The driver resolves the opaque
+    /// ports and performs current-read → single write → readback; Swift never
+    /// derives a vendor register address or sends a raw DICE transaction.
+    func submitAudioSemanticMatrixCrosspoint(
+        endpointID: AudioEndpointID,
+        outputPortID: UInt32,
+        inputPortID: UInt32,
+        coefficient: UInt16,
+        completion: @escaping (kern_return_t) -> Void
+    ) {
+        connectionQueue.async { [weak self] in
+            guard let self, self.connection != 0,
+                  self.asyncPort != mach_port_t(MACH_PORT_NULL),
+                  endpointID.rawValue != 0, outputPortID != 0, inputPortID != 0 else {
+                DispatchQueue.main.async { completion(kIOReturnNotReady) }
+                return
+            }
+            let requestID = self.nextAudioControlRequestID
+            self.nextAudioControlRequestID &+= 1
+            self.audioControlCompletions[requestID] = completion
+            var reference = DriverKitAsyncCompletionDecoder.reference(
+                marker: Self.audioControlAsyncReference
+            )
+            var inputs = [endpointID.rawValue, UInt64(outputPortID), UInt64(inputPortID),
+                          UInt64(coefficient), requestID]
+            let kr = IOConnectCallAsyncScalarMethod(
+                self.connection, Method.submitAudioSemanticMatrixCrosspoint.rawValue,
+                self.asyncPort, &reference, UInt32(reference.count),
+                &inputs, UInt32(inputs.count), nil, nil)
+            if kr != KERN_SUCCESS {
+                let callback = self.audioControlCompletions.removeValue(forKey: requestID)
+                DispatchQueue.main.async { callback?(kr) }
+            }
+        }
+    }
+
+    /// Applies one verified SPro stereo-strip gesture. Group IDs come only
+    /// from the current semantic matrix; level and balance remain semantic
+    /// units, so the app never derives DICE rows or Q2.14 coefficients.
+    func submitAudioSemanticMatrixStereoStrip(
+        endpointID: AudioEndpointID,
+        outputPresentationGroupID: UInt32,
+        inputPresentationGroupID: UInt32,
+        levelMilliDb: Int32,
+        balanceMilli: Int32,
+        completion: @escaping (kern_return_t) -> Void
+    ) {
+        connectionQueue.async { [weak self] in
+            guard let self, self.connection != 0,
+                  self.asyncPort != mach_port_t(MACH_PORT_NULL), endpointID.rawValue != 0,
+                  outputPresentationGroupID != 0, inputPresentationGroupID != 0,
+                  (-85_000...6_000).contains(levelMilliDb),
+                  (-1_000...1_000).contains(balanceMilli) else {
+                DispatchQueue.main.async { completion(kIOReturnBadArgument) }
+                return
+            }
+            let requestID = self.nextAudioControlRequestID
+            self.nextAudioControlRequestID &+= 1
+            self.audioControlCompletions[requestID] = completion
+            var reference = DriverKitAsyncCompletionDecoder.reference(
+                marker: Self.audioControlAsyncReference
+            )
+            var inputs = [endpointID.rawValue,
+                          UInt64(outputPresentationGroupID),
+                          UInt64(inputPresentationGroupID),
+                          UInt64(UInt32(bitPattern: levelMilliDb)),
+                          UInt64(UInt32(bitPattern: balanceMilli)),
+                          requestID]
+            let kr = IOConnectCallAsyncScalarMethod(
+                self.connection, Method.submitAudioSemanticMatrixStereoStrip.rawValue,
                 self.asyncPort, &reference, UInt32(reference.count),
                 &inputs, UInt32(inputs.count), nil, nil)
             if kr != KERN_SUCCESS {
