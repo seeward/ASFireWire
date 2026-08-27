@@ -32,6 +32,29 @@ ASFW currently has a working DICE stream bring-up and readback-oriented SPro
 surface.  This document describes what is safe to expose next; it is not a
 claim that every described control is already writable.
 
+### 1.1 Capture limits: absence from a trace is not absence on the wire
+
+Bus captures of this device retain a tiny fraction of traffic. The analyser's
+buffer is exhausted long before a session ends, and the flood cannot be filtered
+away at capture time: two isochronous audio streams run continuously, and the
+vendor driver polls meters throughout, so the interesting control transactions
+are a scattering of quadlets inside millions of packets.
+
+A representative session from 2026-08-27 retained **12,659 of 155,202,698
+packets — 0.008%**, with a single elided run of 5,695,222 packets and 7 packets
+lost outright.
+
+The consequence for every claim in this document: **"it does not appear in the
+trace" is a statement about the capture, never about the device.** A transition
+that is missing was very probably present on the wire and dropped. Only a
+positively observed transaction is evidence, and a `[measured]` tag must rest on
+something seen, never on something not seen.
+
+When a specific transition must be captured, shorten the window rather than
+filtering the result — quiesce the vendor application's metering if it can be
+backgrounded, start the capture immediately before the gesture, and stop it
+immediately after. Do not plan a capture that plays back a long session.
+
 ## 2. Hardware signal model
 
 At 1x rates the device has a 46×46 router feeding an 18×16 monitor mixer.
@@ -380,14 +403,17 @@ as a regression fixture in `tests/devices/DiceFocusriteSerializationTests.cpp`:
 **Coverage limits of that capture.** It demonstrates transitions of bits 0, 1,
 16 and 17 only:
 
-- **Compressor 1 never transitions** — it is already off in the first captured
-  state, so the trace proves its encoding but not its off-transition.
-- **Bits 2 and 18 (EQ-after-compressor) never change**; both are set in all four
-  values. Their position is consistent with the ALSA model but is not
-  demonstrated by a toggle here.
-- **Bit 24 is clear in all four values and never changes.** This capture is
-  therefore *no evidence at all* for the stereo-link meaning, which rests on
-  vendor binary analysis alone.
+- **Compressor 1's off-transition is missing from the capture, not from the
+  device.** It is already off in the first retained state. The transition was
+  not absent on the wire; it fell outside the retained window (see §1.1). Do not
+  read this as evidence about compressor 1's behaviour.
+- **Bits 2 and 18 (EQ-after-compressor) hold the same value across all four
+  retained states.** Their position is consistent with the ALSA model but no
+  retained transition demonstrates it.
+- **Bit 24 is clear in all four retained values.** This capture is therefore
+  *no evidence at all* for the stereo-link meaning, which rests on vendor
+  binary analysis alone. Note this is a statement about the capture, not about
+  the bit: nothing here shows bit 24 cannot or did not move.
 
 That last point matters for upstreaming. The **state-destruction bug is provable
 without knowing what bit 24 means**: a serializer that starts from zero and
