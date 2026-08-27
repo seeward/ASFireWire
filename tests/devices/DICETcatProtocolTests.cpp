@@ -801,8 +801,15 @@ TEST(SPro24DspProtocolTests, InitializationPrimesSemanticMatrixAndControlReadbac
     ASFW::Audio::AudioSemanticMatrixSnapshot matrix{};
     ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(matrix));
     EXPECT_EQ(matrix.inputCount, 18);
-    EXPECT_EQ(matrix.outputCount, 16);
+    // The active router consumes only raw mixer rows 0/1 (monitor) and 8/9
+    // (reverb send). Computed-but-unrouted rows do not become fake buses.
+    ASSERT_EQ(matrix.outputCount, 4);
     EXPECT_EQ(matrix.Coefficient(0, 0), 1);
+    EXPECT_EQ(matrix.Coefficient(2, 0), 145); // raw row 8, fixed 18-cell stride.
+    EXPECT_EQ(matrix.outputs[0].outputRole,
+              ASFW::Audio::AudioSemanticMatrixOutputRole::MonitorMix);
+    EXPECT_EQ(matrix.outputs[2].outputRole,
+              ASFW::Audio::AudioSemanticMatrixOutputRole::EffectSend);
     EXPECT_EQ(matrix.inputs[0].signalKind, ASFW::Audio::AudioSemanticSignalKind::Auxiliary);
     EXPECT_EQ(matrix.inputs[14].signalKind, ASFW::Audio::AudioSemanticSignalKind::HostStream);
 
@@ -1025,6 +1032,38 @@ TEST(SPro24DspProtocolTests, SemanticMatrixStereoStripWritesItsTwoVerifiedCellsA
     ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(after));
     EXPECT_EQ(after.Coefficient(0, 14), 0x4000U);
     EXPECT_EQ(after.Coefficient(1, 15), 0U);
+}
+
+TEST(SPro24DspProtocolTests, SemanticMatrixMonoStripWritesOneInputToBothBusRows) {
+    CountingFireWireBus bus;
+    RouteState routeState;
+    SPro24DspProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
+    ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+
+    ASFW::Audio::AudioSemanticMatrixSnapshot before{};
+    ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(before));
+    ASSERT_GT(before.inputCount, 4U);
+    const auto outputGroup = before.outputs[0].presentationGroupId;
+    const auto inputGroup = before.inputs[4].presentationGroupId; // active ADAT 1 mono row.
+    ASSERT_EQ(before.inputs[4].channelRole, ASFW::Audio::AudioSemanticMatrixChannelRole::Mono);
+    const size_t writesBefore = bus.mixerCoefficientWrites.size();
+
+    std::optional<IOReturn> completion;
+    protocol.ApplyAudioSemanticMatrixStereoStrip(
+        {.outputPresentationGroupId = outputGroup, .inputPresentationGroupId = inputGroup,
+         .levelMilliDb = 0, .balanceMilli = 0},
+        [&](IOReturn status) { completion = status; });
+
+    ASSERT_TRUE(completion.has_value());
+    ASSERT_EQ(*completion, kIOReturnSuccess);
+    ASSERT_EQ(bus.mixerCoefficientWrites.size(), writesBefore + 2U);
+    EXPECT_NEAR(bus.mixerCoefficientWrites[writesBefore].value, 11585U, 1U);
+    EXPECT_NEAR(bus.mixerCoefficientWrites[writesBefore + 1U].value, 11585U, 1U);
+
+    ASFW::Audio::AudioSemanticMatrixSnapshot after{};
+    ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(after));
+    EXPECT_NEAR(after.Coefficient(0, 4), 11585U, 1U);
+    EXPECT_NEAR(after.Coefficient(1, 4), 11585U, 1U);
 }
 
 TEST(SPro24DspProtocolTests, StoppedPrepareCommandFailsClosedWithoutConfigNotification) {

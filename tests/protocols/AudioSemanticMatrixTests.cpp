@@ -62,6 +62,14 @@ TEST(AudioSemanticMatrixTests, RejectsInvalidOrAmbiguousAxes) {
     result = ValidateAudioSemanticMatrix(snapshot);
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), AudioSemanticMatrixValidationError::CoefficientOutOfRange);
+
+    snapshot = ValidMatrix();
+    snapshot.crosspointPresentations[0] =
+        static_cast<AudioSemanticMatrixCrosspointPresentation>(0xff);
+    result = ValidateAudioSemanticMatrix(snapshot);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(),
+              AudioSemanticMatrixValidationError::InvalidCrosspointPresentation);
 }
 
 TEST(AudioSemanticMatrixTests, TcatTopologyJoinsMixerPortsThroughActiveRouter) {
@@ -109,7 +117,7 @@ TEST(AudioSemanticMatrixTests, SPro24MapsRouterSourcesWithoutLeakingBlockIds) {
     coefficients.values[17] = 0x2345;
 
     DICE::DiceRouterEntries routes{};
-    routes.count = 2;
+    routes.count = 4;
     routes.entries[0] = {
         .destinationBlock = 2, .destinationChannel = 0,
         .sourceBlock = 11, .sourceChannel = 3,
@@ -118,12 +126,20 @@ TEST(AudioSemanticMatrixTests, SPro24MapsRouterSourcesWithoutLeakingBlockIds) {
         .destinationBlock = 3, .destinationChannel = 1,
         .sourceBlock = 4, .sourceChannel = 1,
     };
+    routes.entries[2] = {
+        .destinationBlock = 4, .destinationChannel = 0,
+        .sourceBlock = 2, .sourceChannel = 0,
+    };
+    routes.entries[3] = {
+        .destinationBlock = 4, .destinationChannel = 1,
+        .sourceBlock = 2, .sourceChannel = 1,
+    };
 
     AudioSemanticMatrixSnapshot snapshot{};
     ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(coefficients, routes, snapshot));
     EXPECT_EQ(snapshot.deviceKind, DICE::Focusrite::kSPro24DspSemanticDeviceKind);
     EXPECT_EQ(snapshot.inputCount, 18);
-    EXPECT_EQ(snapshot.outputCount, 16);
+    EXPECT_EQ(snapshot.outputCount, 2);
     EXPECT_EQ(snapshot.inputs[0].signalKind, AudioSemanticSignalKind::HostStream);
     EXPECT_EQ(snapshot.inputs[0].signalIndex, 4);
     EXPECT_EQ(snapshot.inputs[17].signalKind, AudioSemanticSignalKind::AnalogLine);
@@ -136,9 +152,6 @@ TEST(AudioSemanticMatrixTests, SPro24MapsRouterSourcesWithoutLeakingBlockIds) {
     EXPECT_EQ(snapshot.outputs[1].channelRole, AudioSemanticMatrixChannelRole::Right);
     EXPECT_EQ(snapshot.outputs[0].presentationGroupId,
               snapshot.outputs[1].presentationGroupId);
-    EXPECT_EQ(snapshot.outputs[8].outputRole, AudioSemanticMatrixOutputRole::MonitorMix);
-    EXPECT_EQ(snapshot.outputs[8].channelRole, AudioSemanticMatrixChannelRole::Left);
-    EXPECT_EQ(snapshot.outputs[9].channelRole, AudioSemanticMatrixChannelRole::Right);
     EXPECT_TRUE(ValidateAudioSemanticMatrix(snapshot).has_value());
 }
 
@@ -195,10 +208,28 @@ TEST(AudioSemanticMatrixTests, SPro24MapsTheCapturedCurrentConfigRouter) {
     EXPECT_NE(snapshot.inputs[4].presentationGroupId,
               snapshot.inputs[5].presentationGroupId);
     EXPECT_EQ(snapshot.gainLaw, AudioSemanticMatrixGainLaw::UnsignedQ214Amplitude);
-    ASSERT_EQ(snapshot.outputCount, 16U);
+    ASSERT_EQ(snapshot.outputCount, 4U);
     EXPECT_EQ(snapshot.outputs[0].outputRole, AudioSemanticMatrixOutputRole::MonitorMix);
-    EXPECT_EQ(snapshot.outputs[8].outputRole, AudioSemanticMatrixOutputRole::MonitorMix);
-    EXPECT_EQ(snapshot.outputs[9].outputRole, AudioSemanticMatrixOutputRole::MonitorMix);
+    EXPECT_EQ(snapshot.outputs[0].portId, 0x5353'0001U); // raw mixer row 0
+    EXPECT_EQ(snapshot.outputs[1].portId, 0x5353'0002U); // raw mixer row 1
+    EXPECT_EQ(snapshot.outputs[2].outputRole, AudioSemanticMatrixOutputRole::EffectSend);
+    EXPECT_EQ(snapshot.outputs[2].portId, 0x5353'0009U); // raw mixer row 8
+    EXPECT_EQ(snapshot.outputs[3].outputRole, AudioSemanticMatrixOutputRole::EffectSend);
+    EXPECT_EQ(snapshot.outputs[3].portId, 0x5353'000AU); // raw mixer row 9
+    EXPECT_EQ(snapshot.CrosspointPresentation(0, 4),
+              AudioSemanticMatrixCrosspointPresentation::MonoLevelPan);
+    EXPECT_EQ(snapshot.CrosspointPresentation(0, 14),
+              AudioSemanticMatrixCrosspointPresentation::StereoLevelBalance);
+    EXPECT_EQ(snapshot.CrosspointPresentation(0, 15),
+              AudioSemanticMatrixCrosspointPresentation::Hidden);
+    // Reverb 1/2 remains a valid monitor-mix source, but feeding it into the
+    // hardware reverb send would create a self-feedback strip.
+    EXPECT_EQ(snapshot.CrosspointPresentation(2, 16),
+              AudioSemanticMatrixCrosspointPresentation::Hidden);
+    EXPECT_EQ(snapshot.CrosspointPresentation(3, 17),
+              AudioSemanticMatrixCrosspointPresentation::Hidden);
+    EXPECT_EQ(snapshot.CrosspointPresentation(2, 14),
+              AudioSemanticMatrixCrosspointPresentation::StereoLevelBalance);
 }
 
 // Vendor analog-input numbering is not the router channel order. Recovered
@@ -213,7 +244,7 @@ TEST(AudioSemanticMatrixTests, SPro24AnalogInputsUseVendorNumbering) {
     coefficients.inputCount = 18;
     coefficients.outputCount = 16;
     DICE::DiceRouterEntries routes{};
-    routes.count = 4;
+    routes.count = 6;
     for (uint8_t slot = 0; slot < 4; ++slot) {
         // Mixer inputs 0..3 fed from Ins0 channels 2, 3, 0, 1.
         static constexpr uint8_t kSourceChannel[4] = {2, 3, 0, 1};
@@ -221,6 +252,10 @@ TEST(AudioSemanticMatrixTests, SPro24AnalogInputsUseVendorNumbering) {
                                 .sourceBlock = 4,
                                 .sourceChannel = kSourceChannel[slot]};
     }
+    routes.entries[4] = {.destinationBlock = 4, .destinationChannel = 4,
+                         .sourceBlock = 2, .sourceChannel = 0};
+    routes.entries[5] = {.destinationBlock = 4, .destinationChannel = 5,
+                         .sourceBlock = 2, .sourceChannel = 1};
 
     AudioSemanticMatrixSnapshot snapshot{};
     ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(coefficients, routes, snapshot));
@@ -243,11 +278,15 @@ TEST(AudioSemanticMatrixTests, SPro24StereoStripUsesPairedNativeCellsAndHardPanM
     coefficients.outputCount = 16;
     DICE::DiceRouterEntries routes{};
     // Active-router slots 14/15 are the host playback stereo pair on SPro24.
-    routes.count = 2;
+    routes.count = 4;
     routes.entries[0] = {.destinationBlock = 2, .destinationChannel = 14,
                          .sourceBlock = 11, .sourceChannel = 0};
     routes.entries[1] = {.destinationBlock = 2, .destinationChannel = 15,
                          .sourceBlock = 11, .sourceChannel = 1};
+    routes.entries[2] = {.destinationBlock = 4, .destinationChannel = 4,
+                         .sourceBlock = 2, .sourceChannel = 0};
+    routes.entries[3] = {.destinationBlock = 4, .destinationChannel = 5,
+                         .sourceBlock = 2, .sourceChannel = 1};
 
     AudioSemanticMatrixSnapshot snapshot{};
     ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(coefficients, routes, snapshot));
@@ -280,6 +319,47 @@ TEST(AudioSemanticMatrixTests, SPro24StereoStripUsesPairedNativeCellsAndHardPanM
 
     EXPECT_FALSE(DICE::Focusrite::MakeSPro24DspStereoStripCoefficients(-85001, 0));
     EXPECT_FALSE(DICE::Focusrite::MakeSPro24DspStereoStripCoefficients(0, 1001));
+}
+
+TEST(AudioSemanticMatrixTests, SPro24MonoStripUsesOneInputAndConstantPowerPan) {
+    DICE::DiceMixerCoefficients coefficients{};
+    coefficients.inputCount = 18;
+    coefficients.outputCount = 16;
+    DICE::DiceRouterEntries routes{};
+    routes.count = 3;
+    routes.entries[0] = {.destinationBlock = 2, .destinationChannel = 4,
+                         .sourceBlock = 6, .sourceChannel = 0};
+    routes.entries[1] = {.destinationBlock = 4, .destinationChannel = 4,
+                         .sourceBlock = 2, .sourceChannel = 0};
+    routes.entries[2] = {.destinationBlock = 4, .destinationChannel = 5,
+                         .sourceBlock = 2, .sourceChannel = 1};
+
+    AudioSemanticMatrixSnapshot snapshot{};
+    ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(coefficients, routes, snapshot));
+    const auto layout = DICE::Focusrite::ResolveSPro24DspMonoStrip(
+        coefficients, routes, snapshot.outputs[0].presentationGroupId,
+        snapshot.inputs[4].presentationGroupId);
+    ASSERT_TRUE(layout.has_value());
+    EXPECT_EQ(layout->input, 4U);
+    EXPECT_EQ(layout->outputLeft, 0U);
+    EXPECT_EQ(layout->outputRight, 1U);
+
+    const auto centered = DICE::Focusrite::MakeSPro24DspMonoStripCoefficients(0, 0);
+    ASSERT_TRUE(centered.has_value());
+    EXPECT_EQ(centered->left, centered->right);
+    EXPECT_NEAR(centered->left, 11585U, 1U);
+
+    const auto hardLeft = DICE::Focusrite::MakeSPro24DspMonoStripCoefficients(0, -1000);
+    ASSERT_TRUE(hardLeft.has_value());
+    EXPECT_EQ(hardLeft->left, 0x4000U);
+    EXPECT_EQ(hardLeft->right, 0U);
+
+    const auto hardRight = DICE::Focusrite::MakeSPro24DspMonoStripCoefficients(0, 1000);
+    ASSERT_TRUE(hardRight.has_value());
+    EXPECT_EQ(hardRight->left, 0U);
+    EXPECT_EQ(hardRight->right, 0x4000U);
+    EXPECT_FALSE(DICE::Focusrite::MakeSPro24DspMonoStripCoefficients(6001, 0));
+    EXPECT_FALSE(DICE::Focusrite::MakeSPro24DspMonoStripCoefficients(0, -1001));
 }
 
 } // namespace

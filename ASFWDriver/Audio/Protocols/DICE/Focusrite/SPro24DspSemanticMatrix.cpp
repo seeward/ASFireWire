@@ -3,6 +3,8 @@
 
 #include "SPro24DspSemanticMatrix.hpp"
 
+#include "../Core/DICERouterMixerTopology.hpp"
+
 #include <algorithm>
 #include <cmath>
 
@@ -15,17 +17,8 @@ constexpr uint32_t kMixerOutputPortBase = 0x5353'0000;
 constexpr uint32_t kMixerInputPresentationGroupBase = 0x5354'0000;
 constexpr uint32_t kMixerOutputPresentationGroupBase = 0x5355'0000;
 
-// The Pro 24 DSP has a fixed 18 x 16 DICE mixer. Rows are physically paired
-// as mixer output 1/2 through 15/16. This describes the hardware graph only;
-// it does not claim MixControl's optional linked-level/pan presentation.
-// Cross-validated with the local ALSA control service's
-// protocols/dice/src/focusrite/spro24dsp.rs signal-flow diagram, lines 47-70.
-
-// TCAT's router destinations for the 18 mixer inputs. These are protocol
-// facts, kept private to the profile and cross-validated with the local
-// tcd22xx reference's MixerTx0 (16) + MixerTx1 (2) split.
-constexpr uint8_t kRouterDestinationMixerTx0 = 2;
-constexpr uint8_t kRouterDestinationMixerTx1 = 3;
+// Product presentation is applied only after the generic TCAT layer has
+// joined the active router and anonymous 18 x 16 coefficient window.
 
 AudioSemanticSignalKind SignalKindForSource(uint8_t block) noexcept {
     // Source-block vocabulary is deliberately translated here, rather than
@@ -117,21 +110,31 @@ InputPresentation PresentationForSource(const DiceRouterEntry& entry,
                                               : AudioSemanticMatrixChannelRole::Right};
 }
 
-bool FindMixerInputRoute(const DiceRouterEntries& routes,
-                         uint32_t input,
-                         DiceRouterEntry& outEntry) noexcept {
-    const uint8_t destinationBlock = input < 16U ? kRouterDestinationMixerTx0
-                                                  : kRouterDestinationMixerTx1;
-    const uint8_t destinationChannel = static_cast<uint8_t>(input < 16U ? input : input - 16U);
-    for (uint16_t route = 0; route < routes.count; ++route) {
-        const auto& candidate = routes.At(route);
-        if (candidate.destinationBlock == destinationBlock &&
-            candidate.destinationChannel == destinationChannel) {
-            outEntry = candidate;
-            return true;
-        }
-    }
-    return false;
+[[nodiscard]] bool IsSPro24ReverbReturn(const DiceMixerInputBinding& binding) noexcept {
+    return binding.routed && binding.route.sourceBlock == 4U &&
+           binding.route.sourceChannel >= 14U && binding.route.sourceChannel < 16U;
+}
+
+[[nodiscard]] AudioSemanticMatrixOutputRole OutputRoleForSPro24Row(
+    uint8_t rawOutput) noexcept {
+    // MixControl's recovered output table exposes Mixer:0..7 as four monitor
+    // pairs and Mixer:8/9 as the reverb-send pair. Rows 10..15 are computed by
+    // TCAT but have no SPro24 product destination and remain unpublished.
+    if (rawOutput < 8U) return AudioSemanticMatrixOutputRole::MonitorMix;
+    if (rawOutput < 10U) return AudioSemanticMatrixOutputRole::EffectSend;
+    return AudioSemanticMatrixOutputRole::None;
+}
+
+[[nodiscard]] std::optional<uint8_t> RawInputForPortId(uint32_t portId) noexcept {
+    if (portId <= kMixerInputPortBase ||
+        portId > kMixerInputPortBase + kDiceMaximumMixerInputs) return std::nullopt;
+    return static_cast<uint8_t>(portId - kMixerInputPortBase - 1U);
+}
+
+[[nodiscard]] std::optional<uint8_t> RawOutputForPortId(uint32_t portId) noexcept {
+    if (portId <= kMixerOutputPortBase ||
+        portId > kMixerOutputPortBase + kDiceMaximumMixerOutputs) return std::nullopt;
+    return static_cast<uint8_t>(portId - kMixerOutputPortBase - 1U);
 }
 
 [[nodiscard]] float FaderLawDb(float normalized,
@@ -173,19 +176,23 @@ bool BuildSPro24DspSemanticMatrix(const DiceMixerCoefficients& coefficients,
         return false;
     }
 
+    DiceRouterMixerTopology topology{};
+    if (!BuildDiceRouterMixerTopology(coefficients, routes, topology)) return false;
+
     outSnapshot = {};
     outSnapshot.deviceKind = kSPro24DspSemanticDeviceKind;
     // The coordinator substitutes the endpoint's live revision at publication.
     outSnapshot.topologyRevision = 1;
     outSnapshot.kind = AudioSemanticMatrixKind::Mixer;
     outSnapshot.inputCount = coefficients.inputCount;
-    outSnapshot.outputCount = coefficients.outputCount;
+    outSnapshot.outputCount = 0;
     outSnapshot.coefficientMaximum = 65535;
     outSnapshot.gainLaw = AudioSemanticMatrixGainLaw::UnsignedQ214Amplitude;
 
     for (uint32_t input = 0; input < coefficients.inputCount; ++input) {
-        DiceRouterEntry route{};
-        const bool found = FindMixerInputRoute(routes, input, route);
+        const auto& binding = topology.inputs[input];
+        const auto& route = binding.route;
+        const bool found = binding.routed;
         const auto kind = found ? SignalKindForSPro24Source(route)
                                 : AudioSemanticSignalKind::Auxiliary;
         const uint32_t signalIndex = found ? SignalIndexForSource(route) : input + 1U;
@@ -201,23 +208,58 @@ bool BuildSPro24DspSemanticMatrix(const DiceMixerCoefficients& coefficients,
             .channelRole = presentation.role,
         };
     }
-    for (uint32_t output = 0; output < outSnapshot.outputCount; ++output) {
-        const uint32_t rawOutput = output;
+    for (uint8_t rawOutput = 0; rawOutput < coefficients.outputCount; ++rawOutput) {
+        if (!topology.OutputIsRouted(rawOutput)) continue;
+        const auto role = OutputRoleForSPro24Row(rawOutput);
+        if (role == AudioSemanticMatrixOutputRole::None) continue;
+
+        const uint32_t output = outSnapshot.outputCount++;
         outSnapshot.outputs[output] = {
             .portId = kMixerOutputPortBase + rawOutput + 1U,
             .signalKind = AudioSemanticSignalKind::Auxiliary,
-            .signalIndex = rawOutput + 1U,
+            .signalIndex = role == AudioSemanticMatrixOutputRole::EffectSend
+                ? uint32_t{rawOutput} - 7U
+                : uint32_t{rawOutput} + 1U,
             .presentationGroupId = kMixerOutputPresentationGroupBase +
                 ((rawOutput & ~uint32_t{1}) + 1U),
             .channelRole = (rawOutput & 1U) == 0U ? AudioSemanticMatrixChannelRole::Left
                                                    : AudioSemanticMatrixChannelRole::Right,
-            .outputRole = AudioSemanticMatrixOutputRole::MonitorMix,
+            .outputRole = role,
         };
         for (uint32_t input = 0; input < coefficients.inputCount; ++input) {
             outSnapshot.coefficients[size_t{output} * kMaxAudioSemanticMatrixInputs + input] =
-                coefficients.At(static_cast<uint8_t>(rawOutput), static_cast<uint8_t>(input));
+                coefficients.At(rawOutput, static_cast<uint8_t>(input));
+
+            auto presentation = AudioSemanticMatrixCrosspointPresentation::ScalarReadback;
+            const auto inputRole = outSnapshot.inputs[input].channelRole;
+            const auto outputChannelRole = outSnapshot.outputs[output].channelRole;
+            if (!topology.inputs[input].routed) {
+                // A coefficient exists for every matrix cell, but an
+                // unbound input row has no stable semantic source identity.
+                // Preserve it as diagnostic readback and fail closed for
+                // grouped writes.
+                presentation = AudioSemanticMatrixCrosspointPresentation::ScalarReadback;
+            } else if (role == AudioSemanticMatrixOutputRole::EffectSend &&
+                IsSPro24ReverbReturn(topology.inputs[input])) {
+                // MixControl's reverb-send source list does not feed the
+                // reverb return back into its own input. The scalar cells
+                // remain in readback, but exposing them as a strip creates a
+                // hardware feedback path with no useful product meaning.
+                presentation = AudioSemanticMatrixCrosspointPresentation::Hidden;
+            } else if (inputRole == AudioSemanticMatrixChannelRole::Mono) {
+                presentation = AudioSemanticMatrixCrosspointPresentation::MonoLevelPan;
+            } else if (inputRole == outputChannelRole) {
+                presentation = AudioSemanticMatrixCrosspointPresentation::StereoLevelBalance;
+            } else {
+                // Off-diagonal cells are not members of the vendor's linked
+                // stereo level/balance gesture.
+                presentation = AudioSemanticMatrixCrosspointPresentation::Hidden;
+            }
+            outSnapshot.crosspointPresentations[
+                size_t{output} * kMaxAudioSemanticMatrixInputs + input] = presentation;
         }
     }
+    if (outSnapshot.outputCount == 0) return false;
     return ValidateAudioSemanticMatrix(outSnapshot).has_value();
 }
 
@@ -233,13 +275,21 @@ ResolveSPro24DspStereoStrip(const DiceMixerCoefficients& coefficients,
     std::optional<uint8_t> inputRight;
     std::optional<uint8_t> outputLeft;
     std::optional<uint8_t> outputRight;
+    std::optional<uint32_t> semanticInputLeft;
+    std::optional<uint32_t> semanticInputRight;
+    std::optional<uint32_t> semanticOutputLeft;
+    std::optional<uint32_t> semanticOutputRight;
     for (uint32_t input = 0; input < snapshot.inputCount; ++input) {
         const auto& axis = snapshot.inputs[input];
         if (axis.presentationGroupId != inputPresentationGroupId) continue;
+        const auto rawInput = RawInputForPortId(axis.portId);
+        if (!rawInput) return std::nullopt;
         if (axis.channelRole == AudioSemanticMatrixChannelRole::Left && !inputLeft) {
-            inputLeft = static_cast<uint8_t>(input);
+            inputLeft = *rawInput;
+            semanticInputLeft = input;
         } else if (axis.channelRole == AudioSemanticMatrixChannelRole::Right && !inputRight) {
-            inputRight = static_cast<uint8_t>(input);
+            inputRight = *rawInput;
+            semanticInputRight = input;
         } else {
             return std::nullopt;
         }
@@ -247,22 +297,87 @@ ResolveSPro24DspStereoStrip(const DiceMixerCoefficients& coefficients,
     for (uint32_t output = 0; output < snapshot.outputCount; ++output) {
         const auto& axis = snapshot.outputs[output];
         if (axis.presentationGroupId != outputPresentationGroupId) continue;
+        const auto rawOutput = RawOutputForPortId(axis.portId);
+        if (!rawOutput) return std::nullopt;
         if (axis.channelRole == AudioSemanticMatrixChannelRole::Left && !outputLeft) {
-            outputLeft = static_cast<uint8_t>(output);
+            outputLeft = *rawOutput;
+            semanticOutputLeft = output;
         } else if (axis.channelRole == AudioSemanticMatrixChannelRole::Right && !outputRight) {
-            outputRight = static_cast<uint8_t>(output);
+            outputRight = *rawOutput;
+            semanticOutputRight = output;
         } else {
             return std::nullopt;
         }
     }
     if (!inputLeft || !inputRight || !outputLeft || !outputRight ||
+        !semanticInputLeft || !semanticInputRight ||
+        !semanticOutputLeft || !semanticOutputRight ||
         *inputRight != static_cast<uint8_t>(*inputLeft + 1U) ||
-        *outputRight != static_cast<uint8_t>(*outputLeft + 1U)) {
+        *outputRight != static_cast<uint8_t>(*outputLeft + 1U) ||
+        snapshot.CrosspointPresentation(*semanticOutputLeft, *semanticInputLeft) !=
+            AudioSemanticMatrixCrosspointPresentation::StereoLevelBalance ||
+        snapshot.CrosspointPresentation(*semanticOutputRight, *semanticInputRight) !=
+            AudioSemanticMatrixCrosspointPresentation::StereoLevelBalance) {
         return std::nullopt;
     }
     return SPro24DspStereoStripLayout{
         .inputLeft = *inputLeft,
         .inputRight = *inputRight,
+        .outputLeft = *outputLeft,
+        .outputRight = *outputRight,
+    };
+}
+
+std::optional<SPro24DspMonoStripLayout>
+ResolveSPro24DspMonoStrip(const DiceMixerCoefficients& coefficients,
+                          const DiceRouterEntries& routes,
+                          uint32_t outputPresentationGroupId,
+                          uint32_t inputPresentationGroupId) noexcept {
+    AudioSemanticMatrixSnapshot snapshot{};
+    if (!BuildSPro24DspSemanticMatrix(coefficients, routes, snapshot)) return std::nullopt;
+
+    std::optional<uint8_t> input;
+    std::optional<uint8_t> outputLeft;
+    std::optional<uint8_t> outputRight;
+    std::optional<uint32_t> semanticInput;
+    std::optional<uint32_t> semanticOutputLeft;
+    std::optional<uint32_t> semanticOutputRight;
+
+    for (uint32_t index = 0; index < snapshot.inputCount; ++index) {
+        const auto& axis = snapshot.inputs[index];
+        if (axis.presentationGroupId != inputPresentationGroupId) continue;
+        if (input || axis.channelRole != AudioSemanticMatrixChannelRole::Mono) {
+            return std::nullopt;
+        }
+        input = RawInputForPortId(axis.portId);
+        semanticInput = index;
+    }
+    for (uint32_t index = 0; index < snapshot.outputCount; ++index) {
+        const auto& axis = snapshot.outputs[index];
+        if (axis.presentationGroupId != outputPresentationGroupId) continue;
+        const auto rawOutput = RawOutputForPortId(axis.portId);
+        if (!rawOutput) return std::nullopt;
+        if (axis.channelRole == AudioSemanticMatrixChannelRole::Left && !outputLeft) {
+            outputLeft = *rawOutput;
+            semanticOutputLeft = index;
+        } else if (axis.channelRole == AudioSemanticMatrixChannelRole::Right && !outputRight) {
+            outputRight = *rawOutput;
+            semanticOutputRight = index;
+        } else {
+            return std::nullopt;
+        }
+    }
+    if (!input || !outputLeft || !outputRight || !semanticInput ||
+        !semanticOutputLeft || !semanticOutputRight ||
+        *outputRight != static_cast<uint8_t>(*outputLeft + 1U) ||
+        snapshot.CrosspointPresentation(*semanticOutputLeft, *semanticInput) !=
+            AudioSemanticMatrixCrosspointPresentation::MonoLevelPan ||
+        snapshot.CrosspointPresentation(*semanticOutputRight, *semanticInput) !=
+            AudioSemanticMatrixCrosspointPresentation::MonoLevelPan) {
+        return std::nullopt;
+    }
+    return SPro24DspMonoStripLayout{
+        .input = *input,
         .outputLeft = *outputLeft,
         .outputRight = *outputRight,
     };
@@ -301,6 +416,43 @@ MakeSPro24DspStereoStripCoefficients(int32_t levelMilliDb,
     return SPro24DspStereoStripCoefficients{
         .left = Q214ForDb(levelDb + BalanceAttenuationDb(1.0F - balance)),
         .right = Q214ForDb(levelDb + BalanceAttenuationDb(balance)),
+    };
+}
+
+std::optional<SPro24DspStereoStripCoefficients>
+MakeSPro24DspMonoStripCoefficients(int32_t levelMilliDb,
+                                   int32_t panMilli) noexcept {
+    constexpr int32_t kMinimumLevelMilliDb = -85000;
+    constexpr int32_t kMaximumLevelMilliDb = 6000;
+    constexpr int32_t kMinimumPanMilli = -1000;
+    constexpr int32_t kMaximumPanMilli = 1000;
+    if (levelMilliDb < kMinimumLevelMilliDb || levelMilliDb > kMaximumLevelMilliDb ||
+        panMilli < kMinimumPanMilli || panMilli > kMaximumPanMilli) {
+        return std::nullopt;
+    }
+
+    const float levelDb = static_cast<float>(levelMilliDb) / 1000.0F;
+    if (panMilli == kMinimumPanMilli) {
+        return SPro24DspStereoStripCoefficients{.left = Q214ForDb(levelDb), .right = 0};
+    }
+    if (panMilli == kMaximumPanMilli) {
+        return SPro24DspStereoStripCoefficients{.left = 0, .right = Q214ForDb(levelDb)};
+    }
+
+    // ASFW policy, not recovered vendor behaviour: equal-power pan keeps the
+    // sum of squared amplitudes constant across the gesture. Centre is
+    // cos(pi/4) == sin(pi/4), approximately -3.0103 dB per side.
+    constexpr float kHalfPi = 1.57079632679489661923F;
+    const float normalized = static_cast<float>(panMilli - kMinimumPanMilli) /
+        static_cast<float>(kMaximumPanMilli - kMinimumPanMilli);
+    const float angle = normalized * kHalfPi;
+    const float leftAmplitude = std::cos(angle);
+    const float rightAmplitude = std::sin(angle);
+    const float leftDb = levelDb + 20.0F * std::log10(leftAmplitude);
+    const float rightDb = levelDb + 20.0F * std::log10(rightAmplitude);
+    return SPro24DspStereoStripCoefficients{
+        .left = Q214ForDb(leftDb),
+        .right = Q214ForDb(rightDb),
     };
 }
 

@@ -11,7 +11,7 @@
 
 namespace ASFW::UserClient::Wire {
 
-inline constexpr uint32_t kAudioSemanticMatrixWireVersion = 1;
+inline constexpr uint32_t kAudioSemanticMatrixWireVersion = 2;
 inline constexpr uint32_t kAudioSemanticMatrixEndpointListWireVersion = 1;
 
 struct AudioSemanticMatrixEndpointListWire final {
@@ -28,6 +28,6 @@ struct AudioSemanticMatrixSnapshotWire final {
     ASFW::Audio::AudioSemanticMatrixSnapshot matrix{};
 };
 static_assert(offsetof(AudioSemanticMatrixSnapshotWire, matrix) == 16);
-static_assert(sizeof(AudioSemanticMatrixSnapshotWire) == 2168);
+static_assert(sizeof(AudioSemanticMatrixSnapshotWire) == 2744);
 
 } // namespace ASFW::UserClient::Wire

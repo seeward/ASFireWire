@@ -19,6 +19,16 @@ nonisolated struct AudioSemanticMatrixSnapshot: Equatable, Sendable {
         case effectSend = 2
     }
 
+    /// Driver-owned meaning of one coefficient cell. The dense coefficient
+    /// image is complete readback; this map decides which cells form a real
+    /// product control and which must not be plotted or written.
+    enum CrosspointPresentation: UInt8, Equatable, Sendable {
+        case hidden = 0
+        case scalarReadback = 1
+        case monoLevelPan = 2
+        case stereoLevelBalance = 3
+    }
+
     struct Axis: Identifiable, Equatable, Sendable {
         let portID: UInt32
         let signalKind: AudioSemanticTopologySnapshot.SignalKind
@@ -42,9 +52,15 @@ nonisolated struct AudioSemanticMatrixSnapshot: Equatable, Sendable {
     /// Row-major output × input gain cells, exactly as described by the
     /// semantic axes. The UI must not make an assumption about a vendor stride.
     let coefficients: [UInt16]
+    let crosspointPresentations: [CrosspointPresentation]
 
     func coefficient(output: Int, input: Int) -> UInt16? {
         guard outputs.indices.contains(output), inputs.indices.contains(input) else { return nil }
         return coefficients[output * inputs.count + input]
+    }
+
+    func crosspointPresentation(output: Int, input: Int) -> CrosspointPresentation? {
+        guard outputs.indices.contains(output), inputs.indices.contains(input) else { return nil }
+        return crosspointPresentations[output * inputs.count + input]
     }
 }

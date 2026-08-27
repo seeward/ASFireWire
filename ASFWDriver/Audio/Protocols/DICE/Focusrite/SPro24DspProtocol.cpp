@@ -414,21 +414,50 @@ void SPro24DspProtocol::ApplyAudioSemanticMatrixStereoStrip(
                                         FinishSemanticMatrixWrite(readStatus, std::move(callback));
                                         return;
                                     }
-                                    const auto layout = ResolveSPro24DspStereoStrip(
+                                    struct ResolvedStripCells final {
+                                        uint8_t inputLeft{0};
+                                        uint8_t inputRight{0};
+                                        uint8_t outputLeft{0};
+                                        uint8_t outputRight{0};
+                                    };
+                                    std::optional<ResolvedStripCells> layout;
+                                    std::optional<SPro24DspStereoStripCoefficients> coefficients;
+
+                                    if (const auto stereo = ResolveSPro24DspStereoStrip(
                                         current, routes,
                                         request.outputPresentationGroupId,
-                                        request.inputPresentationGroupId);
-                                    const auto coefficients = MakeSPro24DspStereoStripCoefficients(
-                                        request.levelMilliDb, request.balanceMilli);
+                                        request.inputPresentationGroupId)) {
+                                        layout = ResolvedStripCells{
+                                            .inputLeft = stereo->inputLeft,
+                                            .inputRight = stereo->inputRight,
+                                            .outputLeft = stereo->outputLeft,
+                                            .outputRight = stereo->outputRight,
+                                        };
+                                        coefficients = MakeSPro24DspStereoStripCoefficients(
+                                            request.levelMilliDb, request.balanceMilli);
+                                    } else if (const auto mono = ResolveSPro24DspMonoStrip(
+                                                   current, routes,
+                                                   request.outputPresentationGroupId,
+                                                   request.inputPresentationGroupId)) {
+                                        layout = ResolvedStripCells{
+                                            .inputLeft = mono->input,
+                                            .inputRight = mono->input,
+                                            .outputLeft = mono->outputLeft,
+                                            .outputRight = mono->outputRight,
+                                        };
+                                        coefficients = MakeSPro24DspMonoStripCoefficients(
+                                            request.levelMilliDb, request.balanceMilli);
+                                    }
                                     if (!layout || !coefficients) {
                                         FinishSemanticMatrixWrite(kIOReturnBadArgument,
                                                                   std::move(callback));
                                         return;
                                     }
 
-                                    // Captured MixControl stereo gestures are two native DICE
-                                    // writes: left source → left bus, then right source → right
-                                    // bus. No router load/commit command follows either write.
+                                    // A grouped gesture is exactly two native DICE writes. A
+                                    // stereo source uses its real L/R input cells; a mono source
+                                    // uses the same input cell against the destination's L/R rows.
+                                    // No router load/commit command follows either write.
                                     tcat_.Transaction().WriteMixerCoefficient(
                                         extensionSections_, caps, layout->outputLeft,
                                         layout->inputLeft, coefficients->left,

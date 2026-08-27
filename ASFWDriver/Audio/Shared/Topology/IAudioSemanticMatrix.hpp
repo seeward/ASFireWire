@@ -57,6 +57,18 @@ enum class AudioSemanticMatrixOutputRole : uint8_t {
     EffectSend = 2,
 };
 
+/// Product-owned meaning of one matrix cell. The coefficient array remains
+/// complete hardware readback; this parallel map tells clients which cells
+/// form a useful control and which must stay out of the console. In
+/// particular, an effect return can be visible in a monitor bus while its
+/// self-send cell is hidden on the effect-send bus.
+enum class AudioSemanticMatrixCrosspointPresentation : uint8_t {
+    Hidden = 0,
+    ScalarReadback = 1,
+    MonoLevelPan = 2,
+    StereoLevelBalance = 3,
+};
+
 /// A single channel on one side of a semantic matrix. `portId` is opaque but
 /// stable for a topology revision; it never encodes a DICE block/channel or a
 /// vendor register address.
@@ -72,7 +84,7 @@ struct AudioSemanticMatrixAxis final {
 };
 static_assert(sizeof(AudioSemanticMatrixAxis) == 20);
 
-inline constexpr uint32_t kAudioSemanticMatrixVersion = 4;
+inline constexpr uint32_t kAudioSemanticMatrixVersion = 5;
 // Endpoint discovery is bounded independently from the dimensions of any one
 // matrix. A client must enumerate only protocols which actually publish this
 // semantic surface; configuration-capability discovery is a different API.
@@ -98,26 +110,36 @@ struct AudioSemanticMatrixSnapshot final {
     std::array<AudioSemanticMatrixAxis, kMaxAudioSemanticMatrixInputs> inputs{};
     std::array<AudioSemanticMatrixAxis, kMaxAudioSemanticMatrixOutputs> outputs{};
     std::array<uint16_t, kMaxAudioSemanticMatrixCoefficients> coefficients{};
+    std::array<AudioSemanticMatrixCrosspointPresentation,
+               kMaxAudioSemanticMatrixCoefficients> crosspointPresentations{};
 
     [[nodiscard]] constexpr uint16_t Coefficient(uint32_t output,
                                                   uint32_t input) const noexcept {
         return coefficients[size_t{output} * kMaxAudioSemanticMatrixInputs + input];
     }
+    [[nodiscard]] constexpr AudioSemanticMatrixCrosspointPresentation
+    CrosspointPresentation(uint32_t output, uint32_t input) const noexcept {
+        return crosspointPresentations[
+            size_t{output} * kMaxAudioSemanticMatrixInputs + input];
+    }
 };
-static_assert(sizeof(AudioSemanticMatrixSnapshot) == 2152);
+static_assert(sizeof(AudioSemanticMatrixSnapshot) == 2728);
 static_assert(offsetof(AudioSemanticMatrixSnapshot, inputs) == 36);
 static_assert(offsetof(AudioSemanticMatrixSnapshot, outputs) == 516);
 static_assert(offsetof(AudioSemanticMatrixSnapshot, coefficients) == 996);
+static_assert(offsetof(AudioSemanticMatrixSnapshot, crosspointPresentations) == 2148);
 
 class IAudioSemanticMatrix {
 public:
     using ApplyCallback = std::function<void(IOReturn)>;
 
-    /// A device-declared stereo strip.  These group IDs identify semantic
-    /// source/destination pairs in the current matrix snapshot; they are not
-    /// vendor row, column, or register numbers.  `levelMilliDb` is an
-    /// absolute amplitude level and `balanceMilli` is -1000 (left) through
-    /// zero (centre) to +1000 (right).
+    /// A device-declared grouped strip. These group IDs identify semantic
+    /// source/destination objects in the current matrix snapshot; they are
+    /// not vendor row, column, or register numbers. `levelMilliDb` is an
+    /// absolute amplitude level. `balanceMilli` is interpreted as pan for a
+    /// mono source and balance for a stereo source: -1000 (left), zero
+    /// (centre), +1000 (right). The historical type name is retained because
+    /// selector 1034 already shipped with it.
     struct StereoStripRequest final {
         uint32_t outputPresentationGroupId{0};
         uint32_t inputPresentationGroupId{0};
@@ -143,9 +165,9 @@ public:
         if (callback) callback(kIOReturnUnsupported);
     }
 
-    /// Applies one semantic stereo-strip gesture.  Profiles must resolve both
-    /// native coefficient cells, perform every required write, and publish
-    /// only exact post-write readback.  A generic matrix must refuse it.
+    /// Applies one grouped level/pan-or-balance gesture. Profiles must resolve
+    /// both native coefficient cells, perform every required write, and
+    /// publish only exact post-write readback. A generic matrix must refuse it.
     virtual void ApplyAudioSemanticMatrixStereoStrip(const StereoStripRequest& request,
                                                       ApplyCallback callback) {
         (void)request;
@@ -162,6 +184,7 @@ enum class AudioSemanticMatrixValidationError : uint32_t {
     MissingCoefficientDomain,
     InvalidGainLaw,
     CoefficientOutOfRange,
+    InvalidCrosspointPresentation,
     InvalidInput,
     DuplicateInputPort,
     InvalidOutput,
@@ -185,6 +208,14 @@ namespace Detail {
            (axis.channelRole == AudioSemanticMatrixChannelRole::Mono ||
             axis.channelRole == AudioSemanticMatrixChannelRole::Left ||
             axis.channelRole == AudioSemanticMatrixChannelRole::Right);
+}
+
+[[nodiscard]] constexpr bool IsValid(
+    AudioSemanticMatrixCrosspointPresentation presentation) noexcept {
+    return presentation == AudioSemanticMatrixCrosspointPresentation::Hidden ||
+           presentation == AudioSemanticMatrixCrosspointPresentation::ScalarReadback ||
+           presentation == AudioSemanticMatrixCrosspointPresentation::MonoLevelPan ||
+           presentation == AudioSemanticMatrixCrosspointPresentation::StereoLevelBalance;
 }
 
 [[nodiscard]] constexpr bool IsValidInput(const AudioSemanticMatrixAxis& axis) noexcept {
@@ -239,6 +270,9 @@ ValidateAudioSemanticMatrix(const AudioSemanticMatrixSnapshot& snapshot) noexcep
         for (uint32_t input = 0; input < snapshot.inputCount; ++input) {
             if (snapshot.Coefficient(output, input) > snapshot.coefficientMaximum) {
                 return std::unexpected(Error::CoefficientOutOfRange);
+            }
+            if (!Detail::IsValid(snapshot.CrosspointPresentation(output, input))) {
+                return std::unexpected(Error::InvalidCrosspointPresentation);
             }
         }
     }
