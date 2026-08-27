@@ -636,12 +636,38 @@ stateDiagram-v2
 
 It writes large coefficient banks, room/position/speaker identifiers, checks
 DSP busy/running state, uses notices `0x1b`, `0x1c`, `0x1e`, and `0x20`, and
-waits approximately 100 ms during transitions.  The vendor coefficient corpus
-also needs a licensing/product decision before ASFW redistributes anything.
+waits approximately 100 ms during transitions.
 
-Until there is a complete bank/data strategy, expose only read-only VRM status.
-The existing boolean-plus-notice helper is insufficient and must not back a UI
-toggle.
+### 7.1 Engine, not assets
+
+Only **redistribution of the coefficient corpus** is blocked, and this section
+previously read as though VRM were untouchable in general. It is not.
+
+The format, transport and choreography are ordinary interoperability work: the
+upload sequence, the notice ordering, the busy/running gate, the settle timing,
+and a parser for the bank layout may all be implemented and shipped. What ASFW
+must never carry is the **bank data itself** — room, position and speaker models
+are a vendor work product, not a description of the hardware, and shipping them
+would need Focusrite's agreement.
+
+The workable shape is the one long used by engine reimplementations: ship the
+engine, never the assets. Banks are read at runtime from the vendor software the
+user already has installed and licensed on their own machine; none is vendored
+into this repository.
+
+This distinction applies narrowly. Register offsets, bit layouts, notice values,
+parameter laws and routing tables recovered from the vendor binaries are
+interface facts, are not assets, and carry no such restriction.
+
+### 7.2 Why it is still deferred
+
+Removing the licensing question does not move VRM up the queue. The engineering
+remains the hard part: large uploads, alternate bank switching, busy-state
+gating, ~100 ms settles, and a restore path that must not strand the DSP in the
+alternate bank.
+
+Until that engine exists, expose only read-only VRM status. The existing
+boolean-plus-notice helper is insufficient and must not back a UI toggle.
 
 ## 8. Metering
 
