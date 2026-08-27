@@ -49,8 +49,12 @@ AudioSemanticSignalKind SignalKindForSPro24Source(const DiceRouterEntry& entry) 
     // TCAT source block. Cross-validated with the local
     // snd-firewire-ctl-services spro24dsp Tcd22xx specification.
     if (entry.sourceBlock == 4) {
-        if (entry.sourceChannel < 2) return AudioSemanticSignalKind::AnalogLine;
-        if (entry.sourceChannel < 4) return AudioSemanticSignalKind::AnalogMicXlr;
+        // All four analog inputs are one vendor category, "Anlg In 1..4".
+        // Do NOT split channels 2/3 out as a microphone kind: whether inputs
+        // 1/2 are presenting a preamp is an input *mode*, published separately
+        // by the physical-input surface, not the identity of the signal. A
+        // strip labelled MIC while its jack is switched to line is a lie.
+        if (entry.sourceChannel < 4) return AudioSemanticSignalKind::AnalogLine;
         return AudioSemanticSignalKind::Auxiliary; // channel-strip/reverb return
     }
     return SignalKindForSource(entry.sourceBlock);
@@ -66,7 +70,11 @@ uint32_t SignalIndexForSource(const DiceRouterEntry& entry) noexcept {
         return entry.sourceChannel >= 6 ? uint32_t{entry.sourceChannel} - 5U
                                         : uint32_t{entry.sourceChannel} + 1U;
     case 4:
-        if (entry.sourceChannel < 2) return uint32_t{entry.sourceChannel} + 1U;
+        // Vendor analog-input numbering is NOT the router channel order:
+        // Ins0:2 -> Anlg In 1, Ins0:3 -> 2, Ins0:0 -> 3, Ins0:1 -> 4. The rear
+        // pair is 3/4, not 1/2. Recovered from MixControl's Pro24DSP_IpSigTab,
+        // and corroborated by the FIXED meter ordering (Ins0 2,3,0,1).
+        if (entry.sourceChannel < 2) return uint32_t{entry.sourceChannel} + 3U;
         if (entry.sourceChannel < 4) return uint32_t{entry.sourceChannel} - 1U;
         if (entry.sourceChannel >= 8 && entry.sourceChannel < 10) {
             return uint32_t{entry.sourceChannel} - 7U; // channel strip 1/2

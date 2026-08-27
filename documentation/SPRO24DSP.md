@@ -417,11 +417,41 @@ Whether an output pair is mixer-fed or stream-fed is a property of the *active
 router image*, not of the device. Read it before reasoning about any output
 path; do not assume either topology. **[measured]**
 
+### 5.1.0 Analog input numbering is not router channel order
+
+`Pro24DSP_IpSigTab` in the vendor application names the four analog inputs as
+one category, **"Anlg In 1".."Anlg In 4"**, mapped to router channels in this
+order: **[derived]**
+
+| vendor name | router source |
+|---|---|
+| Anlg In 1 | `Ins0:2` |
+| Anlg In 2 | `Ins0:3` |
+| Anlg In 3 | `Ins0:0` |
+| Anlg In 4 | `Ins0:1` |
+
+The rear pair is **3/4, not 1/2**, and the front pair is not a separate
+microphone category. ALSA's `Input` labels ("Mic" at offset 2, "Line" at offset
+0) are functional descriptions of what the connector does, not the vendor's
+channel numbering, and ASFW previously inherited them as numbers — publishing
+`Ins0:0/1` as "LINE 1/2" while `Ins0:2/3` was "MIC 1/2". Two different signals
+therefore both claimed index 1.
+
+Whether inputs 1/2 are presenting a preamp is an input **mode**, published by
+the physical-input surface, not the identity of the signal. A strip labelled
+`MIC` while its jack is switched to line is simply wrong. Corrected 2026-08-27;
+pinned by `SPro24AnalogInputsUseVendorNumbering`.
+
+The same table carries each signal's `(block, channel)` at low, mid and high
+rate, with `0xff` marking a signal absent at that rate — ADAT In 5–8 are absent
+at 96 kHz, the ordinary S/MUX halving, recorded per-signal rather than derived.
+
 ### 5.1 Measured signal fan-out
 
-Physical `INPUT 1` is router source `Ins0:2` — identified by its channel-strip
-wiring, since the DSP strips exist to sit on the combo preamp inputs, and
-corroborated by the `FIXED` meter ordering in §2.1. It reaches three places:
+Physical `Anlg In 1` is router source `Ins0:2` — confirmed by the vendor signal
+table above, by its channel-strip wiring (the DSP strips sit on the combo
+preamp inputs), and by the `FIXED` meter ordering in §2.1. It reaches three
+places:
 
 ```text
 INPUT 1 (Ins0:2)

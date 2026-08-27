@@ -105,7 +105,9 @@ enum SaffireSignalLabel {
         switch axis.signalKind {
         case .analogMicXlr: return "MIC \(axis.signalIndex)"
         case .analogInstrument: return "INST \(axis.signalIndex)"
-        case .analogLine: return "LINE \(axis.signalIndex)"
+        // The vendor calls all four analog inputs "Anlg In n"; "LINE n" would
+        // both rename them and imply a mode the signal identity does not carry.
+        case .analogLine: return "ANLG IN \(axis.signalIndex)"
         case .hostStream: return "DAW \(axis.signalIndex)"
         case .digitalSpdif: return "S/PDIF \(axis.signalIndex)"
         case .digitalAdat: return "ADAT \(axis.signalIndex)"

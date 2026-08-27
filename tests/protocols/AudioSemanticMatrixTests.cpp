@@ -89,7 +89,8 @@ TEST(AudioSemanticMatrixTests, SPro24MapsRouterSourcesWithoutLeakingBlockIds) {
     EXPECT_EQ(snapshot.inputs[0].signalKind, AudioSemanticSignalKind::HostStream);
     EXPECT_EQ(snapshot.inputs[0].signalIndex, 4);
     EXPECT_EQ(snapshot.inputs[17].signalKind, AudioSemanticSignalKind::AnalogLine);
-    EXPECT_EQ(snapshot.inputs[17].signalIndex, 2);
+    // Ins0:1 is "Anlg In 4", not 2 -- see SPro24AnalogInputsUseVendorNumbering.
+    EXPECT_EQ(snapshot.inputs[17].signalIndex, 4);
     EXPECT_EQ(snapshot.Coefficient(0, 0), 0x1234);
     EXPECT_EQ(snapshot.Coefficient(0, 17), 0x2345);
     EXPECT_EQ(snapshot.outputs[0].outputRole, AudioSemanticMatrixOutputRole::MonitorMix);
@@ -160,6 +161,42 @@ TEST(AudioSemanticMatrixTests, SPro24MapsTheCapturedCurrentConfigRouter) {
     EXPECT_EQ(snapshot.outputs[0].outputRole, AudioSemanticMatrixOutputRole::MonitorMix);
     EXPECT_EQ(snapshot.outputs[8].outputRole, AudioSemanticMatrixOutputRole::MonitorMix);
     EXPECT_EQ(snapshot.outputs[9].outputRole, AudioSemanticMatrixOutputRole::MonitorMix);
+}
+
+// Vendor analog-input numbering is not the router channel order. Recovered
+// from MixControl's Pro24DSP_IpSigTab, where the four analog inputs form one
+// category named "Anlg In 1".."Anlg In 4", mapped Ins0:2,3,0,1 in that order --
+// the same order the FIXED meter entries use. ASFW previously numbered the rear
+// pair 1/2 and split the front pair out as a microphone kind, so two different
+// signals both claimed index 1 and a strip could read MIC while its jack was
+// switched to line.
+TEST(AudioSemanticMatrixTests, SPro24AnalogInputsUseVendorNumbering) {
+    DICE::DiceMixerCoefficients coefficients{};
+    coefficients.inputCount = 18;
+    coefficients.outputCount = 16;
+    DICE::DiceRouterEntries routes{};
+    routes.count = 4;
+    for (uint8_t slot = 0; slot < 4; ++slot) {
+        // Mixer inputs 0..3 fed from Ins0 channels 2, 3, 0, 1.
+        static constexpr uint8_t kSourceChannel[4] = {2, 3, 0, 1};
+        routes.entries[slot] = {.destinationBlock = 2, .destinationChannel = slot,
+                                .sourceBlock = 4,
+                                .sourceChannel = kSourceChannel[slot]};
+    }
+
+    AudioSemanticMatrixSnapshot snapshot{};
+    ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(coefficients, routes, snapshot));
+    for (uint32_t slot = 0; slot < 4; ++slot) {
+        EXPECT_EQ(snapshot.inputs[slot].signalKind, AudioSemanticSignalKind::AnalogLine)
+            << "analog input " << slot << " must not be split into a microphone kind";
+        EXPECT_EQ(snapshot.inputs[slot].signalIndex, slot + 1U)
+            << "Ins0 channel order 2,3,0,1 must present as Anlg In 1..4";
+        EXPECT_EQ(snapshot.inputs[slot].channelRole,
+                  AudioSemanticMatrixChannelRole::Mono);
+    }
+    // Distinct signals must not collide on one identity.
+    EXPECT_NE(snapshot.inputs[0].presentationGroupId,
+              snapshot.inputs[2].presentationGroupId);
 }
 
 TEST(AudioSemanticMatrixTests, SPro24StereoStripUsesPairedNativeCellsAndHardPanMute) {
