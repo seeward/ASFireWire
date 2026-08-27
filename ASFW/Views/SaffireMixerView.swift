@@ -89,7 +89,12 @@ private struct SaffireMixerRack: View {
                 SaffireInputOutputSection(endpointID: matrix.endpointID,
                                           connector: connector,
                                           controls: controls)
-                SaffireMonitorMixerSection(matrix: matrix, connector: connector, controls: controls)
+                SaffireMixerBusSection(matrix: matrix, connector: connector, controls: controls,
+                                       outputRole: .monitorMix)
+                if matrix.outputs.contains(where: { $0.outputRole == .effectSend }) {
+                    SaffireMixerBusSection(matrix: matrix, connector: connector, controls: controls,
+                                           outputRole: .effectSend)
+                }
                 SaffireDspSection(controls: controls)
                 SaffirePatchbaySection(inputs: matrix.inputs)
             }
@@ -128,49 +133,64 @@ enum SaffireSignalLabel {
     }
 }
 
-/// A read-only projection of the SPro24's hardware-declared monitor buses.
-/// It exposes every real coefficient without inventing a MixControl pan law or
-/// a writable logical fader. The driver groups its rows from the SPro busms
-/// header before this view sees them.
-private struct SaffireMonitorMixerSection: View {
+/// Projection of driver-published, router-reachable SPro mixer destinations.
+/// Raw TCAT rows that reach no active destination stay below the semantic seam.
+/// Product grouping and the verified stereo write law are driver-owned.
+private struct SaffireMixerBusSection: View {
     let matrix: AudioSemanticMatrixSnapshot
     let connector: ASFWDriverConnector
     let controls: SaffireControlSurface?
+    let outputRole: AudioSemanticMatrixSnapshot.OutputRole
     @State private var selectedGroupID: UInt32?
     @State private var writeInFlight = false
     @State private var writeStatus: String?
 
-    private var monitorGroups: [SaffireMatrixGroup] {
-        SaffireMatrixGroup.make(from: matrix.outputs, role: .monitorMix)
+    private var destinationGroups: [SaffireMatrixGroup] {
+        SaffireMatrixGroup.make(from: matrix.outputs, role: outputRole)
     }
 
     private var selectedGroup: SaffireMatrixGroup? {
-        guard !monitorGroups.isEmpty else { return nil }
-        return monitorGroups.first(where: { $0.id == selectedGroupID }) ?? monitorGroups[0]
+        guard !destinationGroups.isEmpty else { return nil }
+        return destinationGroups.first(where: { $0.id == selectedGroupID }) ?? destinationGroups[0]
+    }
+
+    private var cardTitle: String {
+        outputRole == .effectSend ? "Reverb Send" : "Hardware Monitor Mixer"
+    }
+
+    private var sectionTitle: String {
+        outputRole == .effectSend ? "Reverb input sends" : "Monitor sends"
+    }
+
+    private var sectionDescription: String {
+        if outputRole == .effectSend {
+            return "Stereo hardware effects bus · mono level/pan and stereo level/balance"
+        }
+        return selectedGroup?.axes.count == 2
+            ? "Stereo bus · mono level/pan and stereo level/balance"
+            : "Mono bus · native coefficient readback"
     }
 
     var body: some View {
-        AudioTopologyCard(title: "Hardware Monitor Mixer",
-                          systemImage: "slider.vertical.3",
-                          badge: "Readback") {
+        AudioTopologyCard(title: cardTitle,
+                          systemImage: outputRole == .effectSend ? "waveform.path.ecg" : "slider.vertical.3",
+                          badge: "Hardware") {
             if let selectedGroup {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(alignment: .firstTextBaseline) {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text("Monitor sends")
+                            Text(sectionTitle)
                                 .font(.headline)
-                            Text(selectedGroup.axes.count == 2
-                                 ? "Stereo bus · one level and balance per verified stereo source"
-                                 : "Mono bus · native coefficient readback")
+                            Text(sectionDescription)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        SaffireMonitorRouteBadge(group: selectedGroup, controls: controls)
+                        SaffireMixerDestinationBadge(group: selectedGroup, controls: controls)
                     }
 
                     HStack(spacing: 7) {
-                        ForEach(monitorGroups) { group in
+                        ForEach(destinationGroups) { group in
                             let isSelected = selectedGroup.id == group.id
                             Button(group.title) { selectedGroupID = group.id }
                                 .buttonStyle(.plain)
@@ -206,32 +226,38 @@ private struct SaffireMonitorMixerSection: View {
                         .padding(.vertical, 2)
                     }
 
-                    Text(writeStatus ?? "A stereo gesture is exactly two native crosspoint writes followed by an exact readback. Mono and unverified groups remain read-only.")
+                    Text(writeStatus ?? "A grouped gesture is exactly two native crosspoint writes followed by an exact readback. The driver decides whether a source is writable level/pan, writable level/balance, readback-only, or hidden.")
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
                 }
             } else {
-                Text("The SPro mixer has not published a monitor-bus model yet…")
+                Text("The active router has not published this mixer destination.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
-        .onChange(of: monitorGroups.map(\.id)) { _, ids in
+        .onChange(of: destinationGroups.map(\.id)) { _, ids in
             if let selectedGroupID, ids.contains(selectedGroupID) { return }
             selectedGroupID = ids.first
         }
     }
 
     private var sourceGroups: [SaffireMatrixGroup] {
-        SaffireMatrixGroup.make(from: matrix.inputs, role: nil)
+        guard let selectedGroup else { return [] }
+        return SaffireMatrixGroup.make(from: matrix.inputs, role: nil).filter {
+            SaffireStripPresentation.resolve(matrix: matrix, source: $0,
+                                              destination: selectedGroup) != nil
+        }
     }
 
     private func submit(source: SaffireMatrixGroup, destination: SaffireMatrixGroup,
                         levelMilliDb: Int32, balanceMilli: Int32) {
-        guard source.axes.count == 2, destination.axes.count == 2, !writeInFlight else { return }
+        guard SaffireStripPresentation.resolve(matrix: matrix, source: source,
+                                               destination: destination)?.isWritable == true,
+              !writeInFlight else { return }
         writeInFlight = true
         writeStatus = "Writing (source.title) → (destination.title)…"
-        connector.submitAudioSemanticMatrixStereoStrip(
+        connector.submitAudioSemanticMatrixGroupedStrip(
             endpointID: matrix.endpointID,
             outputPresentationGroupID: destination.id,
             inputPresentationGroupID: source.id,
@@ -246,6 +272,54 @@ private struct SaffireMonitorMixerSection: View {
     }
 }
 
+private enum SaffireStripPresentation {
+    case monoLevelPan
+    case stereoLevelBalance
+    case scalarReadback
+
+    var isWritable: Bool {
+        self != .scalarReadback
+    }
+
+    static func resolve(matrix: AudioSemanticMatrixSnapshot,
+                        source: SaffireMatrixGroup,
+                        destination: SaffireMatrixGroup) -> SaffireStripPresentation? {
+        guard let outputLeft = destination.member(role: .left),
+              let outputRight = destination.member(role: .right) else { return nil }
+
+        if source.axes.count == 1,
+           let input = source.axes.first,
+           input.axis.channelRole == .mono {
+            let presentations = [
+                matrix.crosspointPresentation(output: outputLeft.index, input: input.index),
+                matrix.crosspointPresentation(output: outputRight.index, input: input.index),
+            ]
+            if presentations.allSatisfy({ $0 == .monoLevelPan }) { return .monoLevelPan }
+            return presentations.contains(where: { $0 != nil && $0 != .hidden })
+                ? .scalarReadback : nil
+        }
+
+        if let inputLeft = source.member(role: .left),
+           let inputRight = source.member(role: .right) {
+            let diagonal = [
+                matrix.crosspointPresentation(output: outputLeft.index, input: inputLeft.index),
+                matrix.crosspointPresentation(output: outputRight.index, input: inputRight.index),
+            ]
+            if diagonal.allSatisfy({ $0 == .stereoLevelBalance }) {
+                return .stereoLevelBalance
+            }
+            let allCells = destination.axes.flatMap { output in
+                source.axes.map { input in
+                    matrix.crosspointPresentation(output: output.index, input: input.index)
+                }
+            }
+            return allCells.contains(where: { $0 != nil && $0 != .hidden })
+                ? .scalarReadback : nil
+        }
+        return nil
+    }
+}
+
 private struct SaffireMatrixGroup: Identifiable {
     struct Member: Identifiable {
         let index: Int
@@ -256,6 +330,10 @@ private struct SaffireMatrixGroup: Identifiable {
     let id: UInt32
     let axes: [Member]
     let outputRole: AudioSemanticMatrixSnapshot.OutputRole?
+
+    func member(role: AudioSemanticMatrixSnapshot.ChannelRole) -> Member? {
+        axes.first(where: { $0.axis.channelRole == role })
+    }
 
     static func make(from axes: [AudioSemanticMatrixSnapshot.Axis],
                      role: AudioSemanticMatrixSnapshot.OutputRole?) -> [SaffireMatrixGroup] {
@@ -292,7 +370,7 @@ private struct SaffireMatrixGroup: Identifiable {
     }
 }
 
-private struct SaffireMonitorRouteBadge: View {
+private struct SaffireMixerDestinationBadge: View {
     let group: SaffireMatrixGroup
     let controls: SaffireControlSurface?
 
@@ -303,10 +381,13 @@ private struct SaffireMonitorRouteBadge: View {
     }
 
     var body: some View {
-        Label(routesSelectedBus ? "Routed to physical output" : "Not routed to physical output",
-              systemImage: routesSelectedBus ? "arrow.right.circle.fill" : "arrow.right.circle")
+        let isEffectSend = group.outputRole == .effectSend
+        let active = isEffectSend || routesSelectedBus
+        Label(isEffectSend ? "Feeds hardware reverb"
+                           : (active ? "Routed to physical output" : "Not routed to physical output"),
+              systemImage: active ? "arrow.right.circle.fill" : "arrow.right.circle")
             .font(.caption.weight(.semibold))
-            .foregroundStyle(routesSelectedBus ? Color.green : Color.secondary)
+            .foregroundStyle(active ? Color.green : Color.secondary)
     }
 }
 
@@ -321,6 +402,10 @@ private struct SaffireMonitorStrip: View {
     @State private var balanceMilli: Int32
 
     private var tint: Color { SaffireSignalLabel.tint(source.axes[0].axis) }
+    private var presentation: SaffireStripPresentation {
+        SaffireStripPresentation.resolve(matrix: matrix, source: source,
+                                         destination: destination) ?? .scalarReadback
+    }
 
     init(matrix: AudioSemanticMatrixSnapshot, source: SaffireMatrixGroup,
          destination: SaffireMatrixGroup, writeInFlight: Bool,
@@ -336,15 +421,25 @@ private struct SaffireMonitorStrip: View {
     }
 
     var body: some View {
-        AudioConsoleStripShell(title: source.title, tint: tint, width: source.axes.count == 2 ? 156 : 116) {
-            if source.axes.count == 2 && destination.axes.count == 2 {
+        AudioConsoleStripShell(title: source.title, tint: tint,
+                               width: presentation.isWritable ? 156 : 116) {
+            switch presentation {
+            case .monoLevelPan:
+                monoControl
+            case .stereoLevelBalance:
                 stereoControl
-            } else {
+            case .scalarReadback:
                 monoReadback
             }
         }
+        .onChange(of: sourceCoefficientSignature) { _, _ in
+            guard !writeInFlight else { return }
+            let projected = Self.project(matrix: matrix, source: source, destination: destination)
+            levelMilliDb = projected.levelMilliDb
+            balanceMilli = projected.balanceMilli
+        }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(source.title) readback")
+        .accessibilityLabel("\(source.title) mixer control")
     }
 
     private var monoReadback: some View {
@@ -434,11 +529,44 @@ private struct SaffireMonitorStrip: View {
                     .foregroundStyle(tint)
             }
         }
-        .onChange(of: sourceCoefficientSignature) { _, _ in
-            guard !writeInFlight else { return }
-            let projected = Self.project(matrix: matrix, source: source, destination: destination)
-            levelMilliDb = projected.levelMilliDb
-            balanceMilli = projected.balanceMilli
+    }
+
+    private var monoControl: some View {
+        AudioConsoleStripSlots(controlHeight: 45, faderHeight: 190) {
+            VStack(spacing: 3) {
+                Text("MONO SOURCE")
+                    .font(.caption2.monospaced().bold())
+                    .foregroundStyle(.secondary)
+                Text("PAN + LEVEL")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(tint)
+            }
+        } faderBlock: {
+            VStack(spacing: 6) {
+                AudioTopologyKnob(
+                    value: (Double(balanceMilli) + 1000) / 2000,
+                    tint: tint,
+                    caption: balanceLabel,
+                    isBipolar: true,
+                    onCommitted: { _ in onCommit(levelMilliDb, balanceMilli) },
+                    onChanged: { balanceMilli = Self.detented(-1000 + $0 * 2000) }
+                )
+                .disabled(writeInFlight)
+                .accessibilityLabel("\(source.title) pan")
+
+                AudioConsoleVerticalFader(
+                    title: "\(source.title) level",
+                    value: Double(levelMilliDb), range: -85_000...6_000, step: 100,
+                    tint: tint, trackWidth: 6, thumbSize: CGSize(width: 28, height: 14),
+                    fillsTrack: true, isEnabled: !writeInFlight,
+                    valueDescription: { String(format: "%+.1f dB", $0 / 1000) },
+                    onValueChanged: { levelMilliDb = Int32($0.rounded()) },
+                    onValueCommitted: { onCommit(Int32($0.rounded()), balanceMilli) })
+                    .frame(height: 126)
+                Text(String(format: "%+.1f dB", Double(levelMilliDb) / 1000))
+                    .font(.caption2.monospaced().bold())
+                    .foregroundStyle(tint)
+            }
         }
     }
 
@@ -447,9 +575,19 @@ private struct SaffireMonitorStrip: View {
     }
 
     private var sourceCoefficientSignature: UInt32 {
-        guard source.axes.count == 2, destination.axes.count == 2 else { return 0 }
-        return UInt32(coefficient(output: destination.axes[0].index, input: source.axes[0].index)) << 16 |
-               UInt32(coefficient(output: destination.axes[1].index, input: source.axes[1].index))
+        guard let outputLeft = destination.member(role: .left),
+              let outputRight = destination.member(role: .right) else { return 0 }
+        switch presentation {
+        case .monoLevelPan, .scalarReadback:
+            guard let input = source.axes.first else { return 0 }
+            return UInt32(coefficient(output: outputLeft.index, input: input.index)) << 16 |
+                   UInt32(coefficient(output: outputRight.index, input: input.index))
+        case .stereoLevelBalance:
+            guard let inputLeft = source.member(role: .left),
+                  let inputRight = source.member(role: .right) else { return 0 }
+            return UInt32(coefficient(output: outputLeft.index, input: inputLeft.index)) << 16 |
+                   UInt32(coefficient(output: outputRight.index, input: inputRight.index))
+        }
     }
 
     /// "R 0%" is a contradiction: it reads as off-centre while stating it is
@@ -474,9 +612,32 @@ private struct SaffireMonitorStrip: View {
 
     private static func project(matrix: AudioSemanticMatrixSnapshot, source: SaffireMatrixGroup,
                                 destination: SaffireMatrixGroup) -> (levelMilliDb: Int32, balanceMilli: Int32) {
-        guard source.axes.count == 2, destination.axes.count == 2,
-              let left = matrix.coefficient(output: destination.axes[0].index, input: source.axes[0].index),
-              let right = matrix.coefficient(output: destination.axes[1].index, input: source.axes[1].index) else {
+        guard let outputLeft = destination.member(role: .left),
+              let outputRight = destination.member(role: .right),
+              let presentation = SaffireStripPresentation.resolve(
+                matrix: matrix, source: source, destination: destination) else {
+            return (-85_000, 0)
+        }
+
+        if presentation == .monoLevelPan,
+           let input = source.axes.first,
+           let left = matrix.coefficient(output: outputLeft.index, input: input.index),
+           let right = matrix.coefficient(output: outputRight.index, input: input.index) {
+            let leftAmplitude = Double(left) / 16384
+            let rightAmplitude = Double(right) / 16384
+            let levelAmplitude = hypot(leftAmplitude, rightAmplitude)
+            guard levelAmplitude > 0 else { return (-85_000, 0) }
+            let levelDb = 20 * log10(levelAmplitude)
+            let position = atan2(rightAmplitude, leftAmplitude) / (.pi / 2)
+            return (Int32(max(-85_000, min(6_000, (levelDb * 1000).rounded()))),
+                    Int32((-1000 + 2000 * position).rounded()))
+        }
+
+        guard presentation == .stereoLevelBalance,
+              let inputLeft = source.member(role: .left),
+              let inputRight = source.member(role: .right),
+              let left = matrix.coefficient(output: outputLeft.index, input: inputLeft.index),
+              let right = matrix.coefficient(output: outputRight.index, input: inputRight.index) else {
             return (-85_000, 0)
         }
         let leftDb = coefficientDb(left)

@@ -28,9 +28,10 @@ and `Saffire.kext`.  Vendor binary analysis supplied the parts ALSA does not
 model: natural DSP parameters, stereo-link behaviour, monitor presets,
 headphone mirroring, InSitu/VRM choreography, and meter cadence.
 
-ASFW currently has a working DICE stream bring-up and readback-oriented SPro
-surface.  This document describes what is safe to expose next; it is not a
-claim that every described control is already writable.
+ASFW currently has working DICE stream bring-up, a router-bound SPro mixer
+projection, and bounded grouped writes for verified mono and stereo strips. This
+document describes what is safe to expose next; it is not a claim that every
+described control is already writable.
 
 ### 1.1 Capture limits: absence from a trace is not absence on the wire
 
@@ -140,6 +141,83 @@ MixControl can present selected mixer outputs as monitor pairs (`MIX 1/2`,
 adjacent pair is one current MixControl bus, or publish its mono/stereo and pan
 state. Do not infer this grouping from row adjacency. **[derived]**
 
+### 2.2 Generic TCAT router/mixer topology boundary
+
+The TCAT mixer section is an **anonymous scalar coefficient matrix**. It has no
+channel names, physical-output assignment, stereo grouping, pan law, or product
+meaning. Those facts cannot be reconstructed from the coefficient image alone.
+The active router supplies the protocol-level identity and reachability:
+
+- a route whose destination is `MixerTx0:n` binds source identity to mixer
+  input `n` (`0...15`);
+- a route whose destination is `MixerTx1:n` binds source identity to mixer
+  input `16 + n` (`16...17` on TCD22xx);
+- a route whose source is `Mixer:n` proves that mixer output row `n` currently
+  reaches at least one router destination;
+- a mixer row with no active router consumer is computed storage, not an
+  active hardware bus, and must not become a UI tab merely because it exists.
+
+This join is generic TCAT/TCD22xx behaviour, not Focusrite behaviour. It was
+cross-checked independently against the local ALSA control reference:
+
+- `tcat/extension/router_entry.rs`: `MixerTx0`, `MixerTx1`, and `Mixer` block
+  identifiers;
+- `tcat/tcd22xx_spec.rs`: sixteen `MixerTx0` inputs plus two `MixerTx1` inputs;
+- `tcat/extension/mixer_section.rs`: fixed 16×18 row-major window and plain
+  per-quadlet coefficient writes.
+
+ASFW implements the join in
+`ASFWDriver/Audio/Protocols/DICE/Core/DICERouterMixerTopology.{hpp,cpp}`. The
+generic result deliberately contains only:
+
+```text
+inputCount / outputCount
+input[i] = { routed, complete active-router entry }
+outputRouteCounts[row] = number of active consumers of Mixer:row
+```
+
+It contains no SPro labels or stereo assumptions. Invalid geometry fails
+closed, and two routes targeting the same mixer input also fail closed because
+they make that input's source identity ambiguous. **[implemented]**
+
+```mermaid
+flowchart LR
+    RI[Active router entries] --> J[Generic TCAT join]
+    MC[Anonymous 16 × 18 coefficients] --> J
+    J --> IB[Input source bindings]
+    J --> OR[Reachable mixer output rows]
+    IB --> P[SPro product profile]
+    OR --> P
+    P --> S[Named semantic buses and strips]
+    S --> UI[Swift console]
+```
+
+For the captured SPro24DSP router image, this boundary produces exactly four
+published scalar rows after the product profile is applied:
+
+| raw mixer row | active SPro role | semantic presentation |
+|---:|---|---|
+| 0 | consumed monitor output | `MIX 1/2` left |
+| 1 | consumed monitor output | `MIX 1/2` right |
+| 8 | consumed reverb input | `REVERB SEND` left |
+| 9 | consumed reverb input | `REVERB SEND` right |
+| 2–7, 10–15 | no active router consumer | unpublished |
+
+The product profile in `SPro24DspSemanticMatrix.cpp` assigns rows 0–7 the
+potential role `MonitorMix`, rows 8–9 `EffectSend`, and rows 10–15 no SPro
+role; the generic reachability test then removes inactive rows. Thus this
+particular state publishes 0/1 and 8/9 without claiming that every TCAT device
+uses those meanings. **[measured, implemented]**
+
+**Native row identity must survive semantic compaction.** A dense semantic
+snapshot numbers the four published rows `0...3`, but semantic rows 2/3 still
+refer to native hardware rows 8/9. Stable output port IDs encode the native row,
+and every grouped write resolves that port ID back to the raw output before
+touching a coefficient. Using the compact semantic index as a hardware index
+would silently redirect a reverb-send write to inactive rows 2/3. A regression
+test fixes this boundary by asserting that compact semantic row 2 reads the
+fixture's raw row-8 coefficient. **[implemented]**
+
 ## 3. Mixer semantics: why a mono strip is not two faders
 
 The DICE mixer owns two physical coefficients per source and selected stereo
@@ -221,29 +299,35 @@ Two things remain **[unverified]**: that the DSP *applies* gain above unity
 rather than saturating — storing a coefficient is not applying it — and what the
 summing bus does when several channels sum past full scale.
 
-### 3.1 The matrix is eight stereo mixes, and pan is per-mix
+### 3.1 The matrix has sixteen scalar rows; the SPro profile establishes pairs
 
-The 18 × 16 matrix is better read as **stereo mixes of eighteen sources**: rows
-pair up, and within one mix a source's two cells are its *level and pan in that
-mix*. The router then decides what each pair drives.
+At the generic TCAT layer the 18 × 16 matrix is only sixteen scalar output rows
+over eighteen scalar inputs. Pairing adjacent rows into a level/pan or
+level/balance object is a product convention and must not be inferred from the
+matrix geometry. The SPro vendor signal table and measured router state establish
+the relevant pairings for this device; the router then decides what each pair
+currently drives.
 
-Sixteen rows form eight pairs, but the vendor signal table (§5.0) exposes only
-`Mixer:0`…`9` as router sources — **four monitor pairs plus one reverb-send
-pair**. Rows 10–15 are computed and stored but can reach no destination, which
-is why they read as permanently zero and why the console's `MIX 11/12` onward
-address nothing. **[derived]**
+The SPro signal table exposes only `Mixer:0`…`9` as possible router sources —
+**four monitor pairs plus one reverb-send pair**. Rows 10–15 are computed and
+stored but have no SPro product destination. The active router is narrower
+still: it currently consumes only rows 0/1 and 8/9, so rows 2–7 and 10–15 are
+not published by the semantic snapshot. See §2.2. **[derived, measured]**
 
-On this unit only two of the eight are in use: **rows 0/1 (`MIX 1/2`)** feed every
-analog output and S/PDIF out, and **rows 8/9 (`MIX 9/10`)** feed the reverb input
-via `Ins0:14/15`. Rows 2–7 and 10–15 are entirely zero. **[measured]**
+On this unit only two of the five SPro-defined pairs are active: **rows 0/1
+(`MIX 1/2`)** feed every analog output and S/PDIF out, and **rows 8/9** feed the
+reverb input via `Ins0:14/15`. Rows 2–7 and 10–15 are entirely zero.
+**[measured]**
 
-That reframes the reverb send: it is not a special effect bus, it is monitor mix
-9/10 that the *router* happens to point at the reverb. Its per-source levels and
-pans work exactly like mix 1/2's.
+At the TCAT protocol layer the reverb send is not a special coefficient type:
+it uses the same scalar mixer rows as a monitor pair. At the SPro product layer
+it is nevertheless a dedicated **effect-send bus**, because the router consumes
+rows 8/9 exclusively as the reverb input. Its per-source level/pan mechanics are
+the same as rows 0/1, while its UI role is deliberately separate.
 
 **A source is therefore panned independently in every mix.** Centring one mix
-does not centre another, and that is not a quirk — it is what eight independent
-mixes means.
+does not centre another, and that is not a quirk — each SPro output pair owns
+independent coefficients.
 
 Measured 2026-08-27: centring physical `INPUT 1` took **two writes in two
 different mixes**, and the first alone was audibly incomplete —
@@ -277,10 +361,10 @@ The console's mix selector already chooses the scope. **[derived]**
 
 `AudioSemanticMatrixAxis` publishes stable presentation group and channel role
 metadata, so source channels are identified as mono or as a verified stereo
-member. Verified stereo pairs are now **writable** as one level-plus-balance
-gesture (§3, *Safe mixer write transaction*); mono and unresolved groups remain
-read-only readback, because a mono strip still needs its pan law and the monitor
-bus still needs its grouping and link state captured.
+member. A parallel, driver-owned crosspoint presentation map classifies every
+active cell as hidden, scalar readback, mono level+pan, or stereo
+level+balance. Swift renders and enables controls from this declaration; it
+does not infer product semantics from source count or matrix adjacency.
 
 Pairing is never inferred from row adjacency. A source is paired only when its
 signal kind establishes it — host stream, S/PDIF, or the reverb return at
@@ -311,23 +395,27 @@ owns will be right often enough to look correct.** The mono strip now renders
 both buses, which also makes the hard-panned structure legible without an
 external read — the L/R pair *is* the pan position.
 
-The next matrix revision needs the remaining presentation metadata, not
-SPro-specific SwiftUI guesses:
+Matrix ABI v5 carries the product presentation metadata which was previously
+missing:
 
 | field | purpose |
 |---|---|
 | `groupId` | stable stereo/group identity |
 | `channelRole` | mono, left, or right |
-| `presentation` | mono-pan, stereo-balance, or independent |
-| `linkCapable` / `linked` | whether paired mutation is supported/current |
-| `panCapable` | permits a pan/balance projection |
+| `crosspointPresentation` | hidden, scalar readback, mono-pan, or stereo-balance |
 
-Default console projection:
+Current console projection:
 
-- Mono sources: both bus coefficients as read-only L/R until the pan law is
-  captured, then one level fader + pan. Never a single-cell readout. The pan
-  applies to the selected mix only — see §3.1.
-- Stereo pairs: one linked fader + balance, after link state is read/writable.
+- Mono sources: one level fader + pan when both destination cells are declared
+  `MonoLevelPan`; otherwise both bus coefficients remain read-only. The write
+  uses an explicitly ASFW-defined equal-power curve: centre is approximately
+  −3.0103 dB per side and hard endpoints write an exact zero. This is a safe,
+  documented project policy, **not a claim that the unrecovered vendor mono
+  curve is identical**. The pan applies to the selected mix only — see §3.1.
+- Stereo pairs: one linked fader + balance when both diagonal cells are
+  declared `StereoLevelBalance`.
+- Reverb return: valid in monitor buses, but hidden from the reverb-send bus so
+  the console cannot create an accidental hardware self-feedback loop.
 - Raw L/R coefficient editing: never exposed as an ordinary console control.
 - Mute is a coefficient macro that must remember pre-mute gains.
 - Solo is a multi-crosspoint policy, not a separately readable hardware bit.
@@ -352,13 +440,16 @@ For a linked pair or a pan change, this remains one semantic transaction even
 though it changes two crosspoints.  Failure must leave the app tied to hardware
 readback, not the requested value.
 
-**Implemented for verified stereo pairs (2026-08-27).** The driver re-reads the
+**Implemented for verified mono and stereo strips (2026-08-27).** The driver re-reads the
 active router alongside the coefficient image before resolving a group, so an
 external route change cannot turn a stale group ID into a write against a
 different source row. It then issues the two native writes and confirms them by
 exact readback. Captured on the wire, one gesture is exactly two `Qwrite`s and
 one readback — no router load, no software notice, and no traffic during the
-drag itself. Hard-pan stops write a true `0x0000` on the muted side. **[measured]**
+drag itself. A stereo strip addresses its real left/right source cells; a mono
+strip addresses one source cell against both destination rows. Hard-pan stops
+write a true `0x0000` on the muted side. The transaction shape and stereo law
+are **[measured]**; the mono equal-power law is **[implemented policy]**.
 
 ## 4. Routing and headphone semantics
 
@@ -482,10 +573,10 @@ vendor names them that way outright.
 **Only ten of the sixteen mixer rows are routable.** The table exposes
 `Mixer:0`…`9` as router sources and nothing above. Rows 10–15 are computed by
 the mixer and carried in the coefficient image, but no router source reaches
-them, which is why they read as permanently zero. §3.1's "eight stereo mixes"
-overstates it: there are **four monitor pairs plus one reverb-send pair**, and
-the console's `MIX 11/12`…`MIX 15/16` tabs address rows that cannot reach any
-destination.
+them, which is why they read as permanently zero. The earlier "eight stereo
+mixes" interpretation overstates it: there are **four monitor pairs plus one
+reverb-send pair**, and the console's former `MIX 11/12`…`MIX 15/16` tabs
+addressed rows that cannot reach any destination.
 
 **The DSP returns move router channel with rate.** `FX(Anlg 1/2)` is `Ins0:8/9`
 at low rate but `Ins0:4/5` at mid; `FmRvb 0/1` is `Ins0:14/15` then `Ins0:6/7`.
@@ -809,7 +900,9 @@ ASFW meter policy:
 |---|---|---|
 | DICE streaming / stopped choreography | working on tested hardware | retain regression tests |
 | Input and output controls | bounded write + readback exists | display output values as dB attenuation; add monitor assignment semantics |
-| Semantic mixer snapshot | verified source grouping; grouped stereo level+balance writes working on hardware, including the reverb **return** pair (mixer inputs 17/18); mono strips render both bus cells | capture the mono pan law — see below — then add the mono level+pan transaction |
+| Semantic mixer snapshot | matrix ABI v5 publishes per-cell presentation; grouped stereo level+balance and ASFW-defined mono level+pan writes use exact two-cell readback and are hardware-confirmed; reverb return is excluded from reverb send | retain the policy unless measured vendor-law evidence justifies replacing it |
+| Generic TCAT router/mixer join | input identity and output reachability come from the active router; inactive rows are omitted; native raw row survives semantic compaction | reuse for other TCD22xx profiles; keep product labels and pairing out of the generic layer |
+| SPro mixer buses | active state publishes monitor rows 0/1 and reverb-send rows 8/9 as separate UI sections | hardware-check both grouped write paths after each topology change |
 | Patchbay | read-only active assignments | implement router-image transaction |
 | DSP control surface | readback published | add ordinary DSP transactions only after RMW/fragment path replaces legacy setters |
 | VRM | status only | defer until full bank transition is designed |
@@ -821,6 +914,33 @@ input and output IDs.  DSP controls must not be made writable by merely
 whitelisting their IDs: they need their distinct state/fragment/notice/readback
 transaction family.
 
+### 9.1 Router/mixer topology regression coverage
+
+The 2026-08-27 generic-boundary pass added regression coverage for:
+
+- `MixerTx0` and `MixerTx1` destination-to-input index mapping;
+- active `Mixer:n` output fan-out counts;
+- fail-closed duplicate routes to one mixer input;
+- captured SPro router projection producing exactly four semantic rows;
+- SPro role assignment: raw 0/1 monitor, raw 8/9 effect send;
+- preservation of native raw row 8 through dense semantic compaction;
+- grouped stereo and mono resolution through opaque stable port IDs;
+- reverb-return self-send suppression through product-owned cell presentation;
+- constant-power mono centre/endpoints and exact two-write readback.
+
+Validation commands and result at the end of that pass:
+
+```text
+./build.sh --no-bump          production Xcode build passed
+./build.sh --swift-test-only  Swift suite passed
+./build.sh --test-only        1,826 C++ tests passed; 6 known fixture skips
+git diff --check              passed
+```
+
+These tests use captured/synthetic images and do not replace the final hardware
+check. They prevent the structural regressions that previously created eight
+fake mix selectors and redirected compact rows 2/3 to the wrong hardware cells.
+
 ## 10. Console layout
 
 The SPro UI should use the same single-page, horizontally scrolling console
@@ -829,8 +949,9 @@ language as the M-Audio console—not MixControl's old tabs.
 ```text
 ┌ Hardware configuration / clock / optical / stream status ────────────────┐
 ├ Physical inputs ────────────────┬ Physical outputs / monitor assignment ─┤
-├ Monitor mixer (readback boundary until grouped semantics are verified) ───┤
+├ Monitor mixer: router-reachable monitor buses; grouped stereo controls ───┤
 │ [mono level+pan strips] [stereo level+balance strips] … horizontal scroll │
+├ Reverb send: separate router-reachable effect bus, never another monitor ─┤
 ├ DSP: channel strip 1 | channel strip 2 | reverb | VRM status ────────────┤
 ├ Patchbay: source → destination routes, headphone mirror macro ───────────┤
 └ Telemetry: opt-in metering, rate, DSP/state status ──────────────────────┘
@@ -842,13 +963,16 @@ are shared; routing and mixer state are not.
 
 ## 11. Implementation order
 
-1. ~~Capture channel role/presentation and grouping for stereo pairs.~~ **Done**
-   — presentation group and channel role ship in the matrix. Monitor-bus link
-   state and the **mono pan law** are still uncaptured; do not project raw
-   scalar rows into mono strips before then.
-2. ~~Implement bounded grouped level/balance writes with readback.~~ **Done**
-   for verified stereo pairs and hardware-confirmed. Still outstanding: mono
-   level+pan, and linked stereo semantic mutations.
+1. ~~Capture channel role/presentation and grouping for mono and stereo strips.~~ **Done**
+   — presentation group and channel role ship in the matrix. The generic TCAT
+   join now supplies router-bound input identity and output reachability; the
+   SPro profile publishes monitor 0/1 and reverb-send 8/9 separately, and matrix
+   ABI v5 declares the usable presentation of every active crosspoint. The
+   exact vendor mono pan curve remains uncaptured; ASFW intentionally declares
+   and tests its own constant-power policy instead of pretending otherwise.
+2. ~~Implement bounded grouped level/pan-or-balance writes with readback.~~
+   **Done** for driver-verified mono and stereo strips and hardware-confirmed.
+   Linked/unlinked stereo state remains a later semantic mutation.
 3. Replace sparse whole-block DSP setters with active-rate, fragment-based
    RMW transactions.  Implement channel-strip stereo link, EQ/compressor
    enable/order, natural compressor parameters, natural reverb parameters,
@@ -886,7 +1010,11 @@ stereo link, monitor macro semantics, or full VRM transition.
 
 ## 13. Hardware validation checklist
 
-- Confirm mono source level/pan produces the expected left/right Q2.14 pair.
+- [x] Confirm mono source level/pan produces the expected left/right Q2.14
+  pair. Confirmed on hardware 2026-08-27 together with volume and reverb
+  send/return. Recording while monitoring the reverb produced a clean capture,
+  proving these controls alter the hardware monitor path rather than the
+  FireWire capture path.
 - Confirm linked stereo change mirrors the companion DSP and mixer state.
 - Exercise each DSP control at 44.1, 48, 88.2 and 96 kHz; verify the active
   bank, notice, readback and audible result.

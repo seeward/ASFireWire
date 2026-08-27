@@ -302,10 +302,10 @@ final class ASFWDriverConnector: ObservableObject {
         }
     }
 
-    /// Applies one verified SPro stereo-strip gesture. Group IDs come only
-    /// from the current semantic matrix; level and balance remain semantic
-    /// units, so the app never derives DICE rows or Q2.14 coefficients.
-    func submitAudioSemanticMatrixStereoStrip(
+    /// Applies one driver-verified grouped strip gesture. Group IDs and the
+    /// mono-pan/stereo-balance presentation come only from the current matrix,
+    /// so the app never derives DICE rows or Q2.14 coefficients.
+    func submitAudioSemanticMatrixGroupedStrip(
         endpointID: AudioEndpointID,
         outputPresentationGroupID: UInt32,
         inputPresentationGroupID: UInt32,
