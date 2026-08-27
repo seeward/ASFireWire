@@ -341,13 +341,14 @@ public:
         } else if (address.addressHi == 0xFFFFU && address.addressLo == kCurrentConfigSectionBaseLo &&
                    length == sizeof(uint32_t)) {
             ++currentConfigRouterHeaderReadCount;
-            PutBe32(payload.data(), 48U);
+            PutBe32(payload.data(), static_cast<uint32_t>(
+                currentConfigRouterEntries_.size() / ASFW::Audio::DICE::DiceRouterEntry::kWireSize));
         } else if (address.addressHi == 0xFFFFU &&
                    address.addressLo == kCurrentConfigSectionBaseLo + sizeof(uint32_t) &&
                    length == 48U * ASFW::Audio::DICE::DiceRouterEntry::kWireSize) {
             ++currentConfigRouterEntriesReadCount;
-            auto wire = CapturedSPro24CurrentConfigRouterWire();
-            payload.assign(wire.begin() + sizeof(uint32_t), wire.end());
+            payload.assign(currentConfigRouterEntries_.begin(),
+                           currentConfigRouterEntries_.end());
         } else if (address.addressHi == 0xFFFFU &&
                    address.addressLo >=
                        kCurrentConfigSectionBaseLo +
@@ -415,6 +416,12 @@ public:
         if (address.addressHi == 0xFFFFU) {
             writeAddresses.push_back(address.addressLo);
         }
+        if (address.addressHi == 0xFFFFU && address.addressLo == kRouterSectionBaseLo &&
+            data.size() >= sizeof(uint32_t)) {
+            // The device's staging router section: a leading entry count then
+            // the entries. Held until a LoadRouter command promotes it.
+            stagedRouterWire_.assign(data.begin(), data.end());
+        }
         if (address.addressHi == 0xFFFFU &&
             address.addressLo >= kMixerSectionBaseLo + sizeof(uint32_t) &&
             address.addressLo < kMixerSectionBaseLo + sizeof(uint32_t) +
@@ -454,6 +461,17 @@ public:
             data.size() == sizeof(uint32_t)) {
             ++commandWriteCount;
             commandOpcodeWritten_ = ASFW::FW::ReadBE32(data.data());
+            // LoadRouter promotes the staged image into the active
+            // CURRENT_CONFIG copy. Modelling this is what makes a
+            // verify-by-readback testable at all: without it the active image
+            // never changes and every router commit would look like a failure.
+            if ((commandOpcodeWritten_ & 0xFFFFU) ==
+                    ASFW::Audio::DICE::ExtensionCommandOpcode::kLoadRouter &&
+                stagedRouterWire_.size() > sizeof(uint32_t) && applyRouterLoad_) {
+                currentConfigRouterEntries_.assign(
+                    stagedRouterWire_.begin() + sizeof(uint32_t), stagedRouterWire_.end());
+                ++routerLoadCount;
+            }
             // The synchronous host fake models a command which has completed
             // by the first poll: hardware clears only the execute bit.
             commandOpcodeReadback_ =
@@ -552,6 +570,14 @@ public:
         uint32_t value{0};
     };
     std::vector<MixerCoefficientWrite> mixerCoefficientWrites;
+    std::vector<uint8_t> stagedRouterWire_;
+    std::vector<uint8_t> currentConfigRouterEntries_ = [] {
+        auto wire = CapturedSPro24CurrentConfigRouterWire();
+        return std::vector<uint8_t>(wire.begin() + sizeof(uint32_t), wire.end());
+    }();
+    size_t routerLoadCount{0};
+    /// Cleared to model a device that accepts the command but does not apply it.
+    bool applyRouterLoad_{true};
     std::array<uint8_t, 0x600> application_{};
     bool coldStreamImageRequiresClockReselect_{false};
     uint32_t coldReportedStreamCount_{0};
@@ -1273,6 +1299,107 @@ TEST(SPro24DspProtocolTests, SemanticMatrixSuppressionRefusesAnUnknownStrip) {
     ASSERT_TRUE(completion.has_value());
     EXPECT_EQ(*completion, kIOReturnBadArgument);
     EXPECT_EQ(bus.mixerCoefficientWrites.size(), writesBefore);
+}
+
+// A router commit rebuilds the image from the active copy, writes it whole,
+// issues LoadRouter, and only believes the result after re-reading the active
+// image. The command's return code says the load was accepted, not that the
+// routing is what was asked for.
+TEST(SPro24DspProtocolTests, RouterSourceChangeWritesTheImageAndVerifiesTheActiveCopy) {
+    CountingFireWireBus bus;
+    RouteState routeState;
+    SPro24DspProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
+    ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+
+    ASFW::Audio::AudioSemanticMatrixSnapshot before{};
+    ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(before));
+    const size_t loadsBefore = bus.routerLoadCount;
+
+    // Entry 16 drives Ins0:2 (Line out 3). In this 2026-08-24 capture it is
+    // stream-fed from Avs0:0; point it at Mixer:8 instead. (A later capture of
+    // the same unit has it mixer-fed -- whether an output is mixer- or
+    // stream-fed is a property of the active image, not of the device.)
+    std::optional<IOReturn> completion;
+    protocol.ApplyRouterSourceChange(4, 2, 2, 8,
+                                     [&](IOReturn status) { completion = status; });
+    ASSERT_TRUE(completion.has_value());
+    ASSERT_EQ(*completion, kIOReturnSuccess);
+    EXPECT_EQ(bus.routerLoadCount, loadsBefore + 1U);
+
+    // The opcode must be the router-only load: the combined one would replace
+    // the stream image too.
+    EXPECT_EQ(bus.commandOpcodeWritten_ & 0xFFFFU,
+              ASFW::Audio::DICE::ExtensionCommandOpcode::kLoadRouter);
+
+    // The staged image keeps its length and its reserved leading entries.
+    ASSERT_GT(bus.stagedRouterWire_.size(), sizeof(uint32_t));
+    EXPECT_EQ(ASFW::FW::ReadBE32(bus.stagedRouterWire_.data()), 48U);
+    EXPECT_EQ(ASFW::FW::ReadBE32(bus.stagedRouterWire_.data() + 4), 0x00004248U);
+    EXPECT_EQ(ASFW::FW::ReadBE32(bus.stagedRouterWire_.data() + 8), 0x00004349U);
+    // Entry 16 now sources Mixer:8 (source byte 0x28) into Ins0:2 (dest 0x42).
+    EXPECT_EQ(ASFW::FW::ReadBE32(bus.stagedRouterWire_.data() + 4 + 16 * 4), 0x00002842U);
+}
+
+// The device may accept the command and leave the active image alone. Publishing
+// the requested routing then would be a lie, so the commit fails instead.
+TEST(SPro24DspProtocolTests, RouterSourceChangeFailsWhenTheActiveImageDoesNotChange) {
+    CountingFireWireBus bus;
+    bus.applyRouterLoad_ = false;
+    RouteState routeState;
+    SPro24DspProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
+    ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+
+    std::optional<IOReturn> completion;
+    protocol.ApplyRouterSourceChange(4, 2, 2, 8,
+                                     [&](IOReturn status) { completion = status; });
+    ASSERT_TRUE(completion.has_value());
+    EXPECT_EQ(*completion, kIOReturnError);
+}
+
+TEST(SPro24DspProtocolTests, RouterSourceChangeRefusesReservedAndUnknownDestinations) {
+    CountingFireWireBus bus;
+    RouteState routeState;
+    SPro24DspProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
+    ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+    const size_t loadsBefore = bus.routerLoadCount;
+
+    // Entry 0 is a physical-input meter source; the peak section is indexed by
+    // entry position, so retargeting it would move what a meter reads.
+    std::optional<IOReturn> completion;
+    protocol.ApplyRouterSourceChange(4, 8, 2, 0,
+                                     [&](IOReturn status) { completion = status; });
+    ASSERT_TRUE(completion.has_value());
+    EXPECT_EQ(*completion, kIOReturnBadArgument);
+
+    // Creating a route would shift every later entry's position.
+    completion.reset();
+    protocol.ApplyRouterSourceChange(1, 5, 2, 0,
+                                     [&](IOReturn status) { completion = status; });
+    ASSERT_TRUE(completion.has_value());
+    EXPECT_EQ(*completion, kIOReturnBadArgument);
+
+    // Neither reached the device.
+    EXPECT_EQ(bus.routerLoadCount, loadsBefore);
+}
+
+// Re-issuing the routing a destination already has costs no bus traffic: no
+// image write and no load command.
+TEST(SPro24DspProtocolTests, RouterSourceChangeIsANoOpWhenAlreadyRouted) {
+    CountingFireWireBus bus;
+    RouteState routeState;
+    SPro24DspProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
+    ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+    const size_t loadsBefore = bus.routerLoadCount;
+    bus.stagedRouterWire_.clear();
+
+    // Ins0:2 already reads from Avs0:0 in this captured image.
+    std::optional<IOReturn> completion;
+    protocol.ApplyRouterSourceChange(4, 2, 11, 0,
+                                     [&](IOReturn status) { completion = status; });
+    ASSERT_TRUE(completion.has_value());
+    EXPECT_EQ(*completion, kIOReturnSuccess);
+    EXPECT_EQ(bus.routerLoadCount, loadsBefore);
+    EXPECT_TRUE(bus.stagedRouterWire_.empty());
 }
 
 TEST(SPro24DspProtocolTests, StoppedPrepareCommandFailsClosedWithoutConfigNotification) {

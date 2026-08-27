@@ -596,6 +596,12 @@ re-issuing `LoadRouter` always remains possible. The captured 48-entry image is
 committed as `tests/devices/SPro24RouterImageFixture.hpp` -- it is both the
 recovery baseline and the realistic input the image tests run against.
 
+**The commit is implemented** in `SPro24DspProtocol::ApplyRouterSourceChange`.
+The command's return code is treated as "accepted", not as "applied": the active
+CURRENT_CONFIG image is re-read and compared against the intended one before any
+new routing is published, because a device that accepts the command and leaves
+its routing alone would otherwise have us publish a lie. **[implemented]**
+
 **Still unverified:** whether a router load while streaming causes a dropout.
 The vendor kext uses a device notification as the completion edge for the
 *stream* load; whether the router-only load needs that or the poll suffices has
@@ -1065,7 +1071,7 @@ ASFW meter policy:
 | SPro mixer buses | active state publishes monitor rows 0/1 and reverb-send rows 8/9 as separate UI sections | hardware-check both grouped write paths after each topology change |
 | Mixer mute / solo | driver-owned policy over remembered nominal levels; solo writes the whole bus and confirms every cell; stale records dropped when hardware contradicts them; **exact restore verified on hardware by coefficient readback**, including fader-moved-while-muted and a 288-cell bit-identical un-solo | consider a bus-wide "clear all solos" gesture; PFL needs a spare routed bus (section 4) |
 | SPro input signal identity | all 41 vendor table entries transcribed with per-rate router coordinates; kind, index and stereo pairing resolved against the mode the router image was read at | transcribe the output table when the patchbay becomes rate-aware |
-| Patchbay | read-only active assignments; generic router-image build/edit/encode implemented and tested against a captured hardware image (position-preserving, reserved- and meter-entry aware) | write the staging image + `LoadRouter` + poll + verify transaction, first with audio stopped (see 4.1) |
+| Patchbay | generic router-image build/edit/encode plus the full commit transaction: rebuild from the active copy, write the staging image, `LoadRouter` (router-only opcode), poll, and re-read the active image to verify before publishing. An unchanged request costs no bus traffic. Fixture-tested only | **exercise on hardware with audio stopped**, then check whether a load mid-stream drops audio; then the semantic patchbay surface and UI |
 | DSP control surface | readback published | add ordinary DSP transactions only after RMW/fragment path replaces legacy setters |
 | VRM | status only | defer until full bank transition is designed |
 | Meters | not published as compact telemetry | add opt-in 50 Hz frames |

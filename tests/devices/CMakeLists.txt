@@ -66,6 +66,7 @@ add_device_test(DICERouterImageTests
 add_device_test(DICETcatProtocolTests
     DICETcatProtocolTests.cpp
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICETransaction.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICERouterImage.cpp"
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICEExtensionState.cpp"
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICERouterMixerTopology.cpp"
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICEDuplexBringupController.cpp"

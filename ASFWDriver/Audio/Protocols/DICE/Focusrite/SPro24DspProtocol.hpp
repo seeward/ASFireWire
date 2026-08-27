@@ -11,6 +11,7 @@
 #include "SPro24DspTypes.hpp"
 #include "SPro24DspSemanticMatrix.hpp"
 #include "../Core/DICETypes.hpp"
+#include "../Core/DICERouterImage.hpp"
 #include "../TCAT/DICETcatProtocol.hpp"
 #include "../../IDeviceProtocol.hpp"
 #include "../../../Shared/Topology/IAudioSemanticMatrix.hpp"
@@ -102,6 +103,14 @@ public:
     void ApplyAudioSemanticMatrixStripSuppression(
         const Audio::IAudioSemanticMatrix::StripSuppressionRequest& request,
         Audio::IAudioSemanticMatrix::ApplyCallback callback) override;
+
+    /// Retargets one router destination and commits it with LoadRouter. The
+    /// image is rebuilt from the active CURRENT_CONFIG copy because the staging
+    /// section reads back empty, and the result is confirmed by re-reading the
+    /// active image rather than trusting the command's return code.
+    void ApplyRouterSourceChange(uint8_t destinationBlock, uint8_t destinationChannel,
+                                 uint8_t sourceBlock, uint8_t sourceChannel,
+                                 VoidCallback callback);
     Audio::IAudioControlSurface* AsAudioControlSurface() noexcept override { return this; }
     const Audio::IAudioControlSurface* AsAudioControlSurface() const noexcept override {
         return this;
@@ -217,6 +226,9 @@ private:
     uint32_t semanticMatrixRevision_{0};
     bool semanticMatrixReady_{false};
     bool semanticMatrixWriteInFlight_{false};
+    /// Router commits are serialised separately from mixer writes: they are a
+    /// different transaction family and a much wider one.
+    bool routerWriteInFlight_{false};
     struct SemanticControlState final {
         InputParams input{};
         OutputGroupState output{};
@@ -259,6 +271,14 @@ private:
     void HandleExtensionSectionsRead(IOReturn status,
                                      ExtensionSections sections,
                                      InitCallback callback);
+    void WriteRouterImageAndLoad(
+        const DiceExtensionCaps& caps,
+        const DiceRouterEntries& intended,
+        const std::array<uint8_t, 4U + (size_t{kDiceMaximumRouterEntries} *
+                                        DiceRouterEntry::kWireSize)>& wire,
+        size_t wireBytes,
+        std::function<void(IOReturn, VoidCallback)> finish,
+        VoidCallback callback);
     void PrimeSemanticMatrix() noexcept;
     /// Drops strip records that the current coefficient image contradicts.
     void ReconcileSemanticStripStates() noexcept;
@@ -312,9 +332,11 @@ private:
                                   VoidCallback callback);
     void PrepareStoppedForRate(const AudioClockConfig& clock, VoidCallback callback);
     void LoadRouterStreamConfigForRate(uint32_t rateHz, VoidCallback callback);
-    void PollExtensionCommand(uint64_t epoch, uint32_t attempt, VoidCallback callback);
+    void PollExtensionCommand(uint64_t epoch, uint32_t attempt,
+                              bool awaitStreamConfigNotice, VoidCallback callback);
     void ScheduleExtensionCommandPoll(uint64_t epoch,
                                       uint32_t attempt,
+                                      bool awaitStreamConfigNotice,
                                       VoidCallback callback);
     void WaitForRouterStreamConfigNotice(uint64_t epoch,
                                          uint32_t attempt,

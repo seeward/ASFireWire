@@ -108,6 +108,12 @@ constexpr uint32_t kRouterStreamConfigNoticeMask =
 // projection: the two DSP return pairs then resolve at their 2x channels.
 constexpr DiceRateMode kSemanticRouterRateMode = DiceRateMode::Low;
 
+// Router entries 0-3 carry the physical-input meter sources (Ins0:2, Ins0:3,
+// Ins0:0, Ins0:1), matching the ALSA tcd22xx FIXED specification and confirmed
+// on hardware. The peak section is indexed by entry position, so retargeting
+// one of these would change what a meter reads rather than where audio goes.
+constexpr uint16_t kSPro24ReservedRouterEntries = 4;
+
 [[nodiscard]] constexpr uint32_t ExtensionRateFlag(DiceRateMode mode) noexcept {
     switch (mode) {
     case DiceRateMode::Low: return ExtensionCommandOpcode::kRateLow;
@@ -935,6 +941,175 @@ void SPro24DspProtocol::EnsureExtensionsLoaded(VoidCallback callback) {
         });
 }
 
+void SPro24DspProtocol::ApplyRouterSourceChange(uint8_t destinationBlock,
+                                                uint8_t destinationChannel,
+                                                uint8_t sourceBlock,
+                                                uint8_t sourceChannel,
+                                                VoidCallback callback) {
+    if (!semanticMatrixLock_) {
+        callback(kIOReturnNotReady);
+        return;
+    }
+    IOLockLock(semanticMatrixLock_);
+    const bool ready = !routerWriteInFlight_;
+    if (ready) routerWriteInFlight_ = true;
+    IOLockUnlock(semanticMatrixLock_);
+    if (!ready) {
+        callback(kIOReturnBusy);
+        return;
+    }
+
+    const auto finish = [this](IOReturn status, VoidCallback done) {
+        IOLockLock(semanticMatrixLock_);
+        routerWriteInFlight_ = false;
+        IOLockUnlock(semanticMatrixLock_);
+        done(status);
+    };
+
+    EnsureExtensionsLoaded(
+        [this, destinationBlock, destinationChannel, sourceBlock, sourceChannel, finish,
+         callback = std::move(callback)](IOReturn sectionStatus) mutable {
+            if (sectionStatus != kIOReturnSuccess) {
+                finish(sectionStatus, std::move(callback));
+                return;
+            }
+            tcat_.Transaction().ReadExtensionCaps(
+                extensionSections_,
+                [this, destinationBlock, destinationChannel, sourceBlock, sourceChannel, finish,
+                 callback = std::move(callback)](IOReturn capsStatus,
+                                                 DiceExtensionCaps caps) mutable {
+                    // The device states whether its router may be written at
+                    // all. Refuse rather than discover it by writing.
+                    if (capsStatus != kIOReturnSuccess) {
+                        finish(capsStatus, std::move(callback));
+                        return;
+                    }
+                    if (!caps.router.exposed || caps.router.readOnly) {
+                        finish(kIOReturnUnsupported, std::move(callback));
+                        return;
+                    }
+                    // The staging router section reads back an entry count of
+                    // zero on this device, so the image is rebuilt from the
+                    // active CURRENT_CONFIG copy rather than read-modify-written
+                    // in place.
+                    tcat_.Transaction().ReadCurrentConfigRouterEntries(
+                        extensionSections_, caps, kSemanticRouterRateMode,
+                        [this, caps, destinationBlock, destinationChannel, sourceBlock,
+                         sourceChannel, finish, callback = std::move(callback)](
+                            IOReturn readStatus, DiceRouterEntries active) mutable {
+                            if (readStatus != kIOReturnSuccess) {
+                                finish(readStatus, std::move(callback));
+                                return;
+                            }
+                            auto intended = active;
+                            const auto edited = SetDiceRouterSource(
+                                intended, destinationBlock, destinationChannel,
+                                sourceBlock, sourceChannel, kSPro24ReservedRouterEntries);
+                            if (!edited) {
+                                finish(kIOReturnBadArgument, std::move(callback));
+                                return;
+                            }
+                            if (DiceRouterImagesMatch(intended, active)) {
+                                // Already routed that way: no write, no load.
+                                finish(kIOReturnSuccess, std::move(callback));
+                                return;
+                            }
+
+                            std::array<uint8_t, 4U + (size_t{kDiceMaximumRouterEntries} *
+                                                      DiceRouterEntry::kWireSize)> wire{};
+                            const auto encoded = EncodeDiceRouterImage(
+                                intended, caps.router.maximumEntryCount, wire);
+                            if (!encoded) {
+                                finish(kIOReturnNoSpace, std::move(callback));
+                                return;
+                            }
+                            WriteRouterImageAndLoad(caps, intended, wire, *encoded,
+                                                    finish, std::move(callback));
+                        });
+                });
+        });
+}
+
+void SPro24DspProtocol::WriteRouterImageAndLoad(
+    const DiceExtensionCaps& caps,
+    const DiceRouterEntries& intended,
+    const std::array<uint8_t, 4U + (size_t{kDiceMaximumRouterEntries} *
+                                    DiceRouterEntry::kWireSize)>& wire,
+    size_t wireBytes,
+    std::function<void(IOReturn, VoidCallback)> finish,
+    VoidCallback callback) {
+    CancelExtensionCommandPoll();
+    const uint64_t epoch = extensionCommandEpoch_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    // kLoadRouter, not kLoadRouterStreamConfig: the combined opcode replaces the
+    // stream image too, which a patchbay edit must not disturb.
+    const uint32_t opcode = ExtensionCommandOpcode::kExecute |
+                            ExtensionRateFlag(kSemanticRouterRateMode) |
+                            ExtensionCommandOpcode::kLoadRouter;
+
+    (void)tcat_.IO().WriteBlock(
+        MakeDICEAddress(routerSectionBase_),
+        std::span<const uint8_t>(wire.data(), wireBytes),
+        [this, caps, intended, epoch, opcode, finish, callback = std::move(callback)](
+            Async::AsyncStatus writeTransportStatus) mutable {
+            const IOReturn writeStatus =
+                Protocols::Ports::MapAsyncStatusToIOReturn(writeTransportStatus);
+            if (writeStatus != kIOReturnSuccess) {
+                finish(writeStatus, std::move(callback));
+                return;
+            }
+            (void)tcat_.IO().WriteQuadBE(
+                MakeDICEAddress(commandSectionBase_ + ExtensionCommandOffset::kOpcode),
+                opcode,
+                [this, caps, intended, epoch, finish, callback = std::move(callback)](
+                    Async::AsyncStatus commandTransportStatus) mutable {
+                    const IOReturn commandStatus =
+                        Protocols::Ports::MapAsyncStatusToIOReturn(commandTransportStatus);
+                    if (commandStatus != kIOReturnSuccess) {
+                        finish(commandStatus, std::move(callback));
+                        return;
+                    }
+                    ScheduleExtensionCommandPoll(
+                        epoch, 0, false,
+                        [this, caps, intended, finish, callback = std::move(callback)](
+                            IOReturn loadStatus) mutable {
+                            if (loadStatus != kIOReturnSuccess) {
+                                finish(loadStatus, std::move(callback));
+                                return;
+                            }
+                            // The command's return code says the load was
+                            // accepted, not that the active image is what we
+                            // asked for. Re-read and compare before publishing.
+                            tcat_.Transaction().ReadCurrentConfigRouterEntries(
+                                extensionSections_, caps, kSemanticRouterRateMode,
+                                [this, intended, finish, callback = std::move(callback)](
+                                    IOReturn verifyStatus,
+                                    DiceRouterEntries applied) mutable {
+                                    if (verifyStatus != kIOReturnSuccess) {
+                                        finish(verifyStatus, std::move(callback));
+                                        return;
+                                    }
+                                    if (!DiceRouterImagesMatch(intended, applied)) {
+                                        ASFW_LOG_ERROR(
+                                            DICE,
+                                            "[SPro24Router] load did not take: %u entries applied",
+                                            applied.count);
+                                        finish(kIOReturnError, std::move(callback));
+                                        return;
+                                    }
+                                    IOLockLock(semanticMatrixLock_);
+                                    semanticRouterEntries_ = applied;
+                                    ++semanticMatrixRevision_;
+                                    IOLockUnlock(semanticMatrixLock_);
+                                    ASFW_LOG(DICE,
+                                             "[SPro24Router] router image committed: %u entries",
+                                             applied.count);
+                                    finish(kIOReturnSuccess, std::move(callback));
+                                });
+                        });
+                });
+        });
+}
+
 void SPro24DspProtocol::PrimeSemanticMatrix() noexcept {
     EnsureExtensionsLoaded([this](IOReturn sectionStatus) {
         if (sectionStatus != kIOReturnSuccess) {
@@ -1094,13 +1269,14 @@ void SPro24DspProtocol::LoadRouterStreamConfigForRate(uint32_t rateHz,
                         callback(status);
                         return;
                     }
-                    ScheduleExtensionCommandPoll(epoch, 0, std::move(callback));
+                    ScheduleExtensionCommandPoll(epoch, 0, true, std::move(callback));
                 });
         });
 }
 
 void SPro24DspProtocol::ScheduleExtensionCommandPoll(uint64_t epoch,
                                                       uint32_t attempt,
+                                                      bool awaitStreamConfigNotice,
                                                       VoidCallback callback) {
     if (extensionCommandEpoch_.load(std::memory_order_acquire) != epoch) {
         callback(kIOReturnAborted);
@@ -1111,16 +1287,16 @@ void SPro24DspProtocol::ScheduleExtensionCommandPoll(uint64_t epoch,
     // Production always defers the first read by 50 ms, matching the TCAT
     // userspace reference instead of busy-waiting on a DriverKit queue.
     if (!timerScheduler_) {
-        PollExtensionCommand(epoch, attempt, std::move(callback));
+        PollExtensionCommand(epoch, attempt, awaitStreamConfigNotice, std::move(callback));
         return;
     }
 
     const auto token = timerScheduler_->ScheduleAfter(
         kExtensionCommandPollDelayNs,
-        [this, epoch, attempt, callback]() mutable {
+        [this, epoch, attempt, awaitStreamConfigNotice, callback]() mutable {
             extensionCommandTimer_.store(Scheduling::kInvalidTimerToken,
                                          std::memory_order_release);
-            PollExtensionCommand(epoch, attempt, std::move(callback));
+            PollExtensionCommand(epoch, attempt, awaitStreamConfigNotice, std::move(callback));
         });
     if (token == Scheduling::kInvalidTimerToken) {
         callback(kIOReturnNotReady);
@@ -1131,6 +1307,7 @@ void SPro24DspProtocol::ScheduleExtensionCommandPoll(uint64_t epoch,
 
 void SPro24DspProtocol::PollExtensionCommand(uint64_t epoch,
                                              uint32_t attempt,
+                                             bool awaitStreamConfigNotice,
                                              VoidCallback callback) {
     if (extensionCommandEpoch_.load(std::memory_order_acquire) != epoch) {
         callback(kIOReturnAborted);
@@ -1139,7 +1316,7 @@ void SPro24DspProtocol::PollExtensionCommand(uint64_t epoch,
 
     (void)tcat_.IO().ReadQuadBE(
         MakeDICEAddress(commandSectionBase_ + ExtensionCommandOffset::kOpcode),
-        [this, epoch, attempt, callback = std::move(callback)](
+        [this, epoch, attempt, awaitStreamConfigNotice, callback = std::move(callback)](
             Async::AsyncStatus transportStatus, uint32_t opcode) mutable {
             const IOReturn status =
                 Protocols::Ports::MapAsyncStatusToIOReturn(transportStatus);
@@ -1159,14 +1336,14 @@ void SPro24DspProtocol::PollExtensionCommand(uint64_t epoch,
                     callback(kIOReturnNotReady);
                     return;
                 }
-                ScheduleExtensionCommandPoll(epoch, attempt + 1,
+                ScheduleExtensionCommandPoll(epoch, attempt + 1, awaitStreamConfigNotice,
                                              std::move(callback));
                 return;
             }
 
             (void)tcat_.IO().ReadQuadBE(
                 MakeDICEAddress(commandSectionBase_ + ExtensionCommandOffset::kReturn),
-                [this, epoch, opcode, callback = std::move(callback)](
+                [this, epoch, opcode, awaitStreamConfigNotice, callback = std::move(callback)](
                     Async::AsyncStatus returnTransportStatus, uint32_t returnCode) mutable {
                     const IOReturn returnStatus =
                         Protocols::Ports::MapAsyncStatusToIOReturn(returnTransportStatus);
@@ -1179,6 +1356,13 @@ void SPro24DspProtocol::PollExtensionCommand(uint64_t epoch,
                              opcode, returnCode);
                     if (returnCode != 0) {
                         callback(kIOReturnError);
+                        return;
+                    }
+                    // A router-only load has no stream image to replace, so
+                    // there is no RX/TX-config notification to wait for; the
+                    // command's own completion is the whole edge.
+                    if (!awaitStreamConfigNotice) {
+                        callback(kIOReturnSuccess);
                         return;
                     }
                     WaitForRouterStreamConfigNotice(
