@@ -160,8 +160,22 @@ implements the second set only. Cases 3 and 7 are the same code mirrored,
 forcing the opposite channel to `-85 dB` — a hard-panned pair, matching the
 matrix state measured in §5.1. **[derived]**
 
-Which constant set is pan and which is balance is **[unverified]**; linked
-versus unlinked is an equally consistent reading of the two mode flags. The
+**Stereo link is what selects between the two laws** — the pan/balance and the
+linked/unlinked readings of the mode flags turned out to be the same distinction.
+`FFMix::updateChanCoefs` branches on a per-channel-pair link bitmask at
+`+216` of the owning object:
+
+```text
+link bit set  -> genLeftChanCoefs(chan & ~1) + genRightChanCoefs(chan | 1)
+link bit clear-> genMonoChanCoefs(chan)
+```
+
+Three coefficient generators, not one: an unlinked mono channel and a member of
+a linked pair are computed by different code with different constants. A second
+bitmask at `+220` links *mixes* to each other, matching the one `setMixGain`
+consults, so the device model has three tiers of linking. **[derived]**
+
+Which constant set belongs to which generator is still **[unverified]**, and the
 constants themselves could not be read from the vendor binary (`get_bytes`
 returns zeros at those addresses — not in the loaded segments).
 
@@ -247,13 +261,12 @@ input yields a tail on that side only. **[measured]**
 S/PDIF and DAW sources are hard-panned. Eight sources demonstrate the matrix
 holding a source in both cells of a pair. **[measured]**
 
-**Design consequence for the mono-pan transaction.** "Pan this source" is
-ambiguous until its scope is fixed: one mix, or all eight? A channel-pan that
-silently moved a source in every mix would also move its reverb send, which no
-mixer does. The likely correct model — matching how the eight mixes are
-presented — is that pan belongs to *one source within one mix*, and the console's
-mix selector already chooses which. Confirm against MixControl before building
-the transaction; this is **[unverified]**.
+**Scope of a pan gesture: one source within one mix.** The vendor's own API
+settles it — `FFMixer::setChanGain(mixIndex, chanIndex, gain)` resolves the mix
+first (`FFMixer::getMix`) and then delegates to `FFMix::setChanGain(chan, gain)`
+on that mix alone. Level and pan live on the per-mix `FFMixerChannel`, so a
+channel pan never reaches another mix, and never drags the reverb send with it.
+The console's mix selector already chooses the scope. **[derived]**
 
 ### Required semantic projection
 
