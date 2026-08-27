@@ -356,11 +356,28 @@ private struct SaffireMonitorStrip: View {
                     .foregroundStyle(tint)
             }
         } faderBlock: {
+            // A mono source holds one cell in EVERY monitor row, and on this
+            // device exactly one of the pair is non-zero — the pair *is* the pan
+            // position. Reading only the left cell reported every right-panned
+            // source as OFF while it passed signal at unity: measured on
+            // hardware, 6 of 12 mono strips (MIC 2, LINE 2, ADAT 2/4/6/8). Show
+            // both buses so the hard-panned structure is visible rather than
+            // half-hidden. 126pt matches the stereo strip's fader so the two
+            // kinds of strip line up across the rack.
             VStack(spacing: 5) {
-                Text(SaffireCoefficientReadback.dbString(
-                    coefficient(output: destination.axes[0].index, input: source.axes[0].index)))
-                    .font(.caption.monospaced().bold())
-                    .foregroundStyle(tint)
+                HStack(alignment: .bottom, spacing: 6) {
+                    SaffireCoefficientReadback(
+                        value: coefficient(output: destination.axes[0].index,
+                                           input: source.axes[0].index),
+                        title: "L", tint: tint)
+                    if destination.axes.count > 1 {
+                        SaffireCoefficientReadback(
+                            value: coefficient(output: destination.axes[1].index,
+                                               input: source.axes[0].index),
+                            title: "R", tint: tint)
+                    }
+                }
+                .frame(height: 126)
                 Text("No verified grouped write")
                     .font(.caption2)
                     .foregroundStyle(.secondary)

@@ -151,6 +151,26 @@ the left/right coefficients, and supports linking adjacent channel strips.  A
 stereo source is represented as linked level plus balance; independent L/R
 sends are an advanced/unlinked form.
 
+**Mono pan and stereo balance are not the same curve.** `FFMixerChannel::recalc`
+switches on three flags — `bit0 = (field9 == 1)`, `bit1 = (field10 == 1)`,
+`bit2 = field1 & 1` — and its cases draw on **two distinct constant sets**:
+cases 1/5 use `field7` with constants at `dword_103B70…8C`, while cases 2/6/3/7
+use `field8` with `dword_103B98…BC`. ASFW's recovered `BalanceAttenuationDb`
+implements the second set only. Cases 3 and 7 are the same code mirrored,
+forcing the opposite channel to `-85 dB` — a hard-panned pair, matching the
+matrix state measured in §5.1. **[derived]**
+
+Which constant set is pan and which is balance is **[unverified]**; linked
+versus unlinked is an equally consistent reading of the two mode flags. The
+constants themselves could not be read from the vendor binary (`get_bytes`
+returns zeros at those addresses — not in the loaded segments).
+
+**Do not implement mono pan by reusing the stereo balance law.** Settle it by
+readback rather than decompilation: set a mono pan to several known positions in
+MixControl, read the resulting cell pairs, and fit. That is capture-independent,
+so §1.1's retention problem does not apply, and it keeps the result usable for
+an upstream contribution.
+
 ```mermaid
 flowchart LR
     L[Source level] --> P[Pan / balance law]
@@ -201,6 +221,30 @@ signal kind establishes it — host stream, S/PDIF, or the reverb return at
 `Ins0:14/15` — which is why the reverb return became writable while numerically
 adjacent ADAT channels correctly did not. **[measured]**
 
+**A mono source is two cells, not one.** Every mixer input holds a cell in
+*every* monitor row; a mono source simply has no partner input, not a single
+coefficient. Reading one row and calling it "the" value is wrong, and on this
+device it fails silently for exactly half the sources.
+
+Measured 2026-08-27: the console's mono readback displayed `cell(out0, n)`
+only, so **6 of 12 mono strips reported `OFF` while passing signal at +0.0 dB
+on the right bus** — MIC 2, LINE 2, ADAT 2, ADAT 4, ADAT 6, ADAT 8. Their
+odd-numbered partners rendered correctly only by luck, because the hard-panned
+matrix (§5.1) happens to place their cell in row 0. A single-cell projection
+works for one parity class and lies about the other. **[measured]**
+
+| mixer input | HW left | HW right | single-cell readout | correct |
+|---|---|---|---|---|
+| 1 MIC 1 | +0.0 dB | — | `+0.0 dB` | by luck |
+| 2 MIC 2 | — | +0.0 dB | `OFF` | **wrong** |
+| 3 LINE 1 | +0.0 dB | — | `+0.0 dB` | by luck |
+| 4 LINE 2 | — | +0.0 dB | `OFF` | **wrong** |
+
+The general rule: **a projection that reads fewer cells than the semantic object
+owns will be right often enough to look correct.** The mono strip now renders
+both buses, which also makes the hard-panned structure legible without an
+external read — the L/R pair *is* the pan position.
+
 The next matrix revision needs the remaining presentation metadata, not
 SPro-specific SwiftUI guesses:
 
@@ -214,7 +258,8 @@ SPro-specific SwiftUI guesses:
 
 Default console projection:
 
-- Mono sources: one level fader + pan, after the pan law is captured.
+- Mono sources: both bus coefficients as read-only L/R until the pan law is
+  captured, then one level fader + pan. Never a single-cell readout.
 - Stereo pairs: one linked fader + balance, after link state is read/writable.
 - Raw L/R coefficient editing: never exposed as an ordinary console control.
 - Mute is a coefficient macro that must remember pre-mute gains.
@@ -558,7 +603,7 @@ ASFW meter policy:
 |---|---|---|
 | DICE streaming / stopped choreography | working on tested hardware | retain regression tests |
 | Input and output controls | bounded write + readback exists | display output values as dB attenuation; add monitor assignment semantics |
-| Semantic mixer snapshot | verified source grouping; grouped stereo level+balance writes working on hardware, including the reverb **return** pair (mixer inputs 17/18) | capture mono pan law and monitor-bus link state, then extend to mono strips |
+| Semantic mixer snapshot | verified source grouping; grouped stereo level+balance writes working on hardware, including the reverb **return** pair (mixer inputs 17/18); mono strips render both bus cells | capture the mono pan law — see below — then add the mono level+pan transaction |
 | Patchbay | read-only active assignments | implement router-image transaction |
 | DSP control surface | readback published | add ordinary DSP transactions only after RMW/fragment path replaces legacy setters |
 | VRM | status only | defer until full bank transition is designed |
