@@ -207,6 +207,54 @@ Two things remain **[unverified]**: that the DSP *applies* gain above unity
 rather than saturating — storing a coefficient is not applying it — and what the
 summing bus does when several channels sum past full scale.
 
+### 3.1 The matrix is eight stereo mixes, and pan is per-mix
+
+The 18 × 16 matrix is better read as **eight stereo mixes of eighteen sources**.
+Rows pair up as `MIX 1/2` … `MIX 15/16` — the same eight tabs MixControl and the
+ASFW console present — and within one mix a source's two cells are its *level and
+pan in that mix*. The router then decides what each mix pair drives.
+
+On this unit only two of the eight are in use: **rows 0/1 (`MIX 1/2`)** feed every
+analog output and S/PDIF out, and **rows 8/9 (`MIX 9/10`)** feed the reverb input
+via `Ins0:14/15`. Rows 2–7 and 10–15 are entirely zero. **[measured]**
+
+That reframes the reverb send: it is not a special effect bus, it is monitor mix
+9/10 that the *router* happens to point at the reverb. Its per-source levels and
+pans work exactly like mix 1/2's.
+
+**A source is therefore panned independently in every mix.** Centring one mix
+does not centre another, and that is not a quirk — it is what eight independent
+mixes means.
+
+Measured 2026-08-27: centring physical `INPUT 1` took **two writes in two
+different mixes**, and the first alone was audibly incomplete —
+
+| step | cell | value | effect |
+|---|---|---|---|
+| 1 | `cell(1, 0)` @ `0xFFFF_E020_00B0` | `16384` | dry signal centres in `MIX 1/2` |
+| 2 | `cell(9, 0)` @ `0xFFFF_E020_02F0` | `8208` | reverb send centres in `MIX 9/10` |
+
+After step 1 the dry voice was centred but its **reverb tail stayed hard left**,
+because the mic still reached only the left reverb input. The return (`+5.99 dB`
+in both rows 0/1) was faithfully carrying a left-only tail. Nothing was wrong
+with the return; the *send* was mono. Step 2 centred the tail. **[measured]**
+
+The reverb consequently has effectively **independent L/R paths** — feeding one
+input yields a tail on that side only. **[measured]**
+
+**One cell per source is a configuration, not a constraint.** In the same image,
+`ADAT 1`–`ADAT 8` already feed *both* reverb sends at −10.55 dB while mic, line,
+S/PDIF and DAW sources are hard-panned. Eight sources demonstrate the matrix
+holding a source in both cells of a pair. **[measured]**
+
+**Design consequence for the mono-pan transaction.** "Pan this source" is
+ambiguous until its scope is fixed: one mix, or all eight? A channel-pan that
+silently moved a source in every mix would also move its reverb send, which no
+mixer does. The likely correct model — matching how the eight mixes are
+presented — is that pan belongs to *one source within one mix*, and the console's
+mix selector already chooses which. Confirm against MixControl before building
+the transaction; this is **[unverified]**.
+
 ### Required semantic projection
 
 `AudioSemanticMatrixAxis` publishes stable presentation group and channel role
@@ -259,7 +307,8 @@ SPro-specific SwiftUI guesses:
 Default console projection:
 
 - Mono sources: both bus coefficients as read-only L/R until the pan law is
-  captured, then one level fader + pan. Never a single-cell readout.
+  captured, then one level fader + pan. Never a single-cell readout. The pan
+  applies to the selected mix only — see §3.1.
 - Stereo pairs: one linked fader + balance, after link state is read/writable.
 - Raw L/R coefficient editing: never exposed as an ordinary console control.
 - Mute is a coefficient macro that must remember pre-mute gains.
