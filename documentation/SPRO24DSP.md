@@ -353,17 +353,51 @@ is written to application-section offset `0x05ec`.
 
 ### 6.1 Channel-strip flags
 
-The flags word is at application offset `0x0078`; notice `0x05` applies it.
+The flags word is one big-endian `u32` at application offset `0x0078`; notice
+`0x05` applies it. With this unit's application section at `0x6d64`, that is
+absolute **`0xFFFF_E020_6DDC`** — vendor captures name the absolute address and
+this document names the relative one, so always state which. **[measured]**
 
-| bit(s) | meaning |
-|---|---|
-| 0, 1, 2 | channel 1 EQ enable, compressor enable, EQ-after-compressor |
-| 16, 17, 18 | channel 2 equivalent |
-| 24 | channel-strip stereo link |
+| bit(s) | meaning | evidence |
+|---|---|---|
+| 0, 1, 2 | channel 1 EQ enable, compressor enable, EQ-after-compressor | **[measured]** for bits 0–1 |
+| 16, 17, 18 | channel 2 equivalent | **[measured]** for bits 16–17 |
+| 24 | channel-strip stereo link | **[derived]** — see coverage limits |
+
+Live readback on this unit is `0x00070007`: both strips EQ on, compressor on,
+EQ-after-compressor on, link clear. **[measured]**
+
+A vendor capture of four successive toggles pins the codec. These are committed
+as a regression fixture in `tests/devices/DiceFocusriteSerializationTests.cpp`:
+
+| value | ch 1 | ch 2 | transition |
+|---|---|---|---|
+| `0x00070005` | EQ on, comp off | EQ on, comp on | — |
+| `0x00050005` | EQ on, comp off | EQ on, comp off | compressor 2 off |
+| `0x00050004` | EQ off, comp off | EQ on, comp off | EQ 1 off |
+| `0x00040004` | EQ off, comp off | EQ off, comp off | EQ 2 off |
+
+**Coverage limits of that capture.** It demonstrates transitions of bits 0, 1,
+16 and 17 only:
+
+- **Compressor 1 never transitions** — it is already off in the first captured
+  state, so the trace proves its encoding but not its off-transition.
+- **Bits 2 and 18 (EQ-after-compressor) never change**; both are set in all four
+  values. Their position is consistent with the ALSA model but is not
+  demonstrated by a toggle here.
+- **Bit 24 is clear in all four values and never changes.** This capture is
+  therefore *no evidence at all* for the stereo-link meaning, which rests on
+  vendor binary analysis alone.
+
+That last point matters for upstreaming. The **state-destruction bug is provable
+without knowing what bit 24 means**: a serializer that starts from zero and
+reconstructs only bits 0–2 and 16–18 clears every unmodelled bit, and the live
+word above shows unmodelled bits are real. Preserving unknown bits is a
+capture-backed, clean-room-safe contribution today. Naming bit 24 as *stereo
+link* is not, and needs a capture in which it actually toggles.
 
 All flag mutations must be read-modify-write and must preserve bits outside the
-requested field.  In particular, a serializer which reconstructs just bits
-0–2 and 16–18 destroys the vendor stereo-link state.
+requested field.
 
 When enabling stereo link, MixControl mirrors channel 1's order, EQ state,
 compressor state, and coefficients to channel 2 before asserting bit 24.
