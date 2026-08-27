@@ -476,9 +476,29 @@ Mute and solo are device-independent mixer semantics, so the policy lives in
 the SPro profile supplies only the native writes. Another matrix-publishing
 profile inherits it.
 
-**Not yet verified on hardware.** The transaction shape is the same
-write-then-exact-readback one that mono and stereo strips already use there, but
-mute and solo themselves have only been exercised against captured fixtures.
+**Verified on hardware 2026-08-27 by coefficient readback**, not by ear. The
+mixer window was read directly over FireWire (`0xFFFFE0200068`, 16 x 18
+quadlets) before and after each gesture and diffed cell by cell:
+
+| gesture | measured |
+|---|---|
+| mute one mono strip | exactly its two cells go to a true `0x0000`; no other cell in the 288 moves; rows 8/9 untouched |
+| un-mute | those two cells return to exactly `11585` — the constant-power centre, `16384 x cos(pi/4)` — proving a remembered nominal rather than unity or a re-derivation |
+| move the fader while muted, then un-mute | returns at the **new** level (`23/23`, i.e. -54.04 dB centred), not the pre-mute `11585` and not `0` |
+| solo one strip | 18 cells written, not 36: the hard-panned strips already held `0` on one side and were skipped. Soloed strip untouched, reverb send untouched |
+| clear the solo | **all 288 cells bit-identical to the pre-solo image**, including the -54 dB strip landing back on exactly `23/23` |
+
+The fader-while-muted case is the one no listening test can reach: silence is
+silence whichever nominal the driver is holding. The first attempt at it was
+inconclusive because the fader was moved to minimum, which produces coefficient
+`0` and is therefore indistinguishable from a mute on the wire -- when designing
+this check, the level must be non-zero *and* different from the pre-mute one.
+**[measured]**
+
+The same readback independently confirmed the vendor signal table (section 5.0):
+the live router maps `Ins0:2 -> Anlg In 1` and `Ins0:0 -> Anlg In 3`, so the
+rear-pair-is-3/4 correction recovered from `Pro24DSP_IpSigTab` is what the
+hardware actually does.
 
 ### Safe mixer write transaction
 
@@ -990,7 +1010,7 @@ ASFW meter policy:
 | Semantic mixer snapshot | matrix ABI v6 publishes per-cell presentation and sparse mute/solo strip records; grouped stereo level+balance and ASFW-defined mono level+pan writes use exact two-cell readback and are hardware-confirmed; reverb return is excluded from reverb send | retain the policy unless measured vendor-law evidence justifies replacing it |
 | Generic TCAT router/mixer join | input identity and output reachability come from the active router; inactive rows are omitted; native raw row survives semantic compaction | reuse for other TCD22xx profiles; keep product labels and pairing out of the generic layer |
 | SPro mixer buses | active state publishes monitor rows 0/1 and reverb-send rows 8/9 as separate UI sections | hardware-check both grouped write paths after each topology change |
-| Mixer mute / solo | driver-owned policy over remembered nominal levels; solo writes the whole bus and confirms every cell; stale records dropped when hardware contradicts them | **verify on hardware**; consider a bus-wide "clear all solos" gesture |
+| Mixer mute / solo | driver-owned policy over remembered nominal levels; solo writes the whole bus and confirms every cell; stale records dropped when hardware contradicts them; **exact restore verified on hardware by coefficient readback**, including fader-moved-while-muted and a 288-cell bit-identical un-solo | consider a bus-wide "clear all solos" gesture; PFL needs a spare routed bus (section 4) |
 | SPro input signal identity | all 41 vendor table entries transcribed with per-rate router coordinates; kind, index and stereo pairing resolved against the mode the router image was read at | transcribe the output table when the patchbay becomes rate-aware |
 | Patchbay | read-only active assignments | implement router-image transaction |
 | DSP control surface | readback published | add ordinary DSP transactions only after RMW/fragment path replaces legacy setters |
@@ -1127,10 +1147,10 @@ stereo link, monitor macro semantics, or full VRM transition.
   send/return. Recording while monitoring the reverb produced a clean capture,
   proving these controls alter the hardware monitor path rather than the
   FireWire capture path.
-- Confirm mute zeroes both cells and unmute restores the exact prior level,
-  including after moving the fader while muted.
-- Confirm solo silences the rest of its bus, leaves other buses alone, and
-  restores every coefficient when cleared.
+- [x] Confirm mute zeroes both cells and unmute restores the exact prior level,
+  including after moving the fader while muted. Done 2026-08-27, see 3.2.
+- [x] Confirm solo silences the rest of its bus, leaves other buses alone, and
+  restores every coefficient when cleared. Done 2026-08-27; 288/288 identical.
 - Confirm linked stereo change mirrors the companion DSP and mixer state.
 - Exercise each DSP control at 44.1, 48, 88.2 and 96 kHz; verify the active
   bank, notice, readback and audible result.
