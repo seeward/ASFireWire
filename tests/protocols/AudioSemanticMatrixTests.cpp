@@ -18,10 +18,16 @@ AudioSemanticMatrixSnapshot ValidMatrix() {
     snapshot.outputCount = 2;
     snapshot.coefficientMaximum = 65535;
     snapshot.gainLaw = AudioSemanticMatrixGainLaw::LinearNormalized;
-    snapshot.inputs[0] = {101, AudioSemanticSignalKind::AnalogLine, 1};
-    snapshot.inputs[1] = {102, AudioSemanticSignalKind::HostStream, 1};
-    snapshot.outputs[0] = {201, AudioSemanticSignalKind::Headphone, 1};
-    snapshot.outputs[1] = {202, AudioSemanticSignalKind::AnalogLine, 1};
+    snapshot.inputs[0] = {101, AudioSemanticSignalKind::AnalogLine, 1, 101,
+                          AudioSemanticMatrixChannelRole::Mono};
+    snapshot.inputs[1] = {102, AudioSemanticSignalKind::HostStream, 1, 102,
+                          AudioSemanticMatrixChannelRole::Left};
+    snapshot.outputs[0] = {201, AudioSemanticSignalKind::Headphone, 1, 201,
+                           AudioSemanticMatrixChannelRole::Mono,
+                           AudioSemanticMatrixOutputRole::MonitorMix};
+    snapshot.outputs[1] = {202, AudioSemanticSignalKind::AnalogLine, 1, 202,
+                           AudioSemanticMatrixChannelRole::Mono,
+                           AudioSemanticMatrixOutputRole::MonitorMix};
     snapshot.coefficients[0] = 65535;
     return snapshot;
 }
@@ -39,6 +45,12 @@ TEST(AudioSemanticMatrixTests, RejectsInvalidOrAmbiguousAxes) {
 
     snapshot = ValidMatrix();
     snapshot.outputs[0].signalKind = AudioSemanticSignalKind::None;
+    result = ValidateAudioSemanticMatrix(snapshot);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), AudioSemanticMatrixValidationError::InvalidOutput);
+
+    snapshot = ValidMatrix();
+    snapshot.outputs[0].outputRole = AudioSemanticMatrixOutputRole::None;
     result = ValidateAudioSemanticMatrix(snapshot);
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), AudioSemanticMatrixValidationError::InvalidOutput);
@@ -80,6 +92,14 @@ TEST(AudioSemanticMatrixTests, SPro24MapsRouterSourcesWithoutLeakingBlockIds) {
     EXPECT_EQ(snapshot.inputs[17].signalIndex, 2);
     EXPECT_EQ(snapshot.Coefficient(0, 0), 0x1234);
     EXPECT_EQ(snapshot.Coefficient(0, 17), 0x2345);
+    EXPECT_EQ(snapshot.outputs[0].outputRole, AudioSemanticMatrixOutputRole::MonitorMix);
+    EXPECT_EQ(snapshot.outputs[0].channelRole, AudioSemanticMatrixChannelRole::Left);
+    EXPECT_EQ(snapshot.outputs[1].channelRole, AudioSemanticMatrixChannelRole::Right);
+    EXPECT_EQ(snapshot.outputs[0].presentationGroupId,
+              snapshot.outputs[1].presentationGroupId);
+    EXPECT_EQ(snapshot.outputs[8].outputRole, AudioSemanticMatrixOutputRole::MonitorMix);
+    EXPECT_EQ(snapshot.outputs[8].channelRole, AudioSemanticMatrixChannelRole::Left);
+    EXPECT_EQ(snapshot.outputs[9].channelRole, AudioSemanticMatrixChannelRole::Right);
     EXPECT_TRUE(ValidateAudioSemanticMatrix(snapshot).has_value());
 }
 
@@ -128,7 +148,63 @@ TEST(AudioSemanticMatrixTests, SPro24MapsTheCapturedCurrentConfigRouter) {
     expectInput(12, 0x5352'000D, AudioSemanticSignalKind::DigitalSpdif, 1);
     expectInput(14, 0x5352'000F, AudioSemanticSignalKind::HostStream, 1);
     expectInput(17, 0x5352'0012, AudioSemanticSignalKind::Auxiliary, 4);
+    EXPECT_EQ(snapshot.inputs[14].channelRole, AudioSemanticMatrixChannelRole::Left);
+    EXPECT_EQ(snapshot.inputs[15].channelRole, AudioSemanticMatrixChannelRole::Right);
+    EXPECT_EQ(snapshot.inputs[14].presentationGroupId,
+              snapshot.inputs[15].presentationGroupId);
+    EXPECT_EQ(snapshot.inputs[4].channelRole, AudioSemanticMatrixChannelRole::Mono);
+    EXPECT_NE(snapshot.inputs[4].presentationGroupId,
+              snapshot.inputs[5].presentationGroupId);
     EXPECT_EQ(snapshot.gainLaw, AudioSemanticMatrixGainLaw::UnsignedQ214Amplitude);
+    ASSERT_EQ(snapshot.outputCount, 16U);
+    EXPECT_EQ(snapshot.outputs[0].outputRole, AudioSemanticMatrixOutputRole::MonitorMix);
+    EXPECT_EQ(snapshot.outputs[8].outputRole, AudioSemanticMatrixOutputRole::MonitorMix);
+    EXPECT_EQ(snapshot.outputs[9].outputRole, AudioSemanticMatrixOutputRole::MonitorMix);
+}
+
+TEST(AudioSemanticMatrixTests, SPro24StereoStripUsesPairedNativeCellsAndHardPanMute) {
+    DICE::DiceMixerCoefficients coefficients{};
+    coefficients.inputCount = 18;
+    coefficients.outputCount = 16;
+    DICE::DiceRouterEntries routes{};
+    // Active-router slots 14/15 are the host playback stereo pair on SPro24.
+    routes.count = 2;
+    routes.entries[0] = {.destinationBlock = 2, .destinationChannel = 14,
+                         .sourceBlock = 11, .sourceChannel = 0};
+    routes.entries[1] = {.destinationBlock = 2, .destinationChannel = 15,
+                         .sourceBlock = 11, .sourceChannel = 1};
+
+    AudioSemanticMatrixSnapshot snapshot{};
+    ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(coefficients, routes, snapshot));
+
+    const auto layout = DICE::Focusrite::ResolveSPro24DspStereoStrip(
+        coefficients, routes,
+        snapshot.outputs[0].presentationGroupId,
+        snapshot.inputs[14].presentationGroupId);
+    ASSERT_TRUE(layout.has_value());
+    EXPECT_EQ(layout->inputLeft, 14U);
+    EXPECT_EQ(layout->inputRight, 15U);
+    EXPECT_EQ(layout->outputLeft, 0U);
+    EXPECT_EQ(layout->outputRight, 1U);
+
+    const auto centered = DICE::Focusrite::MakeSPro24DspStereoStripCoefficients(0, 0);
+    ASSERT_TRUE(centered.has_value());
+    EXPECT_EQ(centered->left, centered->right);
+    EXPECT_GT(centered->left, 0U);
+    EXPECT_LE(centered->left, 0x4000U);
+
+    const auto hardLeft = DICE::Focusrite::MakeSPro24DspStereoStripCoefficients(0, -1000);
+    ASSERT_TRUE(hardLeft.has_value());
+    EXPECT_EQ(hardLeft->left, 0x4000U);
+    EXPECT_EQ(hardLeft->right, 0U);
+
+    const auto hardRight = DICE::Focusrite::MakeSPro24DspStereoStripCoefficients(0, 1000);
+    ASSERT_TRUE(hardRight.has_value());
+    EXPECT_EQ(hardRight->left, 0U);
+    EXPECT_EQ(hardRight->right, 0x4000U);
+
+    EXPECT_FALSE(DICE::Focusrite::MakeSPro24DspStereoStripCoefficients(-85001, 0));
+    EXPECT_FALSE(DICE::Focusrite::MakeSPro24DspStereoStripCoefficients(0, 1001));
 }
 
 } // namespace

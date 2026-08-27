@@ -380,6 +380,36 @@ void DICETransaction::ReadMixerCoefficients(
         });
 }
 
+void DICETransaction::WriteMixerCoefficient(
+    const ExtensionSections& sections,
+    const DiceExtensionCaps& caps,
+    uint8_t output,
+    uint8_t input,
+    uint16_t coefficient,
+    DICEWriteCallback callback) {
+    auto callbackState = Common::ShareCallback(std::move(callback));
+    if (!caps.mixer.exposed || caps.mixer.readOnly ||
+        caps.mixer.inputCount == 0 || caps.mixer.outputCount == 0 ||
+        caps.mixer.inputCount > kDiceMaximumMixerInputs ||
+        caps.mixer.outputCount > kDiceMaximumMixerOutputs ||
+        input >= caps.mixer.inputCount || output >= caps.mixer.outputCount ||
+        sections.mixer.size < sizeof(uint32_t) + kDiceMixerCoefficientWireBytes) {
+        Common::InvokeSharedCallback(callbackState, kIOReturnUnsupported);
+        return;
+    }
+
+    // TCAT mixer storage is a 16 x 18 fixed window.  `inputCount` selects
+    // usable entries; it does not compact the stride of a smaller device.
+    const uint32_t coefficientOffset = ExtensionAbsoluteOffset(
+        sections.mixer,
+        static_cast<uint32_t>(sizeof(uint32_t) +
+            sizeof(uint32_t) * (size_t{output} * kDiceMaximumMixerInputs + input)));
+    (void)io_.WriteQuadBE(MakeDICEAddress(coefficientOffset), coefficient,
+        [callbackState](Async::AsyncStatus status) {
+            Common::InvokeSharedCallback(callbackState, MapReadStatus(status));
+        });
+}
+
 void DICETransaction::ReadPeakEntries(
     const ExtensionSections& sections,
     const DiceExtensionCaps& caps,

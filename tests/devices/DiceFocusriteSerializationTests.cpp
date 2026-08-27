@@ -255,6 +255,37 @@ TEST(DiceFocusriteSerializationTests, EffectGeneralParamsRoundTrip) {
     EXPECT_EQ(rt.eqAfterComp, params.eqAfterComp);
 }
 
+TEST(DiceFocusriteSerializationTests, EffectGeneralParamsDecodesCapturedSPro24ToggleSequence) {
+    // Vendor MixControl capture, 2026-08-27.  The writes land at the SPro24
+    // application section's effect-general field.  Each channel occupies one
+    // 16-bit half-word: EQ, compressor, then EQ-after-compressor.
+    struct CapturedState final {
+        uint32_t word;
+        bool eq1;
+        bool comp1;
+        bool eq2;
+        bool comp2;
+    };
+    constexpr std::array<CapturedState, 4> kStates{{
+        {0x00070005U, true,  false, true,  true},  // before Comp 2 off
+        {0x00050005U, true,  false, true,  false},
+        {0x00050004U, false, false, true,  false},
+        {0x00040004U, false, false, false, false},
+    }};
+
+    for (const auto& captured : kStates) {
+        std::array<uint8_t, 4> raw{};
+        PutBe32(raw.data(), captured.word);
+        const auto decoded = EffectGeneralParams::Deserialize(raw.data());
+        EXPECT_EQ(decoded.eqEnable[0], captured.eq1);
+        EXPECT_EQ(decoded.compEnable[0], captured.comp1);
+        EXPECT_EQ(decoded.eqEnable[1], captured.eq2);
+        EXPECT_EQ(decoded.compEnable[1], captured.comp2);
+        EXPECT_TRUE(decoded.eqAfterComp[0]);
+        EXPECT_TRUE(decoded.eqAfterComp[1]);
+    }
+}
+
 TEST(DiceFocusriteSerializationTests, CompressorStateRoundTrip) {
     CompressorState state;
     state.output    = {2.0f, 4.0f};

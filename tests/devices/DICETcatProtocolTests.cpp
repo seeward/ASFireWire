@@ -376,7 +376,10 @@ public:
             const uint32_t firstCoefficient =
                 (address.addressLo - (kMixerSectionBaseLo + 4U)) / sizeof(uint32_t);
             for (uint32_t index = 0; index < length / sizeof(uint32_t); ++index) {
-                PutBe32(payload.data() + (index * sizeof(uint32_t)), firstCoefficient + index + 1U);
+                const uint32_t coefficientIndex = firstCoefficient + index;
+                const uint16_t coefficient = mixerCoefficients_[coefficientIndex].value_or(
+                    static_cast<uint16_t>(coefficientIndex + 1U));
+                PutBe32(payload.data() + (index * sizeof(uint32_t)), coefficient);
             }
         } else if (address.addressHi == 0xFFFFU && address.addressLo == kPeakSectionBaseLo &&
                    length == 128U * ASFW::Audio::DICE::DiceRouterEntry::kWireSize) {
@@ -411,6 +414,21 @@ public:
         ++writeCount;
         if (address.addressHi == 0xFFFFU) {
             writeAddresses.push_back(address.addressLo);
+        }
+        if (address.addressHi == 0xFFFFU &&
+            address.addressLo >= kMixerSectionBaseLo + sizeof(uint32_t) &&
+            address.addressLo < kMixerSectionBaseLo + sizeof(uint32_t) +
+                ASFW::Audio::DICE::kDiceMixerCoefficientWireBytes &&
+            data.size() == sizeof(uint32_t)) {
+            mixerCoefficientWrites.push_back({
+                .address = address.addressLo,
+                .value = ASFW::FW::ReadBE32(data.data()),
+            });
+            const uint32_t coefficientIndex =
+                (address.addressLo - (kMixerSectionBaseLo + sizeof(uint32_t))) /
+                sizeof(uint32_t);
+            mixerCoefficients_[coefficientIndex] = static_cast<uint16_t>(
+                ASFW::FW::ReadBE32(data.data()) & 0xffffU);
         }
         if (address.addressHi == 0xFFFFU &&
             address.addressLo >= kAppSectionBaseLo &&
@@ -529,6 +547,11 @@ public:
     uint32_t extStatus_{0};
     uint32_t sampleRate_{48000};
     uint32_t notification_{0x20};
+    struct MixerCoefficientWrite final {
+        uint32_t address{0};
+        uint32_t value{0};
+    };
+    std::vector<MixerCoefficientWrite> mixerCoefficientWrites;
     std::array<uint8_t, 0x600> application_{};
     bool coldStreamImageRequiresClockReselect_{false};
     uint32_t coldReportedStreamCount_{0};
@@ -553,6 +576,7 @@ private:
     NodeId localNodeId_{0};
     uint64_t nextHandle_{1};
     uint64_t owner_{ASFW::Audio::DICE::kOwnerNoOwner};
+    std::array<std::optional<uint16_t>, 16U * 18U> mixerCoefficients_{};
 };
 
 TEST(DICETcatProtocolTests, InitializeIsSideEffectFree) {
@@ -785,7 +809,16 @@ TEST(SPro24DspProtocolTests, InitializationPrimesSemanticMatrixAndControlReadbac
     ASFW::Audio::AudioControlSurfaceSnapshot controls{};
     ASSERT_TRUE(protocol.CopyAudioControlSurfaceSnapshot(controls));
     EXPECT_EQ(controls.kind, ASFW::Audio::AudioControlSurfaceKind::FocusriteSPro24Dsp);
-    EXPECT_EQ(controls.valueCount, 26U);
+    EXPECT_EQ(controls.valueCount, 29U);
+    for (uint32_t pair = 0; pair < 3; ++pair) {
+        const auto routeIt = std::find_if(controls.values.begin(),
+                                          controls.values.begin() + controls.valueCount,
+                                          [pair](const auto& control) {
+                                              return control.id == 0x5350'0130U + pair;
+                                          });
+        ASSERT_NE(routeIt, controls.values.begin() + controls.valueCount);
+        EXPECT_EQ(routeIt->value, 1); // Active physical pair <- DAW 1/2.
+    }
 
     std::optional<IOReturn> callbackStatus;
     protocol.GetEffectParams([&](IOReturn status, EffectGeneralParams /*params*/) {
@@ -922,6 +955,76 @@ TEST(SPro24DspProtocolTests, StoppedPrepareCommandLoadsLowRateRouterAndStreamIma
                   ASFW::Audio::DICE::ExtensionCommandOpcode::kLoadRouterStreamConfig);
     EXPECT_EQ(bus.commandOpcodeReadCount, 1);
     EXPECT_EQ(bus.commandReturnReadCount, 1);
+}
+
+TEST(SPro24DspProtocolTests, SemanticMatrixRejectsScalarCrosspointWritesWithoutBusSemantics) {
+    CountingFireWireBus bus;
+    RouteState routeState;
+    SPro24DspProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
+    ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+
+    ASFW::Audio::AudioSemanticMatrixSnapshot before{};
+    ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(before));
+    ASSERT_GT(before.inputCount, 5U);
+    ASSERT_GT(before.outputCount, 0U);
+    const uint32_t inputPort = before.inputs[5].portId;
+    const uint32_t outputPort = before.outputs[0].portId;
+    const size_t writesBefore = bus.mixerCoefficientWrites.size();
+
+    std::optional<IOReturn> completion;
+    protocol.ApplyAudioSemanticMatrixCrosspoint(outputPort, inputPort, 0x4000,
+                                                [&](IOReturn status) { completion = status; });
+    ASSERT_TRUE(completion.has_value());
+    EXPECT_EQ(*completion, kIOReturnUnsupported);
+    ASSERT_EQ(bus.mixerCoefficientWrites.size(), writesBefore);
+
+    const size_t writesBeforeBadPort = bus.mixerCoefficientWrites.size();
+    completion.reset();
+    protocol.ApplyAudioSemanticMatrixCrosspoint(outputPort, 0xBAD0'0000U, 0x4000,
+                                                [&](IOReturn status) { completion = status; });
+    ASSERT_TRUE(completion.has_value());
+    EXPECT_EQ(*completion, kIOReturnUnsupported);
+    EXPECT_EQ(bus.mixerCoefficientWrites.size(), writesBeforeBadPort);
+
+    completion.reset();
+    protocol.ApplyAudioSemanticMatrixCrosspoint(0x5353'0010U, inputPort, 0x4000,
+                                                [&](IOReturn status) { completion = status; });
+    ASSERT_TRUE(completion.has_value());
+    EXPECT_EQ(*completion, kIOReturnUnsupported);
+    EXPECT_EQ(bus.mixerCoefficientWrites.size(), writesBeforeBadPort);
+}
+
+TEST(SPro24DspProtocolTests, SemanticMatrixStereoStripWritesItsTwoVerifiedCellsAndReadbacks) {
+    CountingFireWireBus bus;
+    RouteState routeState;
+    SPro24DspProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
+    ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+
+    ASFW::Audio::AudioSemanticMatrixSnapshot before{};
+    ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(before));
+    ASSERT_GT(before.inputCount, 15U);
+    const auto outputGroup = before.outputs[0].presentationGroupId;
+    const auto inputGroup = before.inputs[14].presentationGroupId; // active DAW L/R pair.
+    ASSERT_EQ(before.inputs[14].channelRole, ASFW::Audio::AudioSemanticMatrixChannelRole::Left);
+    ASSERT_EQ(before.inputs[15].channelRole, ASFW::Audio::AudioSemanticMatrixChannelRole::Right);
+    const size_t writesBefore = bus.mixerCoefficientWrites.size();
+
+    std::optional<IOReturn> completion;
+    protocol.ApplyAudioSemanticMatrixStereoStrip(
+        {.outputPresentationGroupId = outputGroup, .inputPresentationGroupId = inputGroup,
+         .levelMilliDb = 0, .balanceMilli = -1000},
+        [&](IOReturn status) { completion = status; });
+
+    ASSERT_TRUE(completion.has_value());
+    ASSERT_EQ(*completion, kIOReturnSuccess);
+    ASSERT_EQ(bus.mixerCoefficientWrites.size(), writesBefore + 2U);
+    EXPECT_EQ(bus.mixerCoefficientWrites[writesBefore].value, 0x4000U);
+    EXPECT_EQ(bus.mixerCoefficientWrites[writesBefore + 1U].value, 0U);
+
+    ASFW::Audio::AudioSemanticMatrixSnapshot after{};
+    ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(after));
+    EXPECT_EQ(after.Coefficient(0, 14), 0x4000U);
+    EXPECT_EQ(after.Coefficient(1, 15), 0U);
 }
 
 TEST(SPro24DspProtocolTests, StoppedPrepareCommandFailsClosedWithoutConfigNotification) {
@@ -1083,6 +1186,35 @@ TEST(DICETcatProtocolTests, ExtensionStateReadsAreExactAndUseDiscoveredSections)
     EXPECT_EQ(mixer->At(0, 17), 18);
     EXPECT_EQ(mixer->At(15, 17), 288);
     EXPECT_EQ(bus.mixerReadCount, 3);
+
+    std::optional<IOReturn> mixerWriteStatus;
+    protocol.Transaction().WriteMixerCoefficient(*sections, *caps, 3, 5, 0x4000,
+        [&](IOReturn status) { mixerWriteStatus = status; });
+    ASSERT_TRUE(mixerWriteStatus.has_value());
+    EXPECT_EQ(*mixerWriteStatus, kIOReturnSuccess);
+    ASSERT_FALSE(bus.mixerCoefficientWrites.empty());
+    const auto& mixerWrite = bus.mixerCoefficientWrites.back();
+    EXPECT_EQ(mixerWrite.address,
+              kMixerSectionBaseLo + sizeof(uint32_t) +
+                  sizeof(uint32_t) * (3U * ASFW::Audio::DICE::kDiceMaximumMixerInputs + 5U));
+    EXPECT_EQ(mixerWrite.value, 0x4000U);
+
+    const size_t writesBeforeBadIndex = bus.mixerCoefficientWrites.size();
+    std::optional<IOReturn> invalidMixerWriteStatus;
+    protocol.Transaction().WriteMixerCoefficient(*sections, *caps, 16, 0, 0x4000,
+        [&](IOReturn status) { invalidMixerWriteStatus = status; });
+    ASSERT_TRUE(invalidMixerWriteStatus.has_value());
+    EXPECT_EQ(*invalidMixerWriteStatus, kIOReturnUnsupported);
+    EXPECT_EQ(bus.mixerCoefficientWrites.size(), writesBeforeBadIndex);
+
+    auto readOnlyCaps = *caps;
+    readOnlyCaps.mixer.readOnly = true;
+    std::optional<IOReturn> readOnlyMixerWriteStatus;
+    protocol.Transaction().WriteMixerCoefficient(*sections, readOnlyCaps, 0, 0, 0x4000,
+        [&](IOReturn status) { readOnlyMixerWriteStatus = status; });
+    ASSERT_TRUE(readOnlyMixerWriteStatus.has_value());
+    EXPECT_EQ(*readOnlyMixerWriteStatus, kIOReturnUnsupported);
+    EXPECT_EQ(bus.mixerCoefficientWrites.size(), writesBeforeBadIndex);
 
     std::optional<ASFW::Audio::DICE::DiceRouterEntries> peaks;
     protocol.Transaction().ReadPeakEntries(*sections, *caps,

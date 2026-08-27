@@ -10,7 +10,9 @@
 #include "../../../../Logging/Logging.hpp"
 #include "../../../../Scheduling/ITimerScheduler.hpp"
 #include <DriverKit/IOLib.h>
+#include <algorithm>
 #include <array>
+#include <iterator>
 #include <memory>
 #include <utility>
 
@@ -42,6 +44,62 @@ constexpr uint32_t kRouterStreamConfigNoticePollLimit = 100;
 constexpr uint32_t kRouterStreamConfigNoticeMask =
     ::ASFW::Audio::DICE::Notify::kRxConfigChange |
     ::ASFW::Audio::DICE::Notify::kTxConfigChange;
+
+[[nodiscard]] const DiceRouterEntry* FindRoute(const DiceRouterEntries& routes,
+                                                uint8_t destinationBlock,
+                                                uint8_t destinationChannel) noexcept {
+    for (uint16_t index = 0; index < routes.count; ++index) {
+        const auto& route = routes.At(index);
+        if (route.destinationBlock == destinationBlock &&
+            route.destinationChannel == destinationChannel) {
+            return &route;
+        }
+    }
+    return nullptr;
+}
+
+/// Translate only complete, verified stereo pair routes into an app-facing
+/// identity. A mixed or unknown pair stays Unknown rather than exposing a
+/// TCAT address or inventing a source name.
+[[nodiscard]] SPro24DspControl::OutputRouteSource OutputRouteSourceForPair(
+    const DiceRouterEntries& routes, uint8_t pair) noexcept {
+    constexpr uint8_t kPhysicalOutputBlock = 4; // Ins0 destination block.
+    const uint8_t leftChannel = static_cast<uint8_t>(pair * 2U);
+    const auto* left = FindRoute(routes, kPhysicalOutputBlock, leftChannel);
+    const auto* right = FindRoute(routes, kPhysicalOutputBlock,
+                                  static_cast<uint8_t>(leftChannel + 1U));
+    if (!left || !right || left->sourceBlock != right->sourceBlock ||
+        right->sourceChannel != static_cast<uint8_t>(left->sourceChannel + 1U) ||
+        (left->sourceChannel & 1U) != 0U) {
+        return SPro24DspControl::OutputRouteSource::Unknown;
+    }
+
+    if (left->sourceBlock == 11) { // AVS0: host playback.
+        switch (left->sourceChannel / 2U) {
+        case 0: return SPro24DspControl::OutputRouteSource::HostPlayback12;
+        case 1: return SPro24DspControl::OutputRouteSource::HostPlayback34;
+        case 2: return SPro24DspControl::OutputRouteSource::HostPlayback56;
+        case 3: return SPro24DspControl::OutputRouteSource::HostPlayback78;
+        default: return SPro24DspControl::OutputRouteSource::Unknown;
+        }
+    }
+    if (left->sourceBlock == 2) { // TCAT mixer rows.
+        switch (left->sourceChannel / 2U) {
+        case 0: return SPro24DspControl::OutputRouteSource::Mixer12;
+        case 1: return SPro24DspControl::OutputRouteSource::Mixer34;
+        case 2: return SPro24DspControl::OutputRouteSource::Mixer56;
+        case 3: return SPro24DspControl::OutputRouteSource::Mixer78;
+        default: return SPro24DspControl::OutputRouteSource::Unknown;
+        }
+    }
+    if (left->sourceBlock == 4 && left->sourceChannel == 0) {
+        return SPro24DspControl::OutputRouteSource::Analog12;
+    }
+    if (left->sourceBlock == 0 && left->sourceChannel == 6) {
+        return SPro24DspControl::OutputRouteSource::Spdif12;
+    }
+    return SPro24DspControl::OutputRouteSource::Unknown;
+}
 
 [[nodiscard]] constexpr uint32_t ExtensionRateFlag(DiceRateMode mode) noexcept {
     switch (mode) {
@@ -282,10 +340,171 @@ bool SPro24DspProtocol::CopyAudioSemanticMatrix(
     return ready;
 }
 
+void SPro24DspProtocol::ApplyAudioSemanticMatrixCrosspoint(
+    uint32_t outputPortId, uint32_t inputPortId, uint16_t coefficient,
+    Audio::IAudioSemanticMatrix::ApplyCallback callback) {
+    // A scalar TCAT cell is not a MixControl monitor-strip control. The
+    // current image does not establish the bus grouping, link state, pan law,
+    // or physical-output route, so accepting this selector made the UI write
+    // a real coefficient with a false audible meaning. Keep the low-level
+    // primitive private until a grouped transaction is independently verified.
+    (void)outputPortId;
+    (void)inputPortId;
+    (void)coefficient;
+    if (callback) callback(kIOReturnUnsupported);
+}
+
+void SPro24DspProtocol::FinishSemanticMatrixWrite(
+    IOReturn status, Audio::IAudioSemanticMatrix::ApplyCallback callback) noexcept {
+    if (semanticMatrixLock_) {
+        IOLockLock(semanticMatrixLock_);
+        semanticMatrixWriteInFlight_ = false;
+        IOLockUnlock(semanticMatrixLock_);
+    }
+    if (callback) callback(status);
+}
+
+void SPro24DspProtocol::ApplyAudioSemanticMatrixStereoStrip(
+    const Audio::IAudioSemanticMatrix::StereoStripRequest& request,
+    Audio::IAudioSemanticMatrix::ApplyCallback callback) {
+    if (!callback || !semanticMatrixLock_) {
+        if (callback) callback(kIOReturnNotReady);
+        return;
+    }
+
+    IOLockLock(semanticMatrixLock_);
+    const bool ready = semanticMatrixReady_ && !semanticMatrixWriteInFlight_;
+    if (ready) semanticMatrixWriteInFlight_ = true;
+    IOLockUnlock(semanticMatrixLock_);
+    if (!ready) {
+        callback(kIOReturnBusy);
+        return;
+    }
+
+    // The active router is part of the semantic identity. Re-read it with the
+    // coefficient image so an external route change cannot turn a stale UI
+    // group ID into a write to a different source row.
+    EnsureExtensionsLoaded(
+        [this, request, callback = std::move(callback)](IOReturn sectionsStatus) mutable {
+            if (sectionsStatus != kIOReturnSuccess) {
+                FinishSemanticMatrixWrite(sectionsStatus, std::move(callback));
+                return;
+            }
+            tcat_.Transaction().ReadExtensionCaps(
+                extensionSections_,
+                [this, request, callback = std::move(callback)](IOReturn capsStatus,
+                                                                  DiceExtensionCaps caps) mutable {
+                    if (capsStatus != kIOReturnSuccess) {
+                        FinishSemanticMatrixWrite(capsStatus, std::move(callback));
+                        return;
+                    }
+                    tcat_.Transaction().ReadCurrentConfigRouterEntries(
+                        extensionSections_, caps, DiceRateMode::Low,
+                        [this, request, caps, callback = std::move(callback)](
+                            IOReturn routeStatus, DiceRouterEntries routes) mutable {
+                            if (routeStatus != kIOReturnSuccess) {
+                                FinishSemanticMatrixWrite(routeStatus, std::move(callback));
+                                return;
+                            }
+                            tcat_.Transaction().ReadMixerCoefficients(
+                                extensionSections_, caps,
+                                [this, request, caps, routes, callback = std::move(callback)](
+                                    IOReturn readStatus, DiceMixerCoefficients current) mutable {
+                                    if (readStatus != kIOReturnSuccess) {
+                                        FinishSemanticMatrixWrite(readStatus, std::move(callback));
+                                        return;
+                                    }
+                                    const auto layout = ResolveSPro24DspStereoStrip(
+                                        current, routes,
+                                        request.outputPresentationGroupId,
+                                        request.inputPresentationGroupId);
+                                    const auto coefficients = MakeSPro24DspStereoStripCoefficients(
+                                        request.levelMilliDb, request.balanceMilli);
+                                    if (!layout || !coefficients) {
+                                        FinishSemanticMatrixWrite(kIOReturnBadArgument,
+                                                                  std::move(callback));
+                                        return;
+                                    }
+
+                                    // Captured MixControl stereo gestures are two native DICE
+                                    // writes: left source → left bus, then right source → right
+                                    // bus. No router load/commit command follows either write.
+                                    tcat_.Transaction().WriteMixerCoefficient(
+                                        extensionSections_, caps, layout->outputLeft,
+                                        layout->inputLeft, coefficients->left,
+                                        [this, caps, routes, layout = *layout,
+                                         coefficients = *coefficients,
+                                         callback = std::move(callback)](IOReturn leftStatus) mutable {
+                                            if (leftStatus != kIOReturnSuccess) {
+                                                FinishSemanticMatrixWrite(leftStatus,
+                                                                          std::move(callback));
+                                                return;
+                                            }
+                                            tcat_.Transaction().WriteMixerCoefficient(
+                                                extensionSections_, caps, layout.outputRight,
+                                                layout.inputRight, coefficients.right,
+                                                [this, caps, routes, layout, coefficients,
+                                                 callback = std::move(callback)](
+                                                    IOReturn rightStatus) mutable {
+                                                    if (rightStatus != kIOReturnSuccess) {
+                                                        FinishSemanticMatrixWrite(rightStatus,
+                                                                                  std::move(callback));
+                                                        return;
+                                                    }
+                                                    tcat_.Transaction().ReadMixerCoefficients(
+                                                        extensionSections_, caps,
+                                                        [this, caps, routes, layout, coefficients,
+                                                         callback = std::move(callback)](
+                                                            IOReturn readbackStatus,
+                                                            DiceMixerCoefficients readback) mutable {
+                                                            const bool confirmed =
+                                                                readbackStatus == kIOReturnSuccess &&
+                                                                readback.At(layout.outputLeft,
+                                                                            layout.inputLeft) ==
+                                                                    coefficients.left &&
+                                                                readback.At(layout.outputRight,
+                                                                            layout.inputRight) ==
+                                                                    coefficients.right;
+                                                            if (!confirmed) {
+                                                                FinishSemanticMatrixWrite(
+                                                                    readbackStatus == kIOReturnSuccess
+                                                                        ? kIOReturnError
+                                                                        : readbackStatus,
+                                                                    std::move(callback));
+                                                                return;
+                                                            }
+                                                            IOLockLock(semanticMatrixLock_);
+                                                            semanticExtensionCaps_ = caps;
+                                                            semanticRouterEntries_ = routes;
+                                                            semanticMixerCoefficients_ = readback;
+                                                            semanticMatrixReady_ = true;
+                                                            ++semanticMatrixRevision_;
+                                                            IOLockUnlock(semanticMatrixLock_);
+                                                            FinishSemanticMatrixWrite(
+                                                                kIOReturnSuccess, std::move(callback));
+                                                        });
+                                                });
+                                        });
+                                });
+                        });
+                });
+        });
+}
+
 bool SPro24DspProtocol::CopyAudioControlSurfaceSnapshot(
     Audio::AudioControlSurfaceSnapshot& outSnapshot) const noexcept {
     outSnapshot = {};
     if (!semanticControlLock_) return false;
+
+    // The input/output control block does not contain the source selected for
+    // a physical output. Snapshot the independently-owned active router first
+    // and publish only its semantic pair identity below.
+    DiceRouterEntries routes{};
+    if (semanticMatrixLock_) {
+        IOLockLock(semanticMatrixLock_);
+        routes = semanticRouterEntries_;
+        IOLockUnlock(semanticMatrixLock_);
+    }
 
     IOLockLock(semanticControlLock_);
     const auto& state = semanticControls_;
@@ -306,6 +525,10 @@ bool SPro24DspProtocol::CopyAudioControlSurfaceSnapshot(
     for (uint32_t index = 0; index < state.output.volumes.size(); ++index) {
         emit(SPro24DspControl::kOutputVolumeFirst + index, state.output.volumes[index]);
         emit(SPro24DspControl::kOutputMuteFirst + index, state.output.volMutes[index] ? 1 : 0);
+    }
+    for (uint8_t pair = 0; pair < 3; ++pair) {
+        emit(SPro24DspControl::kOutputRouteSourceFirst + pair,
+             static_cast<int32_t>(OutputRouteSourceForPair(routes, pair)));
     }
     emit(SPro24DspControl::kGlobalMute, state.output.muteEnabled ? 1 : 0);
     emit(SPro24DspControl::kGlobalDim, state.output.dimEnabled ? 1 : 0);
@@ -512,12 +735,13 @@ void SPro24DspProtocol::PrimeSemanticMatrix() noexcept {
                             return;
                         }
                         tcat_.Transaction().ReadMixerCoefficients(extensionSections_, caps,
-                            [this, routes](IOReturn mixerStatus, DiceMixerCoefficients coefficients) {
+                            [this, caps, routes](IOReturn mixerStatus, DiceMixerCoefficients coefficients) {
                                 if (mixerStatus != kIOReturnSuccess || !semanticMatrixLock_) {
                                     ASFW_LOG(DICE, "SPro24 semantic matrix unavailable: mixer 0x%x", mixerStatus);
                                     return;
                                 }
                                 IOLockLock(semanticMatrixLock_);
+                                semanticExtensionCaps_ = caps;
                                 semanticRouterEntries_ = routes;
                                 semanticMixerCoefficients_ = coefficients;
                                 semanticMatrixReady_ = true;

@@ -114,6 +114,11 @@ public:
         // Coherent driver-owned mixer matrix and its endpoint discovery.
         kMethodGetAudioSemanticMatrix = 1031,
         kMethodGetAudioSemanticMatrixEndpoints = 1032,
+        // Bounded async write of one driver-resolved matrix crosspoint.
+        kMethodSubmitAudioSemanticMatrixCrosspoint = 1033,
+        // Bounded semantic stereo-strip gesture. The profile resolves both
+        // native gain cells and confirms their joint readback.
+        kMethodSubmitAudioSemanticMatrixStereoStrip = 1034,
         // TODO(ASFW-IRM): Remove temporary IRM test method after dedicated validation tooling exists.
         kMethodTestIRMAllocation       = 26,
         kMethodTestIRMRelease          = 27,

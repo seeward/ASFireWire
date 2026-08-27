@@ -101,6 +101,13 @@ public:
         EndpointId endpointId, AudioSemanticConsoleLayoutSnapshot& outSnapshot) noexcept;
     [[nodiscard]] IOReturn CopyAudioSemanticMatrix(
         EndpointId endpointId, AudioSemanticMatrixSnapshot& outSnapshot) noexcept;
+    [[nodiscard]] IOReturn SubmitAudioSemanticMatrixCrosspoint(
+        EndpointId endpointId, uint32_t outputPortId, uint32_t inputPortId,
+        uint16_t coefficient, IAudioSemanticMatrix::ApplyCallback completion) noexcept;
+    [[nodiscard]] IOReturn SubmitAudioSemanticMatrixStereoStrip(
+        EndpointId endpointId,
+        const IAudioSemanticMatrix::StereoStripRequest& request,
+        IAudioSemanticMatrix::ApplyCallback completion) noexcept;
     [[nodiscard]] IOReturn RequestAudioControlValue(
         EndpointId endpointId, uint32_t controlId, int32_t value) noexcept;
     /// Starts a bounded semantic control write and returns immediately. The

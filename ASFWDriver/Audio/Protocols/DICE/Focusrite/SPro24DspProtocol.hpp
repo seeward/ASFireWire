@@ -92,6 +92,12 @@ public:
     }
     [[nodiscard]] bool CopyAudioSemanticMatrix(
         Audio::AudioSemanticMatrixSnapshot& outSnapshot) const noexcept override;
+    void ApplyAudioSemanticMatrixCrosspoint(
+        uint32_t outputPortId, uint32_t inputPortId, uint16_t coefficient,
+        Audio::IAudioSemanticMatrix::ApplyCallback callback) override;
+    void ApplyAudioSemanticMatrixStereoStrip(
+        const Audio::IAudioSemanticMatrix::StereoStripRequest& request,
+        Audio::IAudioSemanticMatrix::ApplyCallback callback) override;
     Audio::IAudioControlSurface* AsAudioControlSurface() noexcept override { return this; }
     const Audio::IAudioControlSurface* AsAudioControlSurface() const noexcept override {
         return this;
@@ -197,8 +203,10 @@ private:
     IOLock* semanticMatrixLock_{nullptr};
     DiceMixerCoefficients semanticMixerCoefficients_{};
     DiceRouterEntries semanticRouterEntries_{};
+    DiceExtensionCaps semanticExtensionCaps_{};
     uint32_t semanticMatrixRevision_{0};
     bool semanticMatrixReady_{false};
+    bool semanticMatrixWriteInFlight_{false};
     struct SemanticControlState final {
         InputParams input{};
         OutputGroupState output{};
@@ -242,6 +250,8 @@ private:
                                      ExtensionSections sections,
                                      InitCallback callback);
     void PrimeSemanticMatrix() noexcept;
+    void FinishSemanticMatrixWrite(IOReturn status,
+                                   Audio::IAudioSemanticMatrix::ApplyCallback callback) noexcept;
     void PrimeSemanticControls() noexcept;
     [[nodiscard]] bool BeginSemanticControlWrite(
         const Audio::IAudioControlSurface::ApplyCallback& callback) noexcept;

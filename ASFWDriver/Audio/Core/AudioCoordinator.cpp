@@ -489,6 +489,39 @@ IOReturn AudioCoordinator::CopyAudioSemanticMatrix(
     return kIOReturnSuccess;
 }
 
+IOReturn AudioCoordinator::SubmitAudioSemanticMatrixCrosspoint(
+    EndpointId endpointId, uint32_t outputPortId, uint32_t inputPortId,
+    uint16_t coefficient, IAudioSemanticMatrix::ApplyCallback completion) noexcept {
+    if (!completion) return kIOReturnBadArgument;
+    if (!endpointId || teardownRequested_.load(std::memory_order_acquire)) {
+        return kIOReturnNotReady;
+    }
+    const auto protocol = runtime_.FindShared(endpointId);
+    auto* matrix = protocol ? protocol->AsAudioSemanticMatrix() : nullptr;
+    if (!matrix) return kIOReturnUnsupported;
+    matrix->ApplyAudioSemanticMatrixCrosspoint(
+        outputPortId, inputPortId, coefficient, std::move(completion));
+    return kIOReturnSuccess;
+}
+
+IOReturn AudioCoordinator::SubmitAudioSemanticMatrixStereoStrip(
+    EndpointId endpointId,
+    const IAudioSemanticMatrix::StereoStripRequest& request,
+    IAudioSemanticMatrix::ApplyCallback completion) noexcept {
+    if (!completion || request.outputPresentationGroupId == 0 ||
+        request.inputPresentationGroupId == 0) {
+        return kIOReturnBadArgument;
+    }
+    if (!endpointId || teardownRequested_.load(std::memory_order_acquire)) {
+        return kIOReturnNotReady;
+    }
+    const auto protocol = runtime_.FindShared(endpointId);
+    auto* matrix = protocol ? protocol->AsAudioSemanticMatrix() : nullptr;
+    if (!matrix) return kIOReturnUnsupported;
+    matrix->ApplyAudioSemanticMatrixStereoStrip(request, std::move(completion));
+    return kIOReturnSuccess;
+}
+
 IOReturn AudioCoordinator::RequestAudioControlValue(
     EndpointId endpointId, uint32_t controlId, int32_t value) noexcept {
     // Selector 1019 predates the asynchronous control plane. It deliberately

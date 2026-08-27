@@ -78,6 +78,8 @@ enum {
     kMethodGetAudioSemanticConsoleLayout = 1030,
     kMethodGetAudioSemanticMatrix = 1031,
     kMethodGetAudioSemanticMatrixEndpoints = 1032,
+    kMethodSubmitAudioSemanticMatrixCrosspoint = 1033,
+    kMethodSubmitAudioSemanticMatrixStereoStrip = 1034,
     kMethodSetIsochVerbosity = 40,
     // 41 retired (was the dev TX-verifier toggle)
     kMethodSetAudioAutoStart = 42,
@@ -364,6 +366,12 @@ kern_return_t HandleGetAudioSemanticMatrix(
     ASFWDriver& driver, IOUserClientMethodArguments* arguments);
 kern_return_t HandleGetAudioSemanticMatrixEndpoints(
     ASFWDriver& driver, IOUserClientMethodArguments* arguments);
+kern_return_t HandleSubmitAudioSemanticMatrixCrosspoint(
+    ASFWDriver& driver, ASFWDriverUserClient& userClient,
+    IOUserClientMethodArguments* arguments);
+kern_return_t HandleSubmitAudioSemanticMatrixStereoStrip(
+    ASFWDriver& driver, ASFWDriverUserClient& userClient,
+    IOUserClientMethodArguments* arguments);
 kern_return_t HandleRequestAudioControlValue(
     ASFWDriver& driver, IOUserClientMethodArguments* arguments);
 kern_return_t HandleGetAudioMeterSnapshot(
@@ -434,6 +442,10 @@ MethodDispatchResult DispatchDriverControlMethods(ASFWDriver& driver,
         return HandleGetAudioSemanticMatrix(driver, arguments);
     case kMethodGetAudioSemanticMatrixEndpoints:
         return HandleGetAudioSemanticMatrixEndpoints(driver, arguments);
+    case kMethodSubmitAudioSemanticMatrixCrosspoint:
+        return HandleSubmitAudioSemanticMatrixCrosspoint(driver, userClient, arguments);
+    case kMethodSubmitAudioSemanticMatrixStereoStrip:
+        return HandleSubmitAudioSemanticMatrixStereoStrip(driver, userClient, arguments);
     case kMethodRequestAudioControlValue:
         return HandleRequestAudioControlValue(driver, arguments);
     case kMethodSubmitAudioControlValue:
@@ -776,6 +788,95 @@ kern_return_t HandleGetAudioSemanticMatrixEndpoints(
     arguments->structureOutput = data;
     arguments->structureOutputDescriptor = nullptr;
     return kIOReturnSuccess;
+}
+
+kern_return_t HandleSubmitAudioSemanticMatrixCrosspoint(
+    ASFWDriver& driver, ASFWDriverUserClient& userClient,
+    IOUserClientMethodArguments* arguments) {
+    // endpoint, opaque output port, opaque input port, coefficient, request.
+    // The selector intentionally carries neither a DICE register nor a raw
+    // address; the profile resolves the ports against its current snapshot.
+    if (!arguments || !arguments->completion || !arguments->scalarInput ||
+        arguments->scalarInputCount != 5) {
+        return kIOReturnBadArgument;
+    }
+    auto* context = static_cast<ServiceContext*>(driver.GetServiceContext());
+    if (!context || !context->audioCoordinator) return kIOReturnNotReady;
+
+    const auto endpointId = ASFW::Audio::Devices::AudioEndpointId{arguments->scalarInput[0]};
+    const uint32_t outputPortId = static_cast<uint32_t>(arguments->scalarInput[1]);
+    const uint32_t inputPortId = static_cast<uint32_t>(arguments->scalarInput[2]);
+    const uint16_t coefficient = static_cast<uint16_t>(arguments->scalarInput[3]);
+    const uint64_t requestId = arguments->scalarInput[4];
+    if (arguments->scalarInput[3] > UINT16_MAX) return kIOReturnBadArgument;
+
+    OSAction* const completion = arguments->completion;
+    completion->retain();
+    userClient.retain();
+    const auto finish = [&userClient, completion, requestId, outputPortId, inputPortId](
+                            IOReturn status) {
+        IOUserClientAsyncArgumentsArray data{};
+        data[0] = requestId;
+        data[1] = outputPortId;
+        data[2] = inputPortId;
+        userClient.AsyncCompletion(completion, status, data, 3);
+        completion->release();
+        userClient.release();
+    };
+    const kern_return_t started = context->audioCoordinator->SubmitAudioSemanticMatrixCrosspoint(
+        endpointId, outputPortId, inputPortId, coefficient, finish);
+    if (started != kIOReturnSuccess) {
+        finish(started);
+        return kIOReturnSuccess;
+    }
+    return started;
+}
+
+kern_return_t HandleSubmitAudioSemanticMatrixStereoStrip(
+    ASFWDriver& driver, ASFWDriverUserClient& userClient,
+    IOUserClientMethodArguments* arguments) {
+    // endpoint, semantic output-pair group, semantic input-pair group,
+    // level in millidecibels, balance -1000…+1000, request id.
+    if (!arguments || !arguments->completion || !arguments->scalarInput ||
+        arguments->scalarInputCount != 6) {
+        return kIOReturnBadArgument;
+    }
+    auto* context = static_cast<ServiceContext*>(driver.GetServiceContext());
+    if (!context || !context->audioCoordinator) return kIOReturnNotReady;
+
+    const auto endpointId = ASFW::Audio::Devices::AudioEndpointId{arguments->scalarInput[0]};
+    const ASFW::Audio::IAudioSemanticMatrix::StereoStripRequest request{
+        .outputPresentationGroupId = static_cast<uint32_t>(arguments->scalarInput[1]),
+        .inputPresentationGroupId = static_cast<uint32_t>(arguments->scalarInput[2]),
+        .levelMilliDb = static_cast<int32_t>(arguments->scalarInput[3]),
+        .balanceMilli = static_cast<int32_t>(arguments->scalarInput[4]),
+    };
+    const uint64_t requestId = arguments->scalarInput[5];
+    if (request.outputPresentationGroupId == 0 || request.inputPresentationGroupId == 0 ||
+        request.levelMilliDb < -85000 || request.levelMilliDb > 6000 ||
+        request.balanceMilli < -1000 || request.balanceMilli > 1000) {
+        return kIOReturnBadArgument;
+    }
+
+    OSAction* const completion = arguments->completion;
+    completion->retain();
+    userClient.retain();
+    const auto finish = [&userClient, completion, requestId, request](IOReturn status) {
+        IOUserClientAsyncArgumentsArray data{};
+        data[0] = requestId;
+        data[1] = request.outputPresentationGroupId;
+        data[2] = request.inputPresentationGroupId;
+        userClient.AsyncCompletion(completion, status, data, 3);
+        completion->release();
+        userClient.release();
+    };
+    const kern_return_t started = context->audioCoordinator->SubmitAudioSemanticMatrixStereoStrip(
+        endpointId, request, finish);
+    if (started != kIOReturnSuccess) {
+        finish(started);
+        return kIOReturnSuccess;
+    }
+    return started;
 }
 
 kern_return_t HandleRequestAudioControlValue(

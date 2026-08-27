@@ -28,6 +28,6 @@ struct AudioSemanticMatrixSnapshotWire final {
     ASFW::Audio::AudioSemanticMatrixSnapshot matrix{};
 };
 static_assert(offsetof(AudioSemanticMatrixSnapshotWire, matrix) == 16);
-static_assert(sizeof(AudioSemanticMatrixSnapshotWire) == 1784);
+static_assert(sizeof(AudioSemanticMatrixSnapshotWire) == 2168);
 
 } // namespace ASFW::UserClient::Wire

@@ -84,6 +84,18 @@ public:
                                const DiceExtensionCaps& caps,
                                std::function<void(IOReturn, DiceMixerCoefficients)> callback);
 
+    /// Write one active mixer crosspoint as its native unsigned coefficient.
+    /// The matrix is fixed-stride on the wire (18 input slots per output),
+    /// even when a particular device publishes fewer active inputs.  The
+    /// profile owns semantic port mapping; this layer only validates the
+    /// declared dimensions and performs the bounded quadlet transaction.
+    void WriteMixerCoefficient(const ExtensionSections& sections,
+                               const DiceExtensionCaps& caps,
+                               uint8_t output,
+                               uint8_t input,
+                               uint16_t coefficient,
+                               DICEWriteCallback callback);
+
     /// Read optional router-indexed peak records. Meter polling is policy
     /// owned by a profile; this method performs one bounded exact snapshot.
     void ReadPeakEntries(const ExtensionSections& sections,
