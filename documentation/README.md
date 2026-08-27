@@ -22,6 +22,7 @@ entry points.
 - [Bug list](BUGLIST.md)
 - [DICE stream regression](DICE_REGRESSION.md)
 - [DICE stability regression](DICE_STABILITY_REGRESSION.md)
+- [Focusrite Saffire Pro 24 DSP control and DSP reference](SPRO24DSP.md)
 - [TerraTec PHASE 88 topology research](TERRATEC_TOPOLOGY_RESEARCH.md)
 
 The other Markdown files in this directory document protocol behavior, timing,
