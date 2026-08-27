@@ -5,6 +5,7 @@
 #include <array>
 
 #include "ASFWDriver/Audio/Shared/Topology/IAudioSemanticMatrix.hpp"
+#include "ASFWDriver/Audio/Protocols/DICE/Core/DICERouterMixerTopology.hpp"
 #include "ASFWDriver/Audio/Protocols/DICE/Focusrite/SPro24DspSemanticMatrix.hpp"
 
 namespace ASFW::Audio {
@@ -61,6 +62,43 @@ TEST(AudioSemanticMatrixTests, RejectsInvalidOrAmbiguousAxes) {
     result = ValidateAudioSemanticMatrix(snapshot);
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), AudioSemanticMatrixValidationError::CoefficientOutOfRange);
+}
+
+TEST(AudioSemanticMatrixTests, TcatTopologyJoinsMixerPortsThroughActiveRouter) {
+    DICE::DiceMixerCoefficients coefficients{};
+    coefficients.inputCount = 18;
+    coefficients.outputCount = 16;
+
+    DICE::DiceRouterEntries routes{};
+    routes.count = 5;
+    routes.entries[0] = {.destinationBlock = 2, .destinationChannel = 0,
+                         .sourceBlock = 11, .sourceChannel = 3};
+    routes.entries[1] = {.destinationBlock = 3, .destinationChannel = 1,
+                         .sourceBlock = 4, .sourceChannel = 9};
+    routes.entries[2] = {.destinationBlock = 4, .destinationChannel = 0,
+                         .sourceBlock = 2, .sourceChannel = 0};
+    routes.entries[3] = {.destinationBlock = 5, .destinationChannel = 0,
+                         .sourceBlock = 2, .sourceChannel = 0};
+    routes.entries[4] = {.destinationBlock = 4, .destinationChannel = 1,
+                         .sourceBlock = 2, .sourceChannel = 8};
+
+    DICE::DiceRouterMixerTopology topology{};
+    ASSERT_TRUE(DICE::BuildDiceRouterMixerTopology(coefficients, routes, topology));
+    ASSERT_TRUE(topology.inputs[0].routed);
+    EXPECT_EQ(topology.inputs[0].route.sourceBlock, 11U);
+    EXPECT_EQ(topology.inputs[0].route.sourceChannel, 3U);
+    ASSERT_TRUE(topology.inputs[17].routed);
+    EXPECT_EQ(topology.inputs[17].route.sourceBlock, 4U);
+    EXPECT_EQ(topology.inputs[17].route.sourceChannel, 9U);
+    EXPECT_EQ(topology.outputRouteCounts[0], 2U);
+    EXPECT_EQ(topology.outputRouteCounts[8], 1U);
+    EXPECT_FALSE(topology.OutputIsRouted(1));
+
+    // A router destination has one source. Two entries for the same mixer
+    // input make semantic identity ambiguous and must fail closed.
+    routes.entries[routes.count++] = {.destinationBlock = 2, .destinationChannel = 0,
+                                      .sourceBlock = 1, .sourceChannel = 0};
+    EXPECT_FALSE(DICE::BuildDiceRouterMixerTopology(coefficients, routes, topology));
 }
 
 TEST(AudioSemanticMatrixTests, SPro24MapsRouterSourcesWithoutLeakingBlockIds) {

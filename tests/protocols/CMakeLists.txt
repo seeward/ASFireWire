@@ -315,6 +315,7 @@ add_protocols_test(AudioSemanticTopologyValidationTests
 add_protocols_test(AudioSemanticMatrixTests
     AudioSemanticMatrixTests.cpp
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro24DspSemanticMatrix.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICERouterMixerTopology.cpp"
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICEExtensionState.cpp"
 )
 
