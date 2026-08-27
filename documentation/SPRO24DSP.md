@@ -494,6 +494,46 @@ kHz both DSP return pairs would fall through to the generic auxiliary branch and
 be mislabelled. A latent defect, reachable only above 48 kHz, recorded rather
 than fixed while work is scoped to 44.1/48. **[derived]**
 
+### 5.0.1 Vendor output signal table (complete)
+
+All 47 entries of `Pro24DSP_OpSigTab`, same layout. These are router
+*destinations*. **[derived]**
+
+| # | vendor name | low (44.1/48) | mid (88.2/96) |
+|---:|---|---|---|
+| 0–13 | `ToHost1`…`ToHost14` | `Avs0:0`…`13` | `ToHost11`–`14` **absent** |
+| 14–15 | `Mon. 1`, `Mon. 2` | `Ins0:0,1` | same |
+| 16–17 | `Line 3`, `Line 4` | `Ins0:2,3` | same |
+| 18–19 | `Line 5`, `Line 6` | `Ins0:4,5` | **`Ins0:8,9`** |
+| 20–21 | `SPDIF 1.1`, `SPDIF 1.2` | `Aes:6,7` | same |
+| 22–23 | `Loop. 1`, `Loop. 2` | `Avs0:14,15` | **`Avs0:10,11`** |
+| 24–39 | `ToMix1`…`ToMix16` | `MixerTx0:0`…`15` | same |
+| 40–41 | `ToMix17`, `ToMix18` | `MixerTx1:0,1` | same |
+| 42–43 | `ToFX 0`, `ToFX 1` | `Ins0:8,9` | **`Ins0:4,5`** |
+| 44–45 | `ToRvb 0`, `ToRvb 1` | `Ins0:14,15` | **`Ins0:6,7`** |
+| 46 | `Off` | `Mute:0` | same |
+
+**Capture is 14 host channels plus 2 loopback.** `ToHost1`…`ToHost14` are the
+recorded inputs; `Loop. 1/2` are a **loopback** destination, not a physical
+input. That is the 16 capture channels the driver reports — the last two are not
+what a user would call an input, and any UI that lists sixteen equivalent
+capture channels is misdescribing two of them.
+
+**The first analog output pair is the monitor pair**, named `Mon. 1/2`, with
+`Line 3`…`Line 6` following. Six analog outputs.
+
+**`ToFX` and `ToRvb` confirm §5.1's deduction by name**: `Ins0:8/9` is the
+channel-strip input and `Ins0:14/15` the reverb input.
+
+**At 88.2/96 kHz, `Line 5/6` and `ToFX 0/1` swap router channels.** `Line 5/6`
+is `Ins0:4/5` at low rate and `Ins0:8/9` at mid; `ToFX 0/1` moves the other way,
+`Ins0:8/9` to `Ins0:4/5`. They exchange positions. A decoder that hardcodes the
+low-rate channels does not merely lose a label at high rate — it reports the
+**channel-strip send as a line output and vice versa**. Together with the input
+side's `FX(Anlg)` / `FmRvb` shift (§5.0), this is the substantive reason the
+profile must consult a rate-scoped table rather than a `switch` on channel
+number. **[derived]**
+
 ### 5.1 Measured signal fan-out
 
 Physical `Anlg In 1` is router source `Ins0:2` — confirmed by the vendor signal
