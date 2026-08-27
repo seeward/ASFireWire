@@ -108,6 +108,10 @@ public:
         EndpointId endpointId,
         const IAudioSemanticMatrix::StereoStripRequest& request,
         IAudioSemanticMatrix::ApplyCallback completion) noexcept;
+    [[nodiscard]] IOReturn SubmitAudioSemanticMatrixStripSuppression(
+        EndpointId endpointId,
+        const IAudioSemanticMatrix::StripSuppressionRequest& request,
+        IAudioSemanticMatrix::ApplyCallback completion) noexcept;
     [[nodiscard]] IOReturn RequestAudioControlValue(
         EndpointId endpointId, uint32_t controlId, int32_t value) noexcept;
     /// Starts a bounded semantic control write and returns immediately. The

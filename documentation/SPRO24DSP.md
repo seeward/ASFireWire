@@ -395,7 +395,7 @@ owns will be right often enough to look correct.** The mono strip now renders
 both buses, which also makes the hard-panned structure legible without an
 external read — the L/R pair *is* the pan position.
 
-Matrix ABI v5 carries the product presentation metadata which was previously
+Matrix ABI v6 carries the product presentation metadata which was previously
 missing:
 
 | field | purpose |
@@ -403,6 +403,7 @@ missing:
 | `groupId` | stable stereo/group identity |
 | `channelRole` | mono, left, or right |
 | `crosspointPresentation` | hidden, scalar readback, mono-pan, or stereo-balance |
+| `stripStates` | sparse mute/solo records and the level each strip returns to |
 
 Current console projection:
 
@@ -417,8 +418,67 @@ Current console projection:
 - Reverb return: valid in monitor buses, but hidden from the reverb-send bus so
   the console cannot create an accidental hardware self-feedback loop.
 - Raw L/R coefficient editing: never exposed as an ordinary console control.
-- Mute is a coefficient macro that must remember pre-mute gains.
-- Solo is a multi-crosspoint policy, not a separately readable hardware bit.
+- Mute and solo: per strip, on the selected bus. See §3.2.
+
+### 3.2 Mute and solo are coefficient policy, not device state
+
+**Neither is a hardware bit.** A mixer coefficient of zero *is* what a mute is on
+this device, so "muted at −6 dB" and "faded to silence" are the same cell value
+on the wire. The level a strip returns to therefore cannot be read back from the
+device at all; it exists only if the driver remembers it. That single fact
+decides the whole design. **[derived]**
+
+The driver keeps a **sparse record set** alongside the coefficient image, and
+publishes it in the matrix. A strip with no record is neither muted nor soloed,
+and its nominal level is simply its live coefficient — which is what makes the
+very first mute of a strip reversible without any prior bookkeeping.
+
+```text
+suppressed = strip.muted OR (some strip on this bus is soloed AND this one is not)
+effective  = suppressed ? 0 : nominal
+```
+
+Four consequences worth stating, because each is a way to get this wrong:
+
+- **Explicit mute and solo suppression are stored separately.** If solo merely
+  set the mute flag on everything else, clearing the solo would also clear a
+  mute the user had set by hand.
+- **A solo-suppressed strip still needs a record.** Its live coefficient is
+  zero, so without a remembered nominal, clearing the solo would restore
+  silence. The records are captured *before* the policy changes, not after.
+- **A fader still moves while muted.** A level gesture on a suppressed strip
+  updates what the strip returns to and writes nothing audible; it must not
+  lift the mute behind the user's back. The console follows the remembered
+  nominal rather than the silence on the wire, or muting would destroy the very
+  position it has to restore.
+- **Hardware wins on conflict.** Anything that writes a coefficient behind the
+  driver's back — the vendor application, MCP, another host — can leave a record
+  describing a strip that is no longer silent. Those records are dropped when
+  the coefficient image is re-read, because a stale one would otherwise
+  "restore" a level the user never set. **[implemented]**
+
+Solo is a **multi-crosspoint transaction**: it writes every cell on the bus
+whose effective value changes, then confirms *all* of them by readback. A
+partially applied solo is a worse state to publish than a failed one. Only
+changed cells are written, so an idempotent gesture costs no bus traffic.
+
+**Bound.** The snapshot travels IOKit's inline structure-output path, which caps
+at 4096 bytes and — as recorded in §1.1's spirit — fails closed *and silent*
+above it. The record set is therefore bounded at 64, and the wire snapshot is
+3768 bytes with a `static_assert` pinning it under the ceiling. A gesture that
+would need a 65th record is refused rather than partially applied, because a
+dropped record is a nominal level nothing could ever restore. Growing this
+surface again means moving the read to an out-of-line descriptor first.
+**[implemented]**
+
+Mute and solo are device-independent mixer semantics, so the policy lives in
+`ASFWDriver/Audio/Shared/Topology/AudioSemanticMatrixStripStates.{hpp,cpp}` and
+the SPro profile supplies only the native writes. Another matrix-publishing
+profile inherits it.
+
+**Not yet verified on hardware.** The transaction shape is the same
+write-then-exact-readback one that mono and stereo strips already use there, but
+mute and solo themselves have only been exercised against captured fixtures.
 
 ### Safe mixer write transaction
 
@@ -927,9 +987,10 @@ ASFW meter policy:
 |---|---|---|
 | DICE streaming / stopped choreography | working on tested hardware | retain regression tests |
 | Input and output controls | bounded write + readback exists | display output values as dB attenuation; add monitor assignment semantics |
-| Semantic mixer snapshot | matrix ABI v5 publishes per-cell presentation; grouped stereo level+balance and ASFW-defined mono level+pan writes use exact two-cell readback and are hardware-confirmed; reverb return is excluded from reverb send | retain the policy unless measured vendor-law evidence justifies replacing it |
+| Semantic mixer snapshot | matrix ABI v6 publishes per-cell presentation and sparse mute/solo strip records; grouped stereo level+balance and ASFW-defined mono level+pan writes use exact two-cell readback and are hardware-confirmed; reverb return is excluded from reverb send | retain the policy unless measured vendor-law evidence justifies replacing it |
 | Generic TCAT router/mixer join | input identity and output reachability come from the active router; inactive rows are omitted; native raw row survives semantic compaction | reuse for other TCD22xx profiles; keep product labels and pairing out of the generic layer |
 | SPro mixer buses | active state publishes monitor rows 0/1 and reverb-send rows 8/9 as separate UI sections | hardware-check both grouped write paths after each topology change |
+| Mixer mute / solo | driver-owned policy over remembered nominal levels; solo writes the whole bus and confirms every cell; stale records dropped when hardware contradicts them | **verify on hardware**; consider a bus-wide "clear all solos" gesture |
 | SPro input signal identity | all 41 vendor table entries transcribed with per-rate router coordinates; kind, index and stereo pairing resolved against the mode the router image was read at | transcribe the output table when the patchbay becomes rate-aware |
 | Patchbay | read-only active assignments | implement router-image transaction |
 | DSP control surface | readback published | add ordinary DSP transactions only after RMW/fragment path replaces legacy setters |
@@ -965,6 +1026,17 @@ The signal-table pass added:
 - vendor `SPDIF 1/2` and `SPDIF 3/4` numbering and pairing;
 - reverb-return self-send suppression holding at 2x, where the return has moved
   to `Ins0:6/7`.
+
+The mute/solo pass added:
+
+- strip resolution and bus enumeration refusing hidden and readback-only cells;
+- mute zeroing both cells and unmute restoring the remembered level exactly;
+- a level gesture during a mute updating the nominal without unmuting;
+- solo silencing the rest of its bus and no other bus, with every coefficient
+  restored to its original value when the solo clears;
+- explicit mute surviving a solo being cleared;
+- the record bound failing closed instead of dropping a nominal;
+- validation of malformed, over-long and duplicate strip records.
 
 Validation commands and result at the end of that pass:
 
@@ -1005,21 +1077,23 @@ are shared; routing and mixer state are not.
    — presentation group and channel role ship in the matrix. The generic TCAT
    join now supplies router-bound input identity and output reachability; the
    SPro profile publishes monitor 0/1 and reverb-send 8/9 separately, and matrix
-   ABI v5 declares the usable presentation of every active crosspoint. The
+   ABI v6 declares the usable presentation of every active crosspoint. The
    exact vendor mono pan curve remains uncaptured; ASFW intentionally declares
    and tests its own constant-power policy instead of pretending otherwise.
 2. ~~Implement bounded grouped level/pan-or-balance writes with readback.~~
    **Done** for driver-verified mono and stereo strips and hardware-confirmed.
    Linked/unlinked stereo state remains a later semantic mutation.
-3. Replace sparse whole-block DSP setters with active-rate, fragment-based
+3. ~~Implement mute and solo as driver-owned coefficient policy.~~ **Done**
+   — see §3.2. Hardware verification still outstanding.
+4. Replace sparse whole-block DSP setters with active-rate, fragment-based
    RMW transactions.  Implement channel-strip stereo link, EQ/compressor
    enable/order, natural compressor parameters, natural reverb parameters,
    then EQ.
-4. Add compact opt-in meters at ~50 Hz.
-5. Add verified patchbay writes and the headphone-mirror macro.
-6. Add monitor assignment presets, then rate/clock/optical configuration
+5. Add compact opt-in meters at ~50 Hz.
+6. Add verified patchbay writes and the headphone-mirror macro.
+7. Add monitor assignment presets, then rate/clock/optical configuration
    choreography.
-7. Design VRM separately, including coefficient-data licensing and hardware
+8. Design VRM separately, including coefficient-data licensing and hardware
    validation.
 
 Every writable item is gated by hardware readback.  A UI state is not current
@@ -1053,6 +1127,10 @@ stereo link, monitor macro semantics, or full VRM transition.
   send/return. Recording while monitoring the reverb produced a clean capture,
   proving these controls alter the hardware monitor path rather than the
   FireWire capture path.
+- Confirm mute zeroes both cells and unmute restores the exact prior level,
+  including after moving the fader while muted.
+- Confirm solo silences the rest of its bus, leaves other buses alone, and
+  restores every coefficient when cleared.
 - Confirm linked stereo change mirrors the companion DSP and mixer state.
 - Exercise each DSP control at 44.1, 48, 88.2 and 96 kHz; verify the active
   bank, notice, readback and audible result.

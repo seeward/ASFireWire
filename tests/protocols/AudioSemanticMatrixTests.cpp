@@ -295,11 +295,11 @@ TEST(AudioSemanticMatrixTests, SPro24StereoStripUsesPairedNativeCellsAndHardPanM
     ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(
         coefficients, routes, DICE::DiceRateMode::Low, snapshot));
 
-    const auto layout = DICE::Focusrite::ResolveSPro24DspStereoStrip(
-        coefficients, routes, DICE::DiceRateMode::Low,
-        snapshot.outputs[0].presentationGroupId,
+    const auto layout = DICE::Focusrite::ResolveSPro24DspStripCells(
+        snapshot, snapshot.outputs[0].presentationGroupId,
         snapshot.inputs[14].presentationGroupId);
     ASSERT_TRUE(layout.has_value());
+    EXPECT_FALSE(layout->mono);
     EXPECT_EQ(layout->inputLeft, 14U);
     EXPECT_EQ(layout->inputRight, 15U);
     EXPECT_EQ(layout->outputLeft, 0U);
@@ -341,11 +341,15 @@ TEST(AudioSemanticMatrixTests, SPro24MonoStripUsesOneInputAndConstantPowerPan) {
     AudioSemanticMatrixSnapshot snapshot{};
     ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(
         coefficients, routes, DICE::DiceRateMode::Low, snapshot));
-    const auto layout = DICE::Focusrite::ResolveSPro24DspMonoStrip(
-        coefficients, routes, DICE::DiceRateMode::Low, snapshot.outputs[0].presentationGroupId,
+    const auto layout = DICE::Focusrite::ResolveSPro24DspStripCells(
+        snapshot, snapshot.outputs[0].presentationGroupId,
         snapshot.inputs[4].presentationGroupId);
     ASSERT_TRUE(layout.has_value());
-    EXPECT_EQ(layout->input, 4U);
+    // One source cell drives both destination rows; that is what a mono strip
+    // is, and it is what selects the pan law over the balance law.
+    EXPECT_TRUE(layout->mono);
+    EXPECT_EQ(layout->inputLeft, 4U);
+    EXPECT_EQ(layout->inputRight, 4U);
     EXPECT_EQ(layout->outputLeft, 0U);
     EXPECT_EQ(layout->outputRight, 1U);
 

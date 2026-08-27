@@ -231,6 +231,11 @@ private struct SaffireMixerBusSection: View {
                                                         submit(source: source, destination: selectedGroup,
                                                                levelMilliDb: levelMilliDb,
                                                                balanceMilli: balanceMilli)
+                                                    },
+                                                    onSuppress: { muted, soloed in
+                                                        submitSuppression(source: source,
+                                                                          destination: selectedGroup,
+                                                                          muted: muted, soloed: soloed)
                                                     })
                             }
                         }
@@ -274,6 +279,31 @@ private struct SaffireMixerBusSection: View {
             inputPresentationGroupID: source.id,
             levelMilliDb: levelMilliDb,
             balanceMilli: balanceMilli
+        ) { status in
+            writeInFlight = false
+            writeStatus = status == KERN_SUCCESS
+                ? "Confirmed by hardware readback."
+                : "Write rejected: \(connector.interpretIOReturn(status))"
+        }
+    }
+
+    private func submitSuppression(source: SaffireMatrixGroup, destination: SaffireMatrixGroup,
+                                   muted: Bool, soloed: Bool) {
+        guard SaffireStripPresentation.resolve(matrix: matrix, source: source,
+                                               destination: destination)?.isWritable == true,
+              !writeInFlight else { return }
+        writeInFlight = true
+        // Solo rewrites the whole bus, so this is not always the two writes a
+        // level gesture costs.
+        writeStatus = soloed || muted
+            ? "Silencing (destination.title)…"
+            : "Restoring (destination.title)…"
+        connector.submitAudioSemanticMatrixStripSuppression(
+            endpointID: matrix.endpointID,
+            outputPresentationGroupID: destination.id,
+            inputPresentationGroupID: source.id,
+            muted: muted,
+            soloed: soloed
         ) { status in
             writeInFlight = false
             writeStatus = status == KERN_SUCCESS
@@ -402,12 +432,20 @@ private struct SaffireMixerDestinationBadge: View {
     }
 }
 
+private struct SaffireStripSignature: Equatable {
+    let levelMilliDb: Int32
+    let balanceMilli: Int32
+    let muted: Bool
+    let soloed: Bool
+}
+
 private struct SaffireMonitorStrip: View {
     let matrix: AudioSemanticMatrixSnapshot
     let source: SaffireMatrixGroup
     let destination: SaffireMatrixGroup
     let writeInFlight: Bool
     let onCommit: (Int32, Int32) -> Void
+    let onSuppress: (Bool, Bool) -> Void
 
     @State private var levelMilliDb: Int32
     @State private var balanceMilli: Int32
@@ -418,14 +456,28 @@ private struct SaffireMonitorStrip: View {
                                          destination: destination) ?? .scalarReadback
     }
 
+    private var stripState: AudioSemanticMatrixSnapshot.StripState? {
+        matrix.stripState(output: destination.id, input: source.id)
+    }
+    private var isMuted: Bool { stripState?.muted ?? false }
+    private var isSoloed: Bool { stripState?.soloed ?? false }
+    /// Silenced by another strip's solo rather than by its own mute. Worth
+    /// showing distinctly: the strip is not muted, and un-muting it will not
+    /// bring it back.
+    private var isDimmedBySolo: Bool {
+        !isMuted && !isSoloed && matrix.busHasSolo(output: destination.id)
+    }
+
     init(matrix: AudioSemanticMatrixSnapshot, source: SaffireMatrixGroup,
          destination: SaffireMatrixGroup, writeInFlight: Bool,
-         onCommit: @escaping (Int32, Int32) -> Void) {
+         onCommit: @escaping (Int32, Int32) -> Void,
+         onSuppress: @escaping (Bool, Bool) -> Void) {
         self.matrix = matrix
         self.source = source
         self.destination = destination
         self.writeInFlight = writeInFlight
         self.onCommit = onCommit
+        self.onSuppress = onSuppress
         let projected = Self.project(matrix: matrix, source: source, destination: destination)
         _levelMilliDb = State(initialValue: projected.levelMilliDb)
         _balanceMilli = State(initialValue: projected.balanceMilli)
@@ -443,7 +495,7 @@ private struct SaffireMonitorStrip: View {
                 monoReadback
             }
         }
-        .onChange(of: sourceCoefficientSignature) { _, _ in
+        .onChange(of: stripSignature) { _, _ in
             guard !writeInFlight else { return }
             let projected = Self.project(matrix: matrix, source: source, destination: destination)
             levelMilliDb = projected.levelMilliDb
@@ -451,6 +503,38 @@ private struct SaffireMonitorStrip: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(source.title) mixer control")
+    }
+
+    /// Mute and solo are absolute, not toggles, at the wire: each tap sends the
+    /// state it wants. Solo silences the rest of this bus only.
+    private var suppressionButtons: some View {
+        HStack(spacing: 4) {
+            suppressionButton(title: "M", isOn: isMuted, tint: .orange,
+                              accessibility: "\(source.title) mute") {
+                onSuppress(!isMuted, isSoloed)
+            }
+            suppressionButton(title: "S", isOn: isSoloed, tint: .yellow,
+                              accessibility: "\(source.title) solo") {
+                onSuppress(isMuted, !isSoloed)
+            }
+        }
+    }
+
+    private func suppressionButton(title: String, isOn: Bool, tint: Color,
+                                   accessibility: String,
+                                   action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.caption2.monospaced().bold())
+                .foregroundStyle(isOn ? Color.black : Color.secondary)
+                .frame(width: 26, height: 16)
+                .background(isOn ? tint : Color.white.opacity(0.08),
+                            in: RoundedRectangle(cornerRadius: 3))
+        }
+        .buttonStyle(.plain)
+        .disabled(writeInFlight)
+        .accessibilityLabel(accessibility)
+        .accessibilityAddTraits(isOn ? .isSelected : [])
     }
 
     private var monoReadback: some View {
@@ -494,14 +578,15 @@ private struct SaffireMonitorStrip: View {
     }
 
     private var stereoControl: some View {
-        AudioConsoleStripSlots(controlHeight: 45, faderHeight: 190) {
+        AudioConsoleStripSlots(controlHeight: 62, faderHeight: 190) {
             VStack(spacing: 3) {
                 Text("STEREO SOURCE")
                     .font(.caption2.monospaced().bold())
                     .foregroundStyle(.secondary)
-                Text("BALANCE + LEVEL")
+                Text(isDimmedBySolo ? "SOLO ELSEWHERE" : "BALANCE + LEVEL")
                     .font(.caption2.monospaced())
-                    .foregroundStyle(tint)
+                    .foregroundStyle(isDimmedBySolo ? Color.secondary : tint)
+                suppressionButtons
             }
         } faderBlock: {
             // Sized to the 190pt slot: 37 (rotary + caption) + 126 (fader) + 13
@@ -543,14 +628,15 @@ private struct SaffireMonitorStrip: View {
     }
 
     private var monoControl: some View {
-        AudioConsoleStripSlots(controlHeight: 45, faderHeight: 190) {
+        AudioConsoleStripSlots(controlHeight: 62, faderHeight: 190) {
             VStack(spacing: 3) {
                 Text("MONO SOURCE")
                     .font(.caption2.monospaced().bold())
                     .foregroundStyle(.secondary)
-                Text("PAN + LEVEL")
+                Text(isDimmedBySolo ? "SOLO ELSEWHERE" : "PAN + LEVEL")
                     .font(.caption2.monospaced())
-                    .foregroundStyle(tint)
+                    .foregroundStyle(isDimmedBySolo ? Color.secondary : tint)
+                suppressionButtons
             }
         } faderBlock: {
             VStack(spacing: 6) {
@@ -585,20 +671,14 @@ private struct SaffireMonitorStrip: View {
         matrix.coefficient(output: output, input: input) ?? 0
     }
 
-    private var sourceCoefficientSignature: UInt32 {
-        guard let outputLeft = destination.member(role: .left),
-              let outputRight = destination.member(role: .right) else { return 0 }
-        switch presentation {
-        case .monoLevelPan, .scalarReadback:
-            guard let input = source.axes.first else { return 0 }
-            return UInt32(coefficient(output: outputLeft.index, input: input.index)) << 16 |
-                   UInt32(coefficient(output: outputRight.index, input: input.index))
-        case .stereoLevelBalance:
-            guard let inputLeft = source.member(role: .left),
-                  let inputRight = source.member(role: .right) else { return 0 }
-            return UInt32(coefficient(output: outputLeft.index, input: inputLeft.index)) << 16 |
-                   UInt32(coefficient(output: outputRight.index, input: inputRight.index))
-        }
+    /// What the controls should be showing. Watching the projected value rather
+    /// than the raw cells means a mute -- which zeroes the cells while the
+    /// remembered level is unchanged -- correctly leaves the fader where it was.
+    private var stripSignature: SaffireStripSignature {
+        let projected = Self.project(matrix: matrix, source: source, destination: destination)
+        return .init(levelMilliDb: projected.levelMilliDb,
+                     balanceMilli: projected.balanceMilli,
+                     muted: isMuted, soloed: isSoloed)
     }
 
     /// "R 0%" is a contradiction: it reads as off-centre while stating it is
@@ -621,6 +701,18 @@ private struct SaffireMonitorStrip: View {
 
     private static let centreDetentMilli: Int32 = 40
 
+    /// A suppressed strip's cells read zero, so the fader has to follow the
+    /// level the driver remembers instead of the silence on the wire -- if it
+    /// followed the wire, muting would destroy the position it must restore.
+    private static func nominal(matrix: AudioSemanticMatrixSnapshot,
+                                source: SaffireMatrixGroup, destination: SaffireMatrixGroup,
+                                liveLeft: UInt16, liveRight: UInt16) -> (UInt16, UInt16) {
+        guard let state = matrix.stripState(output: destination.id, input: source.id) else {
+            return (liveLeft, liveRight)
+        }
+        return (state.nominalLeft, state.nominalRight)
+    }
+
     private static func project(matrix: AudioSemanticMatrixSnapshot, source: SaffireMatrixGroup,
                                 destination: SaffireMatrixGroup) -> (levelMilliDb: Int32, balanceMilli: Int32) {
         guard let outputLeft = destination.member(role: .left),
@@ -632,8 +724,10 @@ private struct SaffireMonitorStrip: View {
 
         if presentation == .monoLevelPan,
            let input = source.axes.first,
-           let left = matrix.coefficient(output: outputLeft.index, input: input.index),
-           let right = matrix.coefficient(output: outputRight.index, input: input.index) {
+           let liveLeft = matrix.coefficient(output: outputLeft.index, input: input.index),
+           let liveRight = matrix.coefficient(output: outputRight.index, input: input.index) {
+            let (left, right) = nominal(matrix: matrix, source: source, destination: destination,
+                                        liveLeft: liveLeft, liveRight: liveRight)
             let leftAmplitude = Double(left) / 16384
             let rightAmplitude = Double(right) / 16384
             let levelAmplitude = hypot(leftAmplitude, rightAmplitude)
@@ -647,10 +741,12 @@ private struct SaffireMonitorStrip: View {
         guard presentation == .stereoLevelBalance,
               let inputLeft = source.member(role: .left),
               let inputRight = source.member(role: .right),
-              let left = matrix.coefficient(output: outputLeft.index, input: inputLeft.index),
-              let right = matrix.coefficient(output: outputRight.index, input: inputRight.index) else {
+              let liveLeft = matrix.coefficient(output: outputLeft.index, input: inputLeft.index),
+              let liveRight = matrix.coefficient(output: outputRight.index, input: inputRight.index) else {
             return (-85_000, 0)
         }
+        let (left, right) = nominal(matrix: matrix, source: source, destination: destination,
+                                    liveLeft: liveLeft, liveRight: liveRight)
         let leftDb = coefficientDb(left)
         let rightDb = coefficientDb(right)
         // Both channels carry the balance law, so the position has to be

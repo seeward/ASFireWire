@@ -343,7 +343,10 @@ bool SPro24DspProtocol::CopyAudioSemanticMatrix(
     const bool ready = semanticMatrixReady_ &&
         BuildSPro24DspSemanticMatrix(semanticMixerCoefficients_, semanticRouterEntries_,
                                      semanticRateMode_, outSnapshot);
-    if (ready) outSnapshot.stateRevision = semanticMatrixRevision_;
+    if (ready) {
+        outSnapshot.stateRevision = semanticMatrixRevision_;
+        semanticStripStates_.CopyInto(outSnapshot);
+    }
     IOLockUnlock(semanticMatrixLock_);
     return ready;
 }
@@ -372,43 +375,87 @@ void SPro24DspProtocol::FinishSemanticMatrixWrite(
     if (callback) callback(status);
 }
 
-void SPro24DspProtocol::ApplyAudioSemanticMatrixStereoStrip(
-    const Audio::IAudioSemanticMatrix::StereoStripRequest& request,
+void SPro24DspProtocol::ReconcileSemanticStripStates() noexcept {
+    // Caller holds semanticMatrixLock_. Mute and solo are the driver's own
+    // policy, not device state, so anything that writes a coefficient behind
+    // our back -- the vendor application, MCP, another host -- can leave a
+    // record describing a strip that is no longer silent. Hardware wins: a
+    // stale record would otherwise "restore" a level the user never set.
+    if (semanticStripStates_.Count() == 0) return;
+    Audio::AudioSemanticMatrixSnapshot snapshot{};
+    if (!BuildSPro24DspSemanticMatrix(semanticMixerCoefficients_, semanticRouterEntries_,
+                                      semanticRateMode_, snapshot)) {
+        semanticStripStates_.Clear();
+        return;
+    }
+    semanticStripStates_.CopyInto(snapshot);
+
+    std::array<std::pair<uint32_t, uint32_t>,
+               Audio::kMaxAudioSemanticMatrixStripStates> stale{};
+    uint32_t staleCount = 0;
+    for (uint32_t index = 0; index < snapshot.stripStateCount; ++index) {
+        const auto& record = snapshot.stripStates[index];
+        Audio::AudioSemanticMatrixStripCells strip{};
+        const bool resolved = Audio::ResolveAudioSemanticMatrixStrip(
+            snapshot, record.outputPresentationGroupId,
+            record.inputPresentationGroupId, strip);
+        bool drop = !resolved;
+        if (resolved && snapshot.StripIsSuppressed(record.outputPresentationGroupId,
+                                                   record.inputPresentationGroupId)) {
+            drop = snapshot.Coefficient(strip.outputLeft, strip.inputLeft) != 0 ||
+                   snapshot.Coefficient(strip.outputRight, strip.inputRight) != 0;
+        }
+        if (drop) {
+            stale[staleCount++] = {record.outputPresentationGroupId,
+                                   record.inputPresentationGroupId};
+        }
+    }
+    for (uint32_t index = 0; index < staleCount; ++index) {
+        semanticStripStates_.Remove(stale[index].first, stale[index].second);
+    }
+    semanticStripStates_.Prune();
+}
+
+void SPro24DspProtocol::BeginSemanticMixerGesture(
+    SemanticMixerGestureStage stage,
     Audio::IAudioSemanticMatrix::ApplyCallback callback) {
-    if (!callback || !semanticMatrixLock_) {
+    if (!semanticMatrixLock_) {
         if (callback) callback(kIOReturnNotReady);
         return;
     }
-
     IOLockLock(semanticMatrixLock_);
     const bool ready = semanticMatrixReady_ && !semanticMatrixWriteInFlight_;
     if (ready) semanticMatrixWriteInFlight_ = true;
+    const auto rateMode = semanticRateMode_;
     IOLockUnlock(semanticMatrixLock_);
     if (!ready) {
-        callback(kIOReturnBusy);
+        if (callback) callback(kIOReturnBusy);
         return;
     }
 
-    // The active router is part of the semantic identity. Re-read it with the
-    // coefficient image so an external route change cannot turn a stale UI
-    // group ID into a write to a different source row.
     EnsureExtensionsLoaded(
-        [this, request, callback = std::move(callback)](IOReturn sectionsStatus) mutable {
+        [this, rateMode, stage = std::move(stage),
+         callback = std::move(callback)](IOReturn sectionsStatus) mutable {
             if (sectionsStatus != kIOReturnSuccess) {
                 FinishSemanticMatrixWrite(sectionsStatus, std::move(callback));
                 return;
             }
             tcat_.Transaction().ReadExtensionCaps(
                 extensionSections_,
-                [this, request, callback = std::move(callback)](IOReturn capsStatus,
-                                                                  DiceExtensionCaps caps) mutable {
+                [this, rateMode, stage = std::move(stage),
+                 callback = std::move(callback)](IOReturn capsStatus,
+                                                 DiceExtensionCaps caps) mutable {
                     if (capsStatus != kIOReturnSuccess) {
                         FinishSemanticMatrixWrite(capsStatus, std::move(callback));
                         return;
                     }
+                    // The router is re-read with the coefficients so that an
+                    // external route change cannot let a stale group ID resolve
+                    // against a source that is no longer there.
                     tcat_.Transaction().ReadCurrentConfigRouterEntries(
                         extensionSections_, caps, kSemanticRouterRateMode,
-                        [this, request, caps, callback = std::move(callback)](
+                        [this, caps, rateMode, stage = std::move(stage),
+                         callback = std::move(callback)](
                             IOReturn routeStatus, DiceRouterEntries routes) mutable {
                             if (routeStatus != kIOReturnSuccess) {
                                 FinishSemanticMatrixWrite(routeStatus, std::move(callback));
@@ -416,116 +463,256 @@ void SPro24DspProtocol::ApplyAudioSemanticMatrixStereoStrip(
                             }
                             tcat_.Transaction().ReadMixerCoefficients(
                                 extensionSections_, caps,
-                                [this, request, caps, routes, callback = std::move(callback)](
-                                    IOReturn readStatus, DiceMixerCoefficients current) mutable {
+                                [this, caps, routes, rateMode, stage = std::move(stage),
+                                 callback = std::move(callback)](
+                                    IOReturn readStatus,
+                                    DiceMixerCoefficients current) mutable {
                                     if (readStatus != kIOReturnSuccess) {
-                                        FinishSemanticMatrixWrite(readStatus, std::move(callback));
+                                        FinishSemanticMatrixWrite(readStatus,
+                                                                  std::move(callback));
                                         return;
                                     }
-                                    struct ResolvedStripCells final {
-                                        uint8_t inputLeft{0};
-                                        uint8_t inputRight{0};
-                                        uint8_t outputLeft{0};
-                                        uint8_t outputRight{0};
-                                    };
-                                    std::optional<ResolvedStripCells> layout;
-                                    std::optional<SPro24DspStereoStripCoefficients> coefficients;
-
-                                    if (const auto stereo = ResolveSPro24DspStereoStrip(
-                                        current, routes, kSemanticRouterRateMode,
-                                        request.outputPresentationGroupId,
-                                        request.inputPresentationGroupId)) {
-                                        layout = ResolvedStripCells{
-                                            .inputLeft = stereo->inputLeft,
-                                            .inputRight = stereo->inputRight,
-                                            .outputLeft = stereo->outputLeft,
-                                            .outputRight = stereo->outputRight,
-                                        };
-                                        coefficients = MakeSPro24DspStereoStripCoefficients(
-                                            request.levelMilliDb, request.balanceMilli);
-                                    } else if (const auto mono = ResolveSPro24DspMonoStrip(
-                                                   current, routes, kSemanticRouterRateMode,
-                                                   request.outputPresentationGroupId,
-                                                   request.inputPresentationGroupId)) {
-                                        layout = ResolvedStripCells{
-                                            .inputLeft = mono->input,
-                                            .inputRight = mono->input,
-                                            .outputLeft = mono->outputLeft,
-                                            .outputRight = mono->outputRight,
-                                        };
-                                        coefficients = MakeSPro24DspMonoStripCoefficients(
-                                            request.levelMilliDb, request.balanceMilli);
-                                    }
-                                    if (!layout || !coefficients) {
+                                    Audio::AudioSemanticMatrixSnapshot snapshot{};
+                                    if (!BuildSPro24DspSemanticMatrix(current, routes,
+                                                                      rateMode, snapshot)) {
                                         FinishSemanticMatrixWrite(kIOReturnBadArgument,
                                                                   std::move(callback));
                                         return;
                                     }
-
-                                    // A grouped gesture is exactly two native DICE writes. A
-                                    // stereo source uses its real L/R input cells; a mono source
-                                    // uses the same input cell against the destination's L/R rows.
-                                    // No router load/commit command follows either write.
-                                    tcat_.Transaction().WriteMixerCoefficient(
-                                        extensionSections_, caps, layout->outputLeft,
-                                        layout->inputLeft, coefficients->left,
-                                        [this, caps, routes, layout = *layout,
-                                         coefficients = *coefficients,
-                                         callback = std::move(callback)](IOReturn leftStatus) mutable {
-                                            if (leftStatus != kIOReturnSuccess) {
-                                                FinishSemanticMatrixWrite(leftStatus,
-                                                                          std::move(callback));
-                                                return;
-                                            }
-                                            tcat_.Transaction().WriteMixerCoefficient(
-                                                extensionSections_, caps, layout.outputRight,
-                                                layout.inputRight, coefficients.right,
-                                                [this, caps, routes, layout, coefficients,
-                                                 callback = std::move(callback)](
-                                                    IOReturn rightStatus) mutable {
-                                                    if (rightStatus != kIOReturnSuccess) {
-                                                        FinishSemanticMatrixWrite(rightStatus,
-                                                                                  std::move(callback));
-                                                        return;
-                                                    }
-                                                    tcat_.Transaction().ReadMixerCoefficients(
-                                                        extensionSections_, caps,
-                                                        [this, caps, routes, layout, coefficients,
-                                                         callback = std::move(callback)](
-                                                            IOReturn readbackStatus,
-                                                            DiceMixerCoefficients readback) mutable {
-                                                            const bool confirmed =
-                                                                readbackStatus == kIOReturnSuccess &&
-                                                                readback.At(layout.outputLeft,
-                                                                            layout.inputLeft) ==
-                                                                    coefficients.left &&
-                                                                readback.At(layout.outputRight,
-                                                                            layout.inputRight) ==
-                                                                    coefficients.right;
-                                                            if (!confirmed) {
-                                                                FinishSemanticMatrixWrite(
-                                                                    readbackStatus == kIOReturnSuccess
-                                                                        ? kIOReturnError
-                                                                        : readbackStatus,
-                                                                    std::move(callback));
-                                                                return;
-                                                            }
-                                                            IOLockLock(semanticMatrixLock_);
-                                                            semanticExtensionCaps_ = caps;
-                                                            semanticRouterEntries_ = routes;
-                                                            semanticMixerCoefficients_ = readback;
-                                                            semanticMatrixReady_ = true;
-                                                            ++semanticMatrixRevision_;
-                                                            IOLockUnlock(semanticMatrixLock_);
-                                                            FinishSemanticMatrixWrite(
-                                                                kIOReturnSuccess, std::move(callback));
-                                                        });
-                                                });
-                                        });
+                                    IOLockLock(semanticMatrixLock_);
+                                    semanticStripStates_.CopyInto(snapshot);
+                                    IOLockUnlock(semanticMatrixLock_);
+                                    stage(caps, routes, current, snapshot,
+                                          std::move(callback));
                                 });
                         });
                 });
         });
+}
+
+void SPro24DspProtocol::WriteNextSemanticMixerCell(
+    DiceExtensionCaps caps, PendingSemanticMixerCellWrites pending,
+    std::function<void(IOReturn)> completion) {
+    if (pending.next >= pending.count) {
+        completion(kIOReturnSuccess);
+        return;
+    }
+    const auto cell = pending.cells[pending.next];
+    tcat_.Transaction().WriteMixerCoefficient(
+        extensionSections_, caps, cell.output, cell.input, cell.value,
+        [this, caps, pending, completion = std::move(completion)](
+            IOReturn status) mutable {
+            if (status != kIOReturnSuccess) {
+                completion(status);
+                return;
+            }
+            ++pending.next;
+            WriteNextSemanticMixerCell(caps, pending, std::move(completion));
+        });
+}
+
+void SPro24DspProtocol::CommitSemanticMixerCells(
+    DiceExtensionCaps caps, DiceRouterEntries routes,
+    PendingSemanticMixerCellWrites pending,
+    Audio::AudioSemanticMatrixStripStateSet states,
+    Audio::IAudioSemanticMatrix::ApplyCallback callback) {
+    WriteNextSemanticMixerCell(
+        caps, pending,
+        [this, caps, routes, pending, states,
+         callback = std::move(callback)](IOReturn writeStatus) mutable {
+            if (writeStatus != kIOReturnSuccess) {
+                FinishSemanticMatrixWrite(writeStatus, std::move(callback));
+                return;
+            }
+            tcat_.Transaction().ReadMixerCoefficients(
+                extensionSections_, caps,
+                [this, caps, routes, pending, states, callback = std::move(callback)](
+                    IOReturn readbackStatus, DiceMixerCoefficients readback) mutable {
+                    bool confirmed = readbackStatus == kIOReturnSuccess;
+                    // Every written cell is confirmed, not just the last one:
+                    // a solo writes many, and a partially applied solo is a
+                    // worse state to publish than a failed one.
+                    for (uint32_t index = 0; confirmed && index < pending.count; ++index) {
+                        const auto& cell = pending.cells[index];
+                        confirmed = readback.At(cell.output, cell.input) == cell.value;
+                    }
+                    if (!confirmed) {
+                        FinishSemanticMatrixWrite(
+                            readbackStatus == kIOReturnSuccess ? kIOReturnError
+                                                               : readbackStatus,
+                            std::move(callback));
+                        return;
+                    }
+                    states.Prune();
+                    IOLockLock(semanticMatrixLock_);
+                    semanticExtensionCaps_ = caps;
+                    semanticRouterEntries_ = routes;
+                    semanticMixerCoefficients_ = readback;
+                    semanticStripStates_ = states;
+                    semanticMatrixReady_ = true;
+                    ++semanticMatrixRevision_;
+                    IOLockUnlock(semanticMatrixLock_);
+                    FinishSemanticMatrixWrite(kIOReturnSuccess, std::move(callback));
+                });
+        });
+}
+
+void SPro24DspProtocol::ApplyAudioSemanticMatrixStereoStrip(
+    const Audio::IAudioSemanticMatrix::StereoStripRequest& request,
+    Audio::IAudioSemanticMatrix::ApplyCallback callback) {
+    BeginSemanticMixerGesture(
+        [this, request](DiceExtensionCaps caps, DiceRouterEntries routes,
+                        DiceMixerCoefficients current,
+                        const Audio::AudioSemanticMatrixSnapshot& snapshot,
+                        Audio::IAudioSemanticMatrix::ApplyCallback callback) mutable {
+            const auto cells = ResolveSPro24DspStripCells(
+                snapshot, request.outputPresentationGroupId,
+                request.inputPresentationGroupId);
+            // One source cell against two destination rows is a pan; two source
+            // cells against their own rows is a balance. They are different
+            // laws, and the strip's shape is what selects between them.
+            const auto coefficients = cells
+                ? (cells->mono
+                       ? MakeSPro24DspMonoStripCoefficients(request.levelMilliDb,
+                                                            request.balanceMilli)
+                       : MakeSPro24DspStereoStripCoefficients(request.levelMilliDb,
+                                                              request.balanceMilli))
+                : std::nullopt;
+            if (!cells || !coefficients) {
+                FinishSemanticMatrixWrite(kIOReturnBadArgument, std::move(callback));
+                return;
+            }
+
+            auto states = semanticStripStates_;
+            const bool suppressed = states.IsSuppressed(request.outputPresentationGroupId,
+                                                        request.inputPresentationGroupId);
+            // A fader still moves while the strip is muted; the gesture updates
+            // what the strip returns to rather than unmuting it behind the
+            // user's back.
+            if (suppressed || states.Find(request.outputPresentationGroupId,
+                                          request.inputPresentationGroupId) != nullptr) {
+                auto record = Audio::AudioSemanticMatrixStripState{
+                    .outputPresentationGroupId = request.outputPresentationGroupId,
+                    .inputPresentationGroupId = request.inputPresentationGroupId,
+                    .nominalLeft = coefficients->left,
+                    .nominalRight = coefficients->right,
+                };
+                if (const auto* existing = states.Find(request.outputPresentationGroupId,
+                                                       request.inputPresentationGroupId)) {
+                    record.muted = existing->muted;
+                    record.soloed = existing->soloed;
+                }
+                if (!states.Upsert(record)) {
+                    FinishSemanticMatrixWrite(kIOReturnNoResources, std::move(callback));
+                    return;
+                }
+            }
+
+            const uint16_t left = suppressed ? uint16_t{0} : coefficients->left;
+            const uint16_t right = suppressed ? uint16_t{0} : coefficients->right;
+            PendingSemanticMixerCellWrites pending{};
+            pending.cells[pending.count++] = {.output = cells->outputLeft,
+                                              .input = cells->inputLeft,
+                                              .value = left};
+            pending.cells[pending.count++] = {.output = cells->outputRight,
+                                              .input = cells->inputRight,
+                                              .value = right};
+            (void)current;
+            CommitSemanticMixerCells(caps, routes, pending, states, std::move(callback));
+        },
+        std::move(callback));
+}
+
+void SPro24DspProtocol::ApplyAudioSemanticMatrixStripSuppression(
+    const Audio::IAudioSemanticMatrix::StripSuppressionRequest& request,
+    Audio::IAudioSemanticMatrix::ApplyCallback callback) {
+    BeginSemanticMixerGesture(
+        [this, request](DiceExtensionCaps caps, DiceRouterEntries routes,
+                        DiceMixerCoefficients current,
+                        const Audio::AudioSemanticMatrixSnapshot& snapshot,
+                        Audio::IAudioSemanticMatrix::ApplyCallback callback) mutable {
+            const auto target = ResolveSPro24DspStripCells(
+                snapshot, request.outputPresentationGroupId,
+                request.inputPresentationGroupId);
+            if (!target) {
+                FinishSemanticMatrixWrite(kIOReturnBadArgument, std::move(callback));
+                return;
+            }
+
+            // Solo is a property of the whole bus, so every strip on it can
+            // change value even though the user gestured on one.
+            std::array<Audio::AudioSemanticMatrixStripCells,
+                       Audio::kMaxAudioSemanticMatrixStripsPerBus> strips{};
+            uint32_t stripCount = 0;
+            if (!Audio::EnumerateAudioSemanticMatrixBusStrips(
+                    snapshot, request.outputPresentationGroupId, strips, stripCount)) {
+                FinishSemanticMatrixWrite(kIOReturnBadArgument, std::move(callback));
+                return;
+            }
+
+            auto states = semanticStripStates_;
+            // Capture every strip's nominal before changing the policy. A strip
+            // silenced by someone else's solo has a live coefficient of zero,
+            // so once it is suppressed its own level is no longer recoverable
+            // from the hardware.
+            for (uint32_t index = 0; index < stripCount; ++index) {
+                const auto& strip = strips[index];
+                const auto nominal =
+                    Audio::AudioSemanticMatrixStripNominal(snapshot, states, strip);
+                auto record = Audio::AudioSemanticMatrixStripState{
+                    .outputPresentationGroupId = strip.outputPresentationGroupId,
+                    .inputPresentationGroupId = strip.inputPresentationGroupId,
+                    .nominalLeft = nominal.left,
+                    .nominalRight = nominal.right,
+                };
+                if (const auto* existing = states.Find(strip.outputPresentationGroupId,
+                                                       strip.inputPresentationGroupId)) {
+                    record.muted = existing->muted;
+                    record.soloed = existing->soloed;
+                }
+                if (strip.inputPresentationGroupId == request.inputPresentationGroupId) {
+                    record.muted = request.muted ? 1 : 0;
+                    record.soloed = request.soloed ? 1 : 0;
+                }
+                if (!states.Upsert(record)) {
+                    // Refusing is the only safe answer: a record that does not
+                    // fit is a nominal level nothing could ever restore.
+                    FinishSemanticMatrixWrite(kIOReturnNoResources, std::move(callback));
+                    return;
+                }
+            }
+
+            // Only cells whose effective value actually changes are written, so
+            // an idempotent gesture costs no bus traffic.
+            PendingSemanticMixerCellWrites pending{};
+            for (uint32_t index = 0; index < stripCount; ++index) {
+                const auto& strip = strips[index];
+                const auto effective =
+                    Audio::AudioSemanticMatrixStripEffective(snapshot, states, strip);
+                const auto native = ResolveSPro24DspStripCells(
+                    snapshot, strip.outputPresentationGroupId,
+                    strip.inputPresentationGroupId);
+                if (!native) continue;
+                const SemanticMixerCellWrite wanted[2] = {
+                    {.output = native->outputLeft, .input = native->inputLeft,
+                     .value = effective.left},
+                    {.output = native->outputRight, .input = native->inputRight,
+                     .value = effective.right},
+                };
+                for (const auto& cell : wanted) {
+                    if (current.At(cell.output, cell.input) == cell.value) continue;
+                    if (pending.count >= kMaxSemanticMixerCellWrites) {
+                        FinishSemanticMatrixWrite(kIOReturnNoResources,
+                                                  std::move(callback));
+                        return;
+                    }
+                    pending.cells[pending.count++] = cell;
+                }
+            }
+
+            CommitSemanticMixerCells(caps, routes, pending, states, std::move(callback));
+        },
+        std::move(callback));
 }
 
 bool SPro24DspProtocol::CopyAudioControlSurfaceSnapshot(
@@ -785,6 +972,7 @@ void SPro24DspProtocol::PrimeSemanticMatrix() noexcept {
                                 semanticRateMode_ = kSemanticRouterRateMode;
                                 semanticMixerCoefficients_ = coefficients;
                                 semanticMatrixReady_ = true;
+                                ReconcileSemanticStripStates();
                                 ++semanticMatrixRevision_;
                                 IOLockUnlock(semanticMatrixLock_);
                                 ASFW_LOG(DICE, "SPro24 semantic matrix cached: %ux%u routes=%u",

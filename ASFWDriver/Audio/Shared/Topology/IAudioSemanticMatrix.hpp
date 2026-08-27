@@ -84,7 +84,39 @@ struct AudioSemanticMatrixAxis final {
 };
 static_assert(sizeof(AudioSemanticMatrixAxis) == 20);
 
-inline constexpr uint32_t kAudioSemanticMatrixVersion = 5;
+/// Mute, solo, and the level a strip returns to when it stops being
+/// suppressed. None of this is readable from the hardware: a mixer coefficient
+/// of zero is what a mute *is*, so "muted at -6 dB" and "faded to silence" are
+/// the same cell value. The driver therefore owns the distinction and publishes
+/// it, or no client could render an un-mutable strip.
+///
+/// Records are sparse: a strip with no record is neither muted nor soloed and
+/// its nominal level is simply its live coefficient. A record appears when a
+/// strip is muted, soloed, or suppressed by another strip's solo on the same
+/// bus -- the last case still needs its nominal remembered so that clearing the
+/// solo can restore it.
+struct AudioSemanticMatrixStripState final {
+    uint32_t outputPresentationGroupId{0};
+    uint32_t inputPresentationGroupId{0};
+    /// Coefficients restored when the strip stops being suppressed. For a
+    /// stereo strip these are its two diagonal cells; for a mono strip they are
+    /// the one source cell against the destination's left and right rows.
+    uint16_t nominalLeft{0};
+    uint16_t nominalRight{0};
+    /// Explicit user mute. Distinct from solo suppression, so clearing a solo
+    /// never silently clears a mute the user set.
+    uint8_t muted{0};
+    uint8_t soloed{0};
+    uint8_t reserved[2]{};
+};
+static_assert(sizeof(AudioSemanticMatrixStripState) == 16);
+
+/// Bounded because the snapshot travels the inline structure-output path, which
+/// caps at 4096 bytes and fails closed and silent above it. A suppression that
+/// would need more records than this is refused rather than partially applied.
+inline constexpr uint32_t kMaxAudioSemanticMatrixStripStates = 64;
+
+inline constexpr uint32_t kAudioSemanticMatrixVersion = 6;
 // Endpoint discovery is bounded independently from the dimensions of any one
 // matrix. A client must enumerate only protocols which actually publish this
 // semantic surface; configuration-capability discovery is a different API.
@@ -112,6 +144,9 @@ struct AudioSemanticMatrixSnapshot final {
     std::array<uint16_t, kMaxAudioSemanticMatrixCoefficients> coefficients{};
     std::array<AudioSemanticMatrixCrosspointPresentation,
                kMaxAudioSemanticMatrixCoefficients> crosspointPresentations{};
+    uint32_t stripStateCount{0};
+    std::array<AudioSemanticMatrixStripState,
+               kMaxAudioSemanticMatrixStripStates> stripStates{};
 
     [[nodiscard]] constexpr uint16_t Coefficient(uint32_t output,
                                                   uint32_t input) const noexcept {
@@ -122,12 +157,54 @@ struct AudioSemanticMatrixSnapshot final {
         return crosspointPresentations[
             size_t{output} * kMaxAudioSemanticMatrixInputs + input];
     }
+
+    /// The published state of one strip, or null when it carries none.
+    [[nodiscard]] constexpr const AudioSemanticMatrixStripState* StripState(
+        uint32_t outputPresentationGroupId,
+        uint32_t inputPresentationGroupId) const noexcept {
+        for (uint32_t index = 0; index < stripStateCount; ++index) {
+            const auto& state = stripStates[index];
+            if (state.outputPresentationGroupId == outputPresentationGroupId &&
+                state.inputPresentationGroupId == inputPresentationGroupId) {
+                return &state;
+            }
+        }
+        return nullptr;
+    }
+
+    /// True when any strip on this bus is soloed, which is what suppresses the
+    /// bus's other strips.
+    [[nodiscard]] constexpr bool BusHasSolo(
+        uint32_t outputPresentationGroupId) const noexcept {
+        for (uint32_t index = 0; index < stripStateCount; ++index) {
+            const auto& state = stripStates[index];
+            if (state.outputPresentationGroupId == outputPresentationGroupId &&
+                state.soloed != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// A strip is silenced when the user muted it, or when some other strip on
+    /// the same bus is soloed and this one is not.
+    [[nodiscard]] constexpr bool StripIsSuppressed(
+        uint32_t outputPresentationGroupId,
+        uint32_t inputPresentationGroupId) const noexcept {
+        const auto* state = StripState(outputPresentationGroupId,
+                                       inputPresentationGroupId);
+        if (state != nullptr && state->muted != 0) return true;
+        if (!BusHasSolo(outputPresentationGroupId)) return false;
+        return state == nullptr || state->soloed == 0;
+    }
 };
-static_assert(sizeof(AudioSemanticMatrixSnapshot) == 2728);
+static_assert(sizeof(AudioSemanticMatrixSnapshot) == 3752);
 static_assert(offsetof(AudioSemanticMatrixSnapshot, inputs) == 36);
 static_assert(offsetof(AudioSemanticMatrixSnapshot, outputs) == 516);
 static_assert(offsetof(AudioSemanticMatrixSnapshot, coefficients) == 996);
 static_assert(offsetof(AudioSemanticMatrixSnapshot, crosspointPresentations) == 2148);
+static_assert(offsetof(AudioSemanticMatrixSnapshot, stripStateCount) == 2724);
+static_assert(offsetof(AudioSemanticMatrixSnapshot, stripStates) == 2728);
 
 class IAudioSemanticMatrix {
 public:
@@ -173,6 +250,27 @@ public:
         (void)request;
         if (callback) callback(kIOReturnUnsupported);
     }
+
+    /// One absolute mute/solo gesture on a driver-verified strip. Absolute
+    /// rather than a toggle, so a repeated or racing request is idempotent and
+    /// two clients cannot invert each other's view of the strip.
+    struct StripSuppressionRequest final {
+        uint32_t outputPresentationGroupId{0};
+        uint32_t inputPresentationGroupId{0};
+        bool muted{false};
+        bool soloed{false};
+    };
+
+    /// Applies one mute/solo gesture. Mute silences a single strip; solo
+    /// silences every other strip on the same bus, so a profile must write
+    /// every cell whose effective value changes and confirm them all by
+    /// readback. Neither is a hardware bit: both are coefficient policy over
+    /// remembered nominal levels. A generic matrix must refuse it.
+    virtual void ApplyAudioSemanticMatrixStripSuppression(
+        const StripSuppressionRequest& request, ApplyCallback callback) {
+        (void)request;
+        if (callback) callback(kIOReturnUnsupported);
+    }
 };
 
 enum class AudioSemanticMatrixValidationError : uint32_t {
@@ -185,6 +283,9 @@ enum class AudioSemanticMatrixValidationError : uint32_t {
     InvalidGainLaw,
     CoefficientOutOfRange,
     InvalidCrosspointPresentation,
+    StripStateCountOutOfRange,
+    InvalidStripState,
+    DuplicateStripState,
     InvalidInput,
     DuplicateInputPort,
     InvalidOutput,
@@ -273,6 +374,30 @@ ValidateAudioSemanticMatrix(const AudioSemanticMatrixSnapshot& snapshot) noexcep
             }
             if (!Detail::IsValid(snapshot.CrosspointPresentation(output, input))) {
                 return std::unexpected(Error::InvalidCrosspointPresentation);
+            }
+        }
+    }
+    if (snapshot.stripStateCount > kMaxAudioSemanticMatrixStripStates) {
+        return std::unexpected(Error::StripStateCountOutOfRange);
+    }
+    for (uint32_t index = 0; index < snapshot.stripStateCount; ++index) {
+        const auto& state = snapshot.stripStates[index];
+        // A record that is neither muted nor soloed still exists to hold a
+        // nominal for a solo-suppressed strip, so only the identity and the
+        // coefficient domain are constrained here.
+        if (state.outputPresentationGroupId == 0 ||
+            state.inputPresentationGroupId == 0 ||
+            state.muted > 1 || state.soloed > 1 ||
+            state.nominalLeft > snapshot.coefficientMaximum ||
+            state.nominalRight > snapshot.coefficientMaximum) {
+            return std::unexpected(Error::InvalidStripState);
+        }
+        for (uint32_t other = 0; other < index; ++other) {
+            if (snapshot.stripStates[other].outputPresentationGroupId ==
+                    state.outputPresentationGroupId &&
+                snapshot.stripStates[other].inputPresentationGroupId ==
+                    state.inputPresentationGroupId) {
+                return std::unexpected(Error::DuplicateStripState);
             }
         }
     }

@@ -89,6 +89,7 @@ final class ASFWDriverConnector: ObservableObject {
         case getAudioSemanticMatrixEndpoints = 1032
         case submitAudioSemanticMatrixCrosspoint = 1033
         case submitAudioSemanticMatrixStereoStrip = 1034
+        case submitAudioSemanticMatrixStripSuppression = 1035
     }
 
     // MARK: - Re-exported Models
@@ -336,6 +337,48 @@ final class ASFWDriverConnector: ObservableObject {
                           requestID]
             let kr = IOConnectCallAsyncScalarMethod(
                 self.connection, Method.submitAudioSemanticMatrixStereoStrip.rawValue,
+                self.asyncPort, &reference, UInt32(reference.count),
+                &inputs, UInt32(inputs.count), nil, nil)
+            if kr != KERN_SUCCESS {
+                let callback = self.audioControlCompletions.removeValue(forKey: requestID)
+                DispatchQueue.main.async { callback?(kr) }
+            }
+        }
+    }
+
+    /// Applies one mute/solo gesture. Both flags are absolute rather than
+    /// toggles, so a repeated tap or a racing second client cannot invert the
+    /// strip's state. Solo silences the rest of its bus, which the driver does
+    /// by writing coefficients over remembered nominal levels.
+    func submitAudioSemanticMatrixStripSuppression(
+        endpointID: AudioEndpointID,
+        outputPresentationGroupID: UInt32,
+        inputPresentationGroupID: UInt32,
+        muted: Bool,
+        soloed: Bool,
+        completion: @escaping (kern_return_t) -> Void
+    ) {
+        connectionQueue.async { [weak self] in
+            guard let self, self.connection != 0,
+                  self.asyncPort != mach_port_t(MACH_PORT_NULL), endpointID.rawValue != 0,
+                  outputPresentationGroupID != 0, inputPresentationGroupID != 0 else {
+                DispatchQueue.main.async { completion(kIOReturnBadArgument) }
+                return
+            }
+            let requestID = self.nextAudioControlRequestID
+            self.nextAudioControlRequestID &+= 1
+            self.audioControlCompletions[requestID] = completion
+            var reference = DriverKitAsyncCompletionDecoder.reference(
+                marker: Self.audioControlAsyncReference
+            )
+            var inputs = [endpointID.rawValue,
+                          UInt64(outputPresentationGroupID),
+                          UInt64(inputPresentationGroupID),
+                          muted ? UInt64(1) : UInt64(0),
+                          soloed ? UInt64(1) : UInt64(0),
+                          requestID]
+            let kr = IOConnectCallAsyncScalarMethod(
+                self.connection, Method.submitAudioSemanticMatrixStripSuppression.rawValue,
                 self.asyncPort, &reference, UInt32(reference.count),
                 &inputs, UInt32(inputs.count), nil, nil)
             if kr != KERN_SUCCESS {

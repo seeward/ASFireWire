@@ -14,6 +14,7 @@
 #include "../TCAT/DICETcatProtocol.hpp"
 #include "../../IDeviceProtocol.hpp"
 #include "../../../Shared/Topology/IAudioSemanticMatrix.hpp"
+#include "../../../Shared/Topology/AudioSemanticMatrixStripStates.hpp"
 #include "../../../Shared/Controls/IAudioControlSurface.hpp"
 #include <DriverKit/IOLib.h>
 #include <array>
@@ -97,6 +98,9 @@ public:
         Audio::IAudioSemanticMatrix::ApplyCallback callback) override;
     void ApplyAudioSemanticMatrixStereoStrip(
         const Audio::IAudioSemanticMatrix::StereoStripRequest& request,
+        Audio::IAudioSemanticMatrix::ApplyCallback callback) override;
+    void ApplyAudioSemanticMatrixStripSuppression(
+        const Audio::IAudioSemanticMatrix::StripSuppressionRequest& request,
         Audio::IAudioSemanticMatrix::ApplyCallback callback) override;
     Audio::IAudioControlSurface* AsAudioControlSurface() noexcept override { return this; }
     const Audio::IAudioControlSurface* AsAudioControlSurface() const noexcept override {
@@ -202,6 +206,10 @@ private:
     bool extensionsLoaded_{false};
     IOLock* semanticMatrixLock_{nullptr};
     DiceMixerCoefficients semanticMixerCoefficients_{};
+    /// Mute, solo and remembered nominal levels. None of it is readable from
+    /// the device, so the driver is the only place it can live coherently for
+    /// every client.
+    Audio::AudioSemanticMatrixStripStateSet semanticStripStates_{};
     DiceRouterEntries semanticRouterEntries_{};
     /// Rate mode the cached router image above was read at.
     DiceRateMode semanticRateMode_{DiceRateMode::Low};
@@ -252,8 +260,46 @@ private:
                                      ExtensionSections sections,
                                      InitCallback callback);
     void PrimeSemanticMatrix() noexcept;
+    /// Drops strip records that the current coefficient image contradicts.
+    void ReconcileSemanticStripStates() noexcept;
     void FinishSemanticMatrixWrite(IOReturn status,
                                    Audio::IAudioSemanticMatrix::ApplyCallback callback) noexcept;
+
+    /// One native coefficient write queued by a grouped gesture.
+    struct SemanticMixerCellWrite final {
+        uint8_t output{0};
+        uint8_t input{0};
+        uint16_t value{0};
+    };
+    /// A solo touches every strip on its bus, and each strip owns two cells.
+    static constexpr uint32_t kMaxSemanticMixerCellWrites =
+        2U * Audio::kMaxAudioSemanticMatrixStripsPerBus;
+    struct PendingSemanticMixerCellWrites final {
+        std::array<SemanticMixerCellWrite, kMaxSemanticMixerCellWrites> cells{};
+        uint32_t count{0};
+        uint32_t next{0};
+    };
+
+    /// Takes the in-flight guard and reads caps, the active router image and
+    /// the coefficient window, then hands the stage a freshly built snapshot.
+    /// Every grouped gesture needs that: a group ID resolved against a stale
+    /// router would address a different source than the one the user gestured
+    /// on. The stage owns completing the callback.
+    using SemanticMixerGestureStage = std::function<void(
+        DiceExtensionCaps, DiceRouterEntries, DiceMixerCoefficients,
+        const Audio::AudioSemanticMatrixSnapshot&,
+        Audio::IAudioSemanticMatrix::ApplyCallback)>;
+    void BeginSemanticMixerGesture(SemanticMixerGestureStage stage,
+                                   Audio::IAudioSemanticMatrix::ApplyCallback callback);
+    void WriteNextSemanticMixerCell(DiceExtensionCaps caps,
+                                    PendingSemanticMixerCellWrites pending,
+                                    std::function<void(IOReturn)> completion);
+    /// Writes the queued cells, confirms every one by exact readback, and only
+    /// then commits the new coefficient image and strip states.
+    void CommitSemanticMixerCells(DiceExtensionCaps caps, DiceRouterEntries routes,
+                                  PendingSemanticMixerCellWrites pending,
+                                  Audio::AudioSemanticMatrixStripStateSet states,
+                                  Audio::IAudioSemanticMatrix::ApplyCallback callback);
     void PrimeSemanticControls() noexcept;
     [[nodiscard]] bool BeginSemanticControlWrite(
         const Audio::IAudioControlSurface::ApplyCallback& callback) noexcept;

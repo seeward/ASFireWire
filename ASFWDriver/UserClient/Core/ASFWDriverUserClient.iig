@@ -119,6 +119,9 @@ public:
         // Bounded semantic stereo-strip gesture. The profile resolves both
         // native gain cells and confirms their joint readback.
         kMethodSubmitAudioSemanticMatrixStereoStrip = 1034,
+        // Bounded semantic mute/solo gesture. Neither is a hardware bit: both
+        // are coefficient policy over driver-remembered nominal levels.
+        kMethodSubmitAudioSemanticMatrixStripSuppression = 1035,
         // TODO(ASFW-IRM): Remove temporary IRM test method after dedicated validation tooling exists.
         kMethodTestIRMAllocation       = 26,
         kMethodTestIRMRelease          = 27,

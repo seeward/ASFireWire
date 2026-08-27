@@ -4,6 +4,7 @@
 #include "SPro24DspSemanticMatrix.hpp"
 
 #include "../Core/DICERouterMixerTopology.hpp"
+#include "../../../Shared/Topology/AudioSemanticMatrixStripStates.hpp"
 
 #include <algorithm>
 #include <array>
@@ -360,129 +361,39 @@ bool BuildSPro24DspSemanticMatrix(const DiceMixerCoefficients& coefficients,
     return ValidateAudioSemanticMatrix(outSnapshot).has_value();
 }
 
-std::optional<SPro24DspStereoStripLayout>
-ResolveSPro24DspStereoStrip(const DiceMixerCoefficients& coefficients,
-                            const DiceRouterEntries& routes,
-                            DiceRateMode rateMode,
-                            uint32_t outputPresentationGroupId,
-                            uint32_t inputPresentationGroupId) noexcept {
-    AudioSemanticMatrixSnapshot snapshot{};
-    if (!BuildSPro24DspSemanticMatrix(coefficients, routes, rateMode, snapshot)) {
+std::optional<SPro24DspStripCells> ResolveSPro24DspStripCells(
+    const AudioSemanticMatrixSnapshot& snapshot,
+    uint32_t outputPresentationGroupId,
+    uint32_t inputPresentationGroupId) noexcept {
+    AudioSemanticMatrixStripCells strip{};
+    if (!ResolveAudioSemanticMatrixStrip(snapshot, outputPresentationGroupId,
+                                         inputPresentationGroupId, strip)) {
         return std::nullopt;
     }
 
-    std::optional<uint8_t> inputLeft;
-    std::optional<uint8_t> inputRight;
-    std::optional<uint8_t> outputLeft;
-    std::optional<uint8_t> outputRight;
-    std::optional<uint32_t> semanticInputLeft;
-    std::optional<uint32_t> semanticInputRight;
-    std::optional<uint32_t> semanticOutputLeft;
-    std::optional<uint32_t> semanticOutputRight;
-    for (uint32_t input = 0; input < snapshot.inputCount; ++input) {
-        const auto& axis = snapshot.inputs[input];
-        if (axis.presentationGroupId != inputPresentationGroupId) continue;
-        const auto rawInput = RawInputForPortId(axis.portId);
-        if (!rawInput) return std::nullopt;
-        if (axis.channelRole == AudioSemanticMatrixChannelRole::Left && !inputLeft) {
-            inputLeft = *rawInput;
-            semanticInputLeft = input;
-        } else if (axis.channelRole == AudioSemanticMatrixChannelRole::Right && !inputRight) {
-            inputRight = *rawInput;
-            semanticInputRight = input;
-        } else {
-            return std::nullopt;
-        }
-    }
-    for (uint32_t output = 0; output < snapshot.outputCount; ++output) {
-        const auto& axis = snapshot.outputs[output];
-        if (axis.presentationGroupId != outputPresentationGroupId) continue;
-        const auto rawOutput = RawOutputForPortId(axis.portId);
-        if (!rawOutput) return std::nullopt;
-        if (axis.channelRole == AudioSemanticMatrixChannelRole::Left && !outputLeft) {
-            outputLeft = *rawOutput;
-            semanticOutputLeft = output;
-        } else if (axis.channelRole == AudioSemanticMatrixChannelRole::Right && !outputRight) {
-            outputRight = *rawOutput;
-            semanticOutputRight = output;
-        } else {
-            return std::nullopt;
-        }
-    }
-    if (!inputLeft || !inputRight || !outputLeft || !outputRight ||
-        !semanticInputLeft || !semanticInputRight ||
-        !semanticOutputLeft || !semanticOutputRight ||
-        *inputRight != static_cast<uint8_t>(*inputLeft + 1U) ||
-        *outputRight != static_cast<uint8_t>(*outputLeft + 1U) ||
-        snapshot.CrosspointPresentation(*semanticOutputLeft, *semanticInputLeft) !=
-            AudioSemanticMatrixCrosspointPresentation::StereoLevelBalance ||
-        snapshot.CrosspointPresentation(*semanticOutputRight, *semanticInputRight) !=
-            AudioSemanticMatrixCrosspointPresentation::StereoLevelBalance) {
+    // Semantic axis positions are compacted; the native row and column live in
+    // the port ID. Writing through the compact index would silently address a
+    // different hardware cell.
+    const auto outputLeft = RawOutputForPortId(snapshot.outputs[strip.outputLeft].portId);
+    const auto outputRight = RawOutputForPortId(snapshot.outputs[strip.outputRight].portId);
+    const auto inputLeft = RawInputForPortId(snapshot.inputs[strip.inputLeft].portId);
+    const auto inputRight = RawInputForPortId(snapshot.inputs[strip.inputRight].portId);
+    if (!outputLeft || !outputRight || !inputLeft || !inputRight) return std::nullopt;
+
+    // The vendor pairs mixer rows as 1/2 through 15/16 and sources as adjacent
+    // native columns; a group whose members are not one native pair is not a
+    // strip this profile knows how to drive.
+    if (*outputRight != static_cast<uint8_t>(*outputLeft + 1U)) return std::nullopt;
+    if (!strip.IsMono() && *inputRight != static_cast<uint8_t>(*inputLeft + 1U)) {
         return std::nullopt;
     }
-    return SPro24DspStereoStripLayout{
+
+    return SPro24DspStripCells{
+        .outputLeft = *outputLeft,
+        .outputRight = *outputRight,
         .inputLeft = *inputLeft,
         .inputRight = *inputRight,
-        .outputLeft = *outputLeft,
-        .outputRight = *outputRight,
-    };
-}
-
-std::optional<SPro24DspMonoStripLayout>
-ResolveSPro24DspMonoStrip(const DiceMixerCoefficients& coefficients,
-                          const DiceRouterEntries& routes,
-                          DiceRateMode rateMode,
-                          uint32_t outputPresentationGroupId,
-                          uint32_t inputPresentationGroupId) noexcept {
-    AudioSemanticMatrixSnapshot snapshot{};
-    if (!BuildSPro24DspSemanticMatrix(coefficients, routes, rateMode, snapshot)) {
-        return std::nullopt;
-    }
-
-    std::optional<uint8_t> input;
-    std::optional<uint8_t> outputLeft;
-    std::optional<uint8_t> outputRight;
-    std::optional<uint32_t> semanticInput;
-    std::optional<uint32_t> semanticOutputLeft;
-    std::optional<uint32_t> semanticOutputRight;
-
-    for (uint32_t index = 0; index < snapshot.inputCount; ++index) {
-        const auto& axis = snapshot.inputs[index];
-        if (axis.presentationGroupId != inputPresentationGroupId) continue;
-        if (input || axis.channelRole != AudioSemanticMatrixChannelRole::Mono) {
-            return std::nullopt;
-        }
-        input = RawInputForPortId(axis.portId);
-        semanticInput = index;
-    }
-    for (uint32_t index = 0; index < snapshot.outputCount; ++index) {
-        const auto& axis = snapshot.outputs[index];
-        if (axis.presentationGroupId != outputPresentationGroupId) continue;
-        const auto rawOutput = RawOutputForPortId(axis.portId);
-        if (!rawOutput) return std::nullopt;
-        if (axis.channelRole == AudioSemanticMatrixChannelRole::Left && !outputLeft) {
-            outputLeft = *rawOutput;
-            semanticOutputLeft = index;
-        } else if (axis.channelRole == AudioSemanticMatrixChannelRole::Right && !outputRight) {
-            outputRight = *rawOutput;
-            semanticOutputRight = index;
-        } else {
-            return std::nullopt;
-        }
-    }
-    if (!input || !outputLeft || !outputRight || !semanticInput ||
-        !semanticOutputLeft || !semanticOutputRight ||
-        *outputRight != static_cast<uint8_t>(*outputLeft + 1U) ||
-        snapshot.CrosspointPresentation(*semanticOutputLeft, *semanticInput) !=
-            AudioSemanticMatrixCrosspointPresentation::MonoLevelPan ||
-        snapshot.CrosspointPresentation(*semanticOutputRight, *semanticInput) !=
-            AudioSemanticMatrixCrosspointPresentation::MonoLevelPan) {
-        return std::nullopt;
-    }
-    return SPro24DspMonoStripLayout{
-        .input = *input,
-        .outputLeft = *outputLeft,
-        .outputRight = *outputRight,
+        .mono = strip.IsMono(),
     };
 }
 

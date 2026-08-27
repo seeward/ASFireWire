@@ -522,6 +522,24 @@ IOReturn AudioCoordinator::SubmitAudioSemanticMatrixStereoStrip(
     return kIOReturnSuccess;
 }
 
+IOReturn AudioCoordinator::SubmitAudioSemanticMatrixStripSuppression(
+    EndpointId endpointId,
+    const IAudioSemanticMatrix::StripSuppressionRequest& request,
+    IAudioSemanticMatrix::ApplyCallback completion) noexcept {
+    if (!completion || request.outputPresentationGroupId == 0 ||
+        request.inputPresentationGroupId == 0) {
+        return kIOReturnBadArgument;
+    }
+    if (!endpointId || teardownRequested_.load(std::memory_order_acquire)) {
+        return kIOReturnNotReady;
+    }
+    const auto protocol = runtime_.FindShared(endpointId);
+    auto* matrix = protocol ? protocol->AsAudioSemanticMatrix() : nullptr;
+    if (!matrix) return kIOReturnUnsupported;
+    matrix->ApplyAudioSemanticMatrixStripSuppression(request, std::move(completion));
+    return kIOReturnSuccess;
+}
+
 IOReturn AudioCoordinator::RequestAudioControlValue(
     EndpointId endpointId, uint32_t controlId, int32_t value) noexcept {
     // Selector 1019 predates the asynchronous control plane. It deliberately

@@ -11,7 +11,7 @@
 
 namespace ASFW::UserClient::Wire {
 
-inline constexpr uint32_t kAudioSemanticMatrixWireVersion = 2;
+inline constexpr uint32_t kAudioSemanticMatrixWireVersion = 3;
 inline constexpr uint32_t kAudioSemanticMatrixEndpointListWireVersion = 1;
 
 struct AudioSemanticMatrixEndpointListWire final {
@@ -28,6 +28,10 @@ struct AudioSemanticMatrixSnapshotWire final {
     ASFW::Audio::AudioSemanticMatrixSnapshot matrix{};
 };
 static_assert(offsetof(AudioSemanticMatrixSnapshotWire, matrix) == 16);
-static_assert(sizeof(AudioSemanticMatrixSnapshotWire) == 2744);
+static_assert(sizeof(AudioSemanticMatrixSnapshotWire) == 3768);
+// The inline structure-output path caps at 4096 bytes and fails closed and
+// silent above it, so this snapshot must never grow past that ceiling without
+// first moving the read to an out-of-line descriptor.
+static_assert(sizeof(AudioSemanticMatrixSnapshotWire) <= 4096);
 
 } // namespace ASFW::UserClient::Wire

@@ -315,8 +315,14 @@ add_protocols_test(AudioSemanticTopologyValidationTests
 add_protocols_test(AudioSemanticMatrixTests
     AudioSemanticMatrixTests.cpp
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Focusrite/SPro24DspSemanticMatrix.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Shared/Topology/AudioSemanticMatrixStripStates.cpp"
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICERouterMixerTopology.cpp"
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICEExtensionState.cpp"
+)
+
+add_protocols_test(AudioSemanticMatrixStripStateTests
+    AudioSemanticMatrixStripStateTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Shared/Topology/AudioSemanticMatrixStripStates.cpp"
 )
 
 add_protocols_test(MAudioSpecialConsoleLayoutTests

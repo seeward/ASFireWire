@@ -1066,6 +1066,215 @@ TEST(SPro24DspProtocolTests, SemanticMatrixMonoStripWritesOneInputToBothBusRows)
     EXPECT_NEAR(after.Coefficient(1, 4), 11585U, 1U);
 }
 
+// Mute is not a hardware bit: it writes zero into both of a strip's cells and
+// the driver remembers what to put back. Nothing else can restore that level,
+// so the remembered nominal is the whole feature.
+TEST(SPro24DspProtocolTests, SemanticMatrixMuteZeroesBothCellsAndUnmuteRestoresTheLevel) {
+    CountingFireWireBus bus;
+    RouteState routeState;
+    SPro24DspProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
+    ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+
+    ASFW::Audio::AudioSemanticMatrixSnapshot before{};
+    ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(before));
+    const auto outputGroup = before.outputs[0].presentationGroupId;
+    const auto inputGroup = before.inputs[4].presentationGroupId;
+    ASSERT_EQ(before.stripStateCount, 0U);
+
+    // Give the strip a known level first, so the restore is checkable.
+    std::optional<IOReturn> completion;
+    protocol.ApplyAudioSemanticMatrixStereoStrip(
+        {.outputPresentationGroupId = outputGroup, .inputPresentationGroupId = inputGroup,
+         .levelMilliDb = 0, .balanceMilli = 0},
+        [&](IOReturn status) { completion = status; });
+    ASSERT_TRUE(completion.has_value());
+    ASSERT_EQ(*completion, kIOReturnSuccess);
+
+    ASFW::Audio::AudioSemanticMatrixSnapshot levelled{};
+    ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(levelled));
+    const uint16_t nominalLeft = levelled.Coefficient(0, 4);
+    const uint16_t nominalRight = levelled.Coefficient(1, 4);
+    ASSERT_GT(nominalLeft, 0U);
+
+    completion.reset();
+    protocol.ApplyAudioSemanticMatrixStripSuppression(
+        {.outputPresentationGroupId = outputGroup, .inputPresentationGroupId = inputGroup,
+         .muted = true},
+        [&](IOReturn status) { completion = status; });
+    ASSERT_TRUE(completion.has_value());
+    ASSERT_EQ(*completion, kIOReturnSuccess);
+
+    ASFW::Audio::AudioSemanticMatrixSnapshot muted{};
+    ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(muted));
+    EXPECT_EQ(muted.Coefficient(0, 4), 0U);
+    EXPECT_EQ(muted.Coefficient(1, 4), 0U);
+    ASSERT_NE(muted.StripState(outputGroup, inputGroup), nullptr);
+    EXPECT_EQ(muted.StripState(outputGroup, inputGroup)->muted, 1U);
+    EXPECT_EQ(muted.StripState(outputGroup, inputGroup)->nominalLeft, nominalLeft);
+    EXPECT_TRUE(muted.StripIsSuppressed(outputGroup, inputGroup));
+
+    completion.reset();
+    protocol.ApplyAudioSemanticMatrixStripSuppression(
+        {.outputPresentationGroupId = outputGroup, .inputPresentationGroupId = inputGroup,
+         .muted = false},
+        [&](IOReturn status) { completion = status; });
+    ASSERT_TRUE(completion.has_value());
+    ASSERT_EQ(*completion, kIOReturnSuccess);
+
+    ASFW::Audio::AudioSemanticMatrixSnapshot restored{};
+    ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(restored));
+    EXPECT_EQ(restored.Coefficient(0, 4), nominalLeft);
+    EXPECT_EQ(restored.Coefficient(1, 4), nominalRight);
+    // Nothing left to remember, so the record goes rather than lingering.
+    EXPECT_EQ(restored.stripStateCount, 0U);
+}
+
+// A fader still moves while the strip is muted. The gesture must change what
+// the strip returns to without lifting the mute behind the user's back.
+TEST(SPro24DspProtocolTests, SemanticMatrixLevelChangeWhileMutedUpdatesNominalOnly) {
+    CountingFireWireBus bus;
+    RouteState routeState;
+    SPro24DspProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
+    ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+
+    ASFW::Audio::AudioSemanticMatrixSnapshot before{};
+    ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(before));
+    const auto outputGroup = before.outputs[0].presentationGroupId;
+    const auto inputGroup = before.inputs[4].presentationGroupId;
+
+    std::optional<IOReturn> completion;
+    protocol.ApplyAudioSemanticMatrixStripSuppression(
+        {.outputPresentationGroupId = outputGroup, .inputPresentationGroupId = inputGroup,
+         .muted = true},
+        [&](IOReturn status) { completion = status; });
+    ASSERT_TRUE(completion.has_value());
+    ASSERT_EQ(*completion, kIOReturnSuccess);
+
+    completion.reset();
+    protocol.ApplyAudioSemanticMatrixStereoStrip(
+        {.outputPresentationGroupId = outputGroup, .inputPresentationGroupId = inputGroup,
+         .levelMilliDb = 0, .balanceMilli = 0},
+        [&](IOReturn status) { completion = status; });
+    ASSERT_TRUE(completion.has_value());
+    ASSERT_EQ(*completion, kIOReturnSuccess);
+
+    ASFW::Audio::AudioSemanticMatrixSnapshot muted{};
+    ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(muted));
+    EXPECT_EQ(muted.Coefficient(0, 4), 0U);
+    EXPECT_EQ(muted.Coefficient(1, 4), 0U);
+    ASSERT_NE(muted.StripState(outputGroup, inputGroup), nullptr);
+    EXPECT_EQ(muted.StripState(outputGroup, inputGroup)->muted, 1U);
+    EXPECT_NEAR(muted.StripState(outputGroup, inputGroup)->nominalLeft, 11585U, 1U);
+
+    completion.reset();
+    protocol.ApplyAudioSemanticMatrixStripSuppression(
+        {.outputPresentationGroupId = outputGroup, .inputPresentationGroupId = inputGroup,
+         .muted = false},
+        [&](IOReturn status) { completion = status; });
+    ASSERT_TRUE(completion.has_value());
+    ASSERT_EQ(*completion, kIOReturnSuccess);
+
+    ASFW::Audio::AudioSemanticMatrixSnapshot restored{};
+    ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(restored));
+    // Unmute restores the level set during the mute, not the one before it.
+    EXPECT_NEAR(restored.Coefficient(0, 4), 11585U, 1U);
+}
+
+// Solo is a policy over a whole bus, so it has to write every other strip on
+// that bus -- and nothing on any other bus.
+TEST(SPro24DspProtocolTests, SemanticMatrixSoloSilencesTheRestOfItsBusOnly) {
+    CountingFireWireBus bus;
+    RouteState routeState;
+    SPro24DspProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
+    ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+
+    ASFW::Audio::AudioSemanticMatrixSnapshot before{};
+    ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(before));
+    ASSERT_GE(before.outputCount, 4U);
+    const auto monitorBus = before.outputs[0].presentationGroupId;
+    const auto effectBus = before.outputs[2].presentationGroupId;
+    const auto soloedInput = before.inputs[4].presentationGroupId;
+    ASSERT_NE(monitorBus, effectBus);
+
+    // A second source on the monitor bus, whose level must survive as a
+    // remembered nominal once the solo silences it.
+    uint32_t otherInput = 0;
+    for (uint32_t index = 0; index < before.inputCount; ++index) {
+        const auto groupId = before.inputs[index].presentationGroupId;
+        if (groupId == soloedInput) continue;
+        if (before.CrosspointPresentation(0, index) ==
+                ASFW::Audio::AudioSemanticMatrixCrosspointPresentation::MonoLevelPan ||
+            before.CrosspointPresentation(0, index) ==
+                ASFW::Audio::AudioSemanticMatrixCrosspointPresentation::StereoLevelBalance) {
+            otherInput = groupId;
+            break;
+        }
+    }
+    ASSERT_NE(otherInput, 0U);
+
+    std::optional<IOReturn> completion;
+    protocol.ApplyAudioSemanticMatrixStripSuppression(
+        {.outputPresentationGroupId = monitorBus, .inputPresentationGroupId = soloedInput,
+         .soloed = true},
+        [&](IOReturn status) { completion = status; });
+    ASSERT_TRUE(completion.has_value());
+    ASSERT_EQ(*completion, kIOReturnSuccess);
+
+    ASFW::Audio::AudioSemanticMatrixSnapshot soloed{};
+    ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(soloed));
+    EXPECT_TRUE(soloed.BusHasSolo(monitorBus));
+    EXPECT_FALSE(soloed.BusHasSolo(effectBus));
+    EXPECT_FALSE(soloed.StripIsSuppressed(monitorBus, soloedInput));
+    EXPECT_TRUE(soloed.StripIsSuppressed(monitorBus, otherInput));
+    // The same source keeps playing into the effect send.
+    EXPECT_FALSE(soloed.StripIsSuppressed(effectBus, otherInput));
+
+    // Every suppressed strip kept a nominal, or clearing the solo could not
+    // put it back.
+    ASSERT_NE(soloed.StripState(monitorBus, otherInput), nullptr);
+
+    completion.reset();
+    protocol.ApplyAudioSemanticMatrixStripSuppression(
+        {.outputPresentationGroupId = monitorBus, .inputPresentationGroupId = soloedInput,
+         .soloed = false},
+        [&](IOReturn status) { completion = status; });
+    ASSERT_TRUE(completion.has_value());
+    ASSERT_EQ(*completion, kIOReturnSuccess);
+
+    ASFW::Audio::AudioSemanticMatrixSnapshot cleared{};
+    ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(cleared));
+    EXPECT_FALSE(cleared.BusHasSolo(monitorBus));
+    EXPECT_EQ(cleared.stripStateCount, 0U);
+    for (uint32_t output = 0; output < cleared.outputCount; ++output) {
+        for (uint32_t input = 0; input < cleared.inputCount; ++input) {
+            EXPECT_EQ(cleared.Coefficient(output, input), before.Coefficient(output, input))
+                << "output " << output << " input " << input;
+        }
+    }
+}
+
+// A group that is not a usable strip stays unreachable through the suppression
+// entry point too, not only through the level one.
+TEST(SPro24DspProtocolTests, SemanticMatrixSuppressionRefusesAnUnknownStrip) {
+    CountingFireWireBus bus;
+    RouteState routeState;
+    SPro24DspProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr);
+    ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+
+    ASFW::Audio::AudioSemanticMatrixSnapshot before{};
+    ASSERT_TRUE(protocol.CopyAudioSemanticMatrix(before));
+    const size_t writesBefore = bus.mixerCoefficientWrites.size();
+
+    std::optional<IOReturn> completion;
+    protocol.ApplyAudioSemanticMatrixStripSuppression(
+        {.outputPresentationGroupId = before.outputs[0].presentationGroupId,
+         .inputPresentationGroupId = 0xdead'beef, .muted = true},
+        [&](IOReturn status) { completion = status; });
+    ASSERT_TRUE(completion.has_value());
+    EXPECT_EQ(*completion, kIOReturnBadArgument);
+    EXPECT_EQ(bus.mixerCoefficientWrites.size(), writesBefore);
+}
+
 TEST(SPro24DspProtocolTests, StoppedPrepareCommandFailsClosedWithoutConfigNotification) {
     CountingFireWireBus bus;
     bus.emitCommandConfigNotice_ = false;

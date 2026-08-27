@@ -326,7 +326,7 @@ extension ASFWDriverConnector {
     ) -> AudioSemanticMatrixSnapshot? {
         guard connection != 0, endpointID.rawValue != 0 else { return nil }
         var scalarInput = endpointID.rawValue
-        var output = Data(count: 2744)
+        var output = Data(count: 3768)
         var outputLength = output.count
         let result = output.withUnsafeMutableBytes { outputBytes in
             IOConnectCallMethod(
@@ -753,13 +753,17 @@ private enum AudioSemanticConsoleLayoutWireDecoder {
 /// control values: a matrix is a dense state snapshot with driver-declared
 /// axes, not an app-side reconstruction of DICE records.
 private enum AudioSemanticMatrixWireDecoder {
-    private static let wireSize = 2744
+    private static let wireSize = 3768
     private static let matrixStart = 16
     private static let axisSize = 20
     private static let inputAxisOffset = matrixStart + 36
     private static let outputAxisOffset = matrixStart + 516
     private static let coefficientOffset = matrixStart + 996
     private static let crosspointPresentationOffset = matrixStart + 2148
+    private static let stripStateCountOffset = matrixStart + 2724
+    private static let stripStateOffset = matrixStart + 2728
+    private static let stripStateSize = 16
+    private static let maximumStripStates = 64
     private static let maximumInputs = 24
     private static let maximumOutputs = 24
 
@@ -783,9 +787,9 @@ private enum AudioSemanticMatrixWireDecoder {
 
     static func decode(_ data: Data) -> AudioSemanticMatrixSnapshot? {
         guard data.count == wireSize,
-              let wireVersion = data.u32(at: 0), wireVersion == 2,
+              let wireVersion = data.u32(at: 0), wireVersion == 3,
               let endpoint = data.u64(at: 8), endpoint != 0,
-              let matrixVersion = data.u32(at: matrixStart), matrixVersion == 5,
+              let matrixVersion = data.u32(at: matrixStart), matrixVersion == 6,
               let deviceKind = data.u32(at: matrixStart + 4), deviceKind != 0,
               let topologyRevision = data.u64(at: matrixStart + 8), topologyRevision != 0,
               let stateRevision = data.u32(at: matrixStart + 16),
@@ -821,11 +825,29 @@ private enum AudioSemanticMatrixWireDecoder {
                 crosspointPresentations.append(presentation)
             }
         }
+        guard let stripStateCount = data.u32(at: stripStateCountOffset),
+              stripStateCount <= maximumStripStates else { return nil }
+        var stripStates: [AudioSemanticMatrixSnapshot.StripState] = []
+        stripStates.reserveCapacity(Int(stripStateCount))
+        for index in 0..<Int(stripStateCount) {
+            let base = stripStateOffset + index * stripStateSize
+            guard let outputGroup = data.u32(at: base), outputGroup != 0,
+                  let inputGroup = data.u32(at: base + 4), inputGroup != 0,
+                  let nominalLeft = data.u16(at: base + 8), nominalLeft <= coefficientMaximum,
+                  let nominalRight = data.u16(at: base + 10), nominalRight <= coefficientMaximum,
+                  let muted = data.u8(at: base + 12), muted <= 1,
+                  let soloed = data.u8(at: base + 13), soloed <= 1 else { return nil }
+            stripStates.append(.init(outputPresentationGroupID: outputGroup,
+                                     inputPresentationGroupID: inputGroup,
+                                     nominalLeft: nominalLeft, nominalRight: nominalRight,
+                                     muted: muted == 1, soloed: soloed == 1))
+        }
         return .init(endpointID: AudioEndpointID(rawValue: endpoint), deviceKind: deviceKind,
                      topologyRevision: topologyRevision, stateRevision: stateRevision,
                      coefficientMaximum: coefficientMaximum, gainLaw: gainLaw, inputs: inputs,
                      outputs: outputs, coefficients: coefficients,
-                     crosspointPresentations: crosspointPresentations)
+                     crosspointPresentations: crosspointPresentations,
+                     stripStates: stripStates)
     }
 
     private static func axis(_ data: Data, _ offset: Int) -> AudioSemanticMatrixSnapshot.Axis? {

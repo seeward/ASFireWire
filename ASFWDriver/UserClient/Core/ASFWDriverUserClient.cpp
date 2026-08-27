@@ -80,6 +80,7 @@ enum {
     kMethodGetAudioSemanticMatrixEndpoints = 1032,
     kMethodSubmitAudioSemanticMatrixCrosspoint = 1033,
     kMethodSubmitAudioSemanticMatrixStereoStrip = 1034,
+    kMethodSubmitAudioSemanticMatrixStripSuppression = 1035,
     kMethodSetIsochVerbosity = 40,
     // 41 retired (was the dev TX-verifier toggle)
     kMethodSetAudioAutoStart = 42,
@@ -372,6 +373,57 @@ kern_return_t HandleSubmitAudioSemanticMatrixCrosspoint(
 kern_return_t HandleSubmitAudioSemanticMatrixStereoStrip(
     ASFWDriver& driver, ASFWDriverUserClient& userClient,
     IOUserClientMethodArguments* arguments);
+kern_return_t HandleSubmitAudioSemanticMatrixStripSuppression(
+    ASFWDriver& driver, ASFWDriverUserClient& userClient,
+    IOUserClientMethodArguments* arguments);
+kern_return_t HandleSubmitAudioSemanticMatrixStripSuppression(
+    ASFWDriver& driver, ASFWDriverUserClient& userClient,
+    IOUserClientMethodArguments* arguments) {
+    // endpoint, semantic output group, semantic input group, muted, soloed,
+    // request id. Both flags are absolute rather than toggles, so a repeated
+    // or racing request cannot invert a client's view of the strip.
+    if (!arguments || !arguments->completion || !arguments->scalarInput ||
+        arguments->scalarInputCount != 6) {
+        return kIOReturnBadArgument;
+    }
+    auto* context = static_cast<ServiceContext*>(driver.GetServiceContext());
+    if (!context || !context->audioCoordinator) return kIOReturnNotReady;
+
+    const auto endpointId = ASFW::Audio::Devices::AudioEndpointId{arguments->scalarInput[0]};
+    const ASFW::Audio::IAudioSemanticMatrix::StripSuppressionRequest request{
+        .outputPresentationGroupId = static_cast<uint32_t>(arguments->scalarInput[1]),
+        .inputPresentationGroupId = static_cast<uint32_t>(arguments->scalarInput[2]),
+        .muted = arguments->scalarInput[3] != 0,
+        .soloed = arguments->scalarInput[4] != 0,
+    };
+    const uint64_t requestId = arguments->scalarInput[5];
+    if (request.outputPresentationGroupId == 0 || request.inputPresentationGroupId == 0 ||
+        arguments->scalarInput[3] > 1 || arguments->scalarInput[4] > 1) {
+        return kIOReturnBadArgument;
+    }
+
+    OSAction* const completion = arguments->completion;
+    completion->retain();
+    userClient.retain();
+    const auto finish = [&userClient, completion, requestId, request](IOReturn status) {
+        IOUserClientAsyncArgumentsArray data{};
+        data[0] = requestId;
+        data[1] = request.outputPresentationGroupId;
+        data[2] = request.inputPresentationGroupId;
+        userClient.AsyncCompletion(completion, status, data, 3);
+        completion->release();
+        userClient.release();
+    };
+    const kern_return_t started =
+        context->audioCoordinator->SubmitAudioSemanticMatrixStripSuppression(
+            endpointId, request, finish);
+    if (started != kIOReturnSuccess) {
+        finish(started);
+        return kIOReturnSuccess;
+    }
+    return started;
+}
+
 kern_return_t HandleRequestAudioControlValue(
     ASFWDriver& driver, IOUserClientMethodArguments* arguments);
 kern_return_t HandleGetAudioMeterSnapshot(
@@ -446,6 +498,8 @@ MethodDispatchResult DispatchDriverControlMethods(ASFWDriver& driver,
         return HandleSubmitAudioSemanticMatrixCrosspoint(driver, userClient, arguments);
     case kMethodSubmitAudioSemanticMatrixStereoStrip:
         return HandleSubmitAudioSemanticMatrixStereoStrip(driver, userClient, arguments);
+    case kMethodSubmitAudioSemanticMatrixStripSuppression:
+        return HandleSubmitAudioSemanticMatrixStripSuppression(driver, userClient, arguments);
     case kMethodRequestAudioControlValue:
         return HandleRequestAudioControlValue(driver, arguments);
     case kMethodSubmitAudioControlValue:

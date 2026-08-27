@@ -19,22 +19,16 @@ namespace ASFW::Audio::DICE::Focusrite {
 
 inline constexpr uint32_t kSPro24DspSemanticDeviceKind = 0x5350'3234; // "SP24"
 
-/// The exact two native cells that implement a verified SPro stereo source
-/// into a verified stereo mixer-output pair.  The transaction layer owns
-/// their DICE addresses; this profile helper only resolves semantic groups.
-struct SPro24DspStereoStripLayout final {
+/// The native mixer cells behind one semantic strip. A mono strip drives both
+/// destination rows from a single source, so its two input cells are equal;
+/// that is the only structural difference from a stereo strip, and it is what
+/// selects the pan law rather than the balance law.
+struct SPro24DspStripCells final {
+    uint8_t outputLeft{0};
+    uint8_t outputRight{0};
     uint8_t inputLeft{0};
     uint8_t inputRight{0};
-    uint8_t outputLeft{0};
-    uint8_t outputRight{0};
-};
-
-/// The two native cells that implement one mono source's level and pan into
-/// one verified stereo destination. Both cells share the same mixer input.
-struct SPro24DspMonoStripLayout final {
-    uint8_t input{0};
-    uint8_t outputLeft{0};
-    uint8_t outputRight{0};
+    bool mono{false};
 };
 
 struct SPro24DspStereoStripCoefficients final {
@@ -52,24 +46,15 @@ struct SPro24DspStereoStripCoefficients final {
     DiceRateMode rateMode,
     AudioSemanticMatrixSnapshot& outSnapshot) noexcept;
 
-/// Resolves only a real source L/R pair and mixer-output L/R pair. Mono rows
-/// deliberately return no layout: their pan law is a different vendor action.
-[[nodiscard]] std::optional<SPro24DspStereoStripLayout>
-ResolveSPro24DspStereoStrip(const DiceMixerCoefficients& coefficients,
-                            const DiceRouterEntries& routes,
-                            DiceRateMode rateMode,
-                            uint32_t outputPresentationGroupId,
-                            uint32_t inputPresentationGroupId) noexcept;
-
-/// Resolves one real mono source and one output L/R pair. The profile's
-/// crosspoint-presentation map is authoritative: hidden/self-send cells can
-/// never be reached merely by presenting a known group ID.
-[[nodiscard]] std::optional<SPro24DspMonoStripLayout>
-ResolveSPro24DspMonoStrip(const DiceMixerCoefficients& coefficients,
-                          const DiceRouterEntries& routes,
-                          DiceRateMode rateMode,
-                          uint32_t outputPresentationGroupId,
-                          uint32_t inputPresentationGroupId) noexcept;
+/// Maps a published strip back to the native cells behind it. The snapshot's
+/// stable port IDs carry the native row and column, which is what stops a
+/// compacted semantic index from addressing the wrong hardware cell. The
+/// profile's crosspoint-presentation map remains authoritative: hidden and
+/// self-send cells are unreachable even with a known group ID in hand.
+[[nodiscard]] std::optional<SPro24DspStripCells> ResolveSPro24DspStripCells(
+    const AudioSemanticMatrixSnapshot& snapshot,
+    uint32_t outputPresentationGroupId,
+    uint32_t inputPresentationGroupId) noexcept;
 
 /// Clean-room reproduction of the vendor's captured stereo balance law.
 /// Level is supplied in physical dB; balance is -1000…+1000.
