@@ -548,6 +548,59 @@ read full bounded router image
 Do not place the patchbay in the monitor-mixer row.  It is an upstream source
 assignment layer and belongs in its own expandable console section.
 
+### 4.1 What the device actually permits, measured
+
+Read live on 2026-08-27 before writing any of this:
+
+| capability | value |
+|---|---|
+| router `is_exposed` / `is_readonly` / `is_storable` | true / **false** / true |
+| router `maximum_entry_count` | 128 (48 in use) |
+| mixer `is_readonly` | false |
+| general `dynamic_stream_format` / `storage_avail` / `peak_avail` | true / true / true |
+
+So the device permits router writes outright. Two measured facts shape the
+transaction beyond the sequence above:
+
+**The staging router section reads back an entry count of zero** while
+CURRENT_CONFIG holds 48. An edit therefore cannot be a read-modify-write of the
+staging section: the image is built from the active copy, modified, and written
+whole. **[measured]**
+
+**Entry position is semantically meaningful.** The peak section is a parallel
+array of router entries indexed by position (`peak_section.rs` deserialises it
+with the router-entry decoder), so moving an entry moves what a meter reads.
+Entries 0-3 carry the physical-input meter sources and entries 46/47 both target
+`blk15:0` -- the same destination twice, which is illegal for a route and exists
+to give `Mixer:0/1` a metering slot. An editor must therefore retarget sources
+**in place** and never add, remove, reorder or compact. `DICERouterImage`
+enforces exactly that: it offers in-place source replacement only, refuses the
+reserved leading range, and refuses a destination that appears more than once or
+not at all. Adding a route is a larger question -- which meter slot it displaces
+-- and is deliberately not expressible rather than available and silently wrong.
+**[implemented]**
+
+Use `kLoadRouter` (0x01), **not** `kLoadRouterStreamConfig` (0x03): the combined
+opcode is what stream bring-up issues and it disturbs the stream image, which a
+patchbay edit must not. Command mechanics are cross-validated with the local
+ALSA control reference, `tcat/extension/cmd_section.rs:83-200`: write
+`0x80000000 | rateFlag | opcode` to the command section, poll the same address
+until bit 31 clears, then read the return code at +0x04. Note that the reference
+gates `LoadRouter` on `caps.mixer.is_readonly`, which looks like a reference bug;
+`caps.router.is_readonly` is the semantically correct gate and is what ASFW
+checks.
+
+**Recovery.** A bad image can silence the device, but async register access does
+not pass through the audio router, so rewriting a known-good image and
+re-issuing `LoadRouter` always remains possible. The captured 48-entry image is
+committed as `tests/devices/SPro24RouterImageFixture.hpp` -- it is both the
+recovery baseline and the realistic input the image tests run against.
+
+**Still unverified:** whether a router load while streaming causes a dropout.
+The vendor kext uses a device notification as the completion edge for the
+*stream* load; whether the router-only load needs that or the poll suffices has
+not been tested. Exercise it with audio stopped first.
+
 ### Headphone mirror
 
 MixControl's headphone link is a routing macro, not a mute mode.  When enabled,
@@ -1012,7 +1065,7 @@ ASFW meter policy:
 | SPro mixer buses | active state publishes monitor rows 0/1 and reverb-send rows 8/9 as separate UI sections | hardware-check both grouped write paths after each topology change |
 | Mixer mute / solo | driver-owned policy over remembered nominal levels; solo writes the whole bus and confirms every cell; stale records dropped when hardware contradicts them; **exact restore verified on hardware by coefficient readback**, including fader-moved-while-muted and a 288-cell bit-identical un-solo | consider a bus-wide "clear all solos" gesture; PFL needs a spare routed bus (section 4) |
 | SPro input signal identity | all 41 vendor table entries transcribed with per-rate router coordinates; kind, index and stereo pairing resolved against the mode the router image was read at | transcribe the output table when the patchbay becomes rate-aware |
-| Patchbay | read-only active assignments | implement router-image transaction |
+| Patchbay | read-only active assignments; generic router-image build/edit/encode implemented and tested against a captured hardware image (position-preserving, reserved- and meter-entry aware) | write the staging image + `LoadRouter` + poll + verify transaction, first with audio stopped (see 4.1) |
 | DSP control surface | readback published | add ordinary DSP transactions only after RMW/fragment path replaces legacy setters |
 | VRM | status only | defer until full bank transition is designed |
 | Meters | not published as compact telemetry | add opt-in 50 Hz frames |

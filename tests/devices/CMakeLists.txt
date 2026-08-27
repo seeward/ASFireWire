@@ -57,6 +57,12 @@ add_device_test(DiceExtensionGeometryTests
 )
 
 # Generic DICE / TCAT protocol split tests
+add_device_test(DICERouterImageTests
+    DICERouterImageTests.cpp
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICERouterImage.cpp"
+    "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICEExtensionState.cpp"
+)
+
 add_device_test(DICETcatProtocolTests
     DICETcatProtocolTests.cpp
     "${ASFW_DRIVER_DIR}/Audio/Protocols/DICE/Core/DICETransaction.cpp"
