@@ -54,9 +54,63 @@ flowchart LR
     REV --> R
 ```
 
+### 2.1 Measured extension address map
+
+Read from this unit on 2026-08-27. The TCAT extension section table sits at
+`0xFFFF_E020_0000` (DICE private base `0xFFFF_E000_0000` + extension offset
+`0x0020_0000`). It is nine sections of two quadlets, `[offset][size]`, **both
+expressed in quadlets — multiply by 4 for bytes**. Offsets below are already in
+bytes and are relative to the extension base. **[measured]**
+
+| section | offset | size |
+|---|---:|---:|
+| caps | `0x00004c` | `0x000010` |
+| command | `0x00005c` | `0x000008` |
+| mixer | `0x000064` | `0x000484` |
+| peak | `0x0004e8` | `0x000200` |
+| router | `0x0006e8` | `0x000204` |
+| streamFormat | `0x0008ec` | `0x000438` |
+| currentConfig | `0x000d24` | `0x006000` |
+| standalone | `0x006d24` | `0x000040` |
+| application | `0x006d64` | `0x0245f0` |
+
+Caps (`ext+0x4c`, four quadlets) read `00800005 10120225 00011227 00000000`,
+decoding to: router exposed, 128 maximum entries; mixer exposed, writable,
+**18 inputs × 16 outputs**. **[measured]**
+
+**Mixer cell addressing.** The mixer section opens with one header quadlet
+(`0x00000103` on this unit), then a **fixed 16 × 18 window**. The stride is the
+*maximum* input count (18), not the device's actual `inputCount`, so a smaller
+device does not compact the rows. One quadlet per cell:
+
+```text
+cell(out, in) = 0xFFFF_E020_0068 + (out * 18 + in) * 4
+```
+
+Worked examples used throughout this document: host playback left is
+`cell(0, 14)` = `0xFFFF_E020_00A0`, host playback right is `cell(1, 15)` =
+`0xFFFF_E020_00EC`. **[measured]**
+
+**Router entry encoding.** One quadlet per entry, `[peak:16][src:8][dst:8]`,
+where each of `src` and `dst` is `[block:4][channel:4]`:
+
+| block | 0 | 1 | 2 | 3 | 4 | 5 | 11 | 12 | 15 |
+|---|---|---|---|---|---|---|---|---|---|
+| as source | Aes | Adat | Mixer | — | Ins0 | Ins1 | Avs0 | Avs1 | Mute |
+| as destination | Aes | Adat | MixerTx0 | MixerTx1 | Ins0 | Ins1 | Avs0 | Avs1 | — |
+
+`Avs` is the FireWire stream block, and its direction flips with its role:
+**`Avs0` as a source is host playback, as a destination it is capture.**
+
+The current-config router lives at `currentConfig + 0x0000` (low rate mode),
+`+0x2000` (mid) and `+0x4000` (high). The first quadlet is the entry count —
+48 on this unit — and the entries follow at `0xFFFF_E020_0D28`. **[measured]**
+
 The first four router entries are reserved for physical-input meter sources:
 Mic 1, Mic 2, Line 1, Line 2 in that order.  Preserve them when editing router
-images; they are not ordinary patchbay slots. **[derived]**
+images; they are not ordinary patchbay slots. Confirmed on hardware: entries
+0–3 carry sources `Ins0:2`, `Ins0:3`, `Ins0:0`, `Ins0:1`, matching the ALSA
+`FIXED` specification exactly. **[measured]**
 
 MixControl can present selected mixer outputs as monitor pairs (`MIX 1/2`,
 `MIX 3/4`, … `MIX 15/16`). The raw DICE image alone does not prove that every
@@ -89,18 +143,40 @@ The mixer coefficient law is unsigned Q2.14 amplitude:
 |---:|---:|
 | `0x0000` | mute / −∞ dBFS |
 | `0x4000` | unity / 0 dB |
-| `0xffff` | approximately +12 dB |
+| `0xffff` | +12.04 dB |
 
 For a nonzero coefficient, display gain as
 `20 × log10(coefficient / 0x4000)`.  Never display it as a percentage.
 
+**The device imposes no ceiling of its own.** A write ladder on an unrouted row
+(`Mixer:2` is not a router source, so the probe is inaudible) stored `0x4000`,
+`0x8000`, `0xA000`, `0xC000`, `0xE000` and `0xFFFF` verbatim — the full 16-bit
+range up to +12.04 dB. Writes wider than 16 bits are masked to the low half
+(`0x10000` → `0x0000`, `0x1FFFF` → `0xFFFF`). **[measured]**
+
+A `+6 dB` limit is therefore **host-side UI policy, not hardware**. MixControl's
+`FFMixerChannel::recalc` ends by clamping both channels to `[-85.0, +6.0]` dB,
+and `-85 dB` is what becomes coefficient `0` at a hard pan stop. ASFW's
+`kMaximumLevelMilliDb = 6000` inherits the vendor's choice; it is a decision,
+not a constraint. **[derived]**
+
+Two things remain **[unverified]**: that the DSP *applies* gain above unity
+rather than saturating — storing a coefficient is not applying it — and what the
+summing bus does when several channels sum past full scale.
+
 ### Required semantic projection
 
-`AudioSemanticMatrixAxis` now publishes stable presentation group and channel
-role metadata, so source channels can be correctly identified as mono or a
-verified stereo member. It still intentionally does **not** publish a
-MixControl monitor strip from raw output rows: the live image does not reveal
-the strip's bus grouping, pan law, or link state.
+`AudioSemanticMatrixAxis` publishes stable presentation group and channel role
+metadata, so source channels are identified as mono or as a verified stereo
+member. Verified stereo pairs are now **writable** as one level-plus-balance
+gesture (§3, *Safe mixer write transaction*); mono and unresolved groups remain
+read-only readback, because a mono strip still needs its pan law and the monitor
+bus still needs its grouping and link state captured.
+
+Pairing is never inferred from row adjacency. A source is paired only when its
+signal kind establishes it — host stream, S/PDIF, or the reverb return at
+`Ins0:14/15` — which is why the reverb return became writable while numerically
+adjacent ADAT channels correctly did not. **[measured]**
 
 The next matrix revision needs the remaining presentation metadata, not
 SPro-specific SwiftUI guesses:
@@ -139,8 +215,15 @@ read current coefficient / semantic state
 
 For a linked pair or a pan change, this remains one semantic transaction even
 though it changes two crosspoints.  Failure must leave the app tied to hardware
-readback, not the requested value. The current console correctly withholds
-mixer faders until that transaction exists.
+readback, not the requested value.
+
+**Implemented for verified stereo pairs (2026-08-27).** The driver re-reads the
+active router alongside the coefficient image before resolving a group, so an
+external route change cannot turn a stale group ID into a write against a
+different source row. It then issues the two native writes and confirms them by
+exact readback. Captured on the wire, one gesture is exactly two `Qwrite`s and
+one readback — no router load, no software notice, and no traffic during the
+drag itself. Hard-pan stops write a true `0x0000` on the muted side. **[measured]**
 
 ## 4. Routing and headphone semantics
 
@@ -179,9 +262,59 @@ the result before audio restart.
 
 The driver currently publishes each physical output pair's source as active
 router readback. This is separate from output level/mute and from the mixer.
-For the captured working configuration, line out 1/2, line out 3/4 / HP1, and
-line out 5/6 / HP2 all resolve to `DAW 1/2`; changing a raw mixer coefficient
-cannot affect those paths. **[measured]**
+
+> **Correction (2026-08-27).** An earlier revision of this section stated, with
+> a `[measured]` tag, that all three output pairs resolve to `DAW 1/2` and that
+> "changing a raw mixer coefficient cannot affect those paths". **Both halves
+> are wrong for the configuration this unit is actually in**, and the second is
+> the more damaging: a raw mixer coefficient change is exactly what silenced
+> this device. Host playback had been left at −24.8 dB in mixer rows 0/1 and
+> there was no audible output; restoring those two cells to unity restored it.
+> The claim is retained here rather than deleted, as a caution that a stale
+> capture can carry the document's highest-confidence tag.
+
+The measured routing on this unit is that **every analog output pair is fed
+from mixer outputs 1/2**, so the monitor mixer is in the path of all of them:
+
+```text
+analog out 1 <- Mixer:0     analog out 3 <- Mixer:0     analog out 5 <- Mixer:0
+analog out 2 <- Mixer:1     analog out 4 <- Mixer:1     analog out 6 <- Mixer:1
+```
+
+S/PDIF out 1/2 (`Aes:6/7`) is also fed from `Mixer:0/1`. **[measured]**
+
+Whether an output pair is mixer-fed or stream-fed is a property of the *active
+router image*, not of the device. Read it before reasoning about any output
+path; do not assume either topology. **[measured]**
+
+### 5.1 Measured signal fan-out
+
+Physical `INPUT 1` is router source `Ins0:2` — identified by its channel-strip
+wiring, since the DSP strips exist to sit on the combo preamp inputs, and
+corroborated by the `FIXED` meter ordering in §2.1. It reaches three places:
+
+```text
+INPUT 1 (Ins0:2)
+  |-> Ins0:8   channel-strip 1 INPUT --[EQ + compressor]--> capture ch 1
+  |-> Avs0:14  capture ch 15                                (dry, pre-DSP)
+  '-> MixerTx0:0  mixer input 1 -> monitor mix -> every analog output
+```
+
+**This is a recording trap.** The host's "Input 1" carries the *processed*
+signal; the dry jack arrives on **capture channel 15**. Anyone expecting a clean
+take from input 1 gets the hardware EQ and compressor baked in. **[measured]**
+
+The monitor mixer on this unit is **hard-panned**: every mixer input has exactly
+one non-zero cell — odd-numbered inputs feed the left bus only, even-numbered
+the right only, with no source present in both. A mono source on an odd input is
+therefore hard left, which is correct behaviour for a matrix that treats
+consecutive inputs as the L and R halves of a stereo pair, and surprising to
+anyone expecting a centred mono signal. **[measured]**
+
+Reverb is inside the monitor path, not beside it: mixer rows 8/9 are the reverb
+send (`Ins0:14/15` ← `Mixer:8/9`), and the return re-enters as mixer inputs
+17/18 via `MixerTx1:0/1`. "Direct monitoring" on this device is consequently
+**not dry** whenever the return cells are non-zero. **[measured]**
 
 The currently known writable physical controls are:
 
@@ -192,9 +325,19 @@ The currently known writable physical controls are:
 | Outputs 1/2, 3/4, 5/6 | individual level and mute |
 | Global | mute and dim |
 
-Output values `0…127` are integer attenuation in dB, not arbitrary logical
-units: `0` is 0 dB, `127` is −127 dB/practical mute.  The UI should display the
-negative dB attenuation and orient its fader accordingly. **[derived]**
+**Two opposite scales share the same numerals — name which one you mean.** The
+*stored* byte is attenuation: `0` is 0 dB (full output), rising toward mute. The
+out-group words at `0xFFFF_E020_6D70 + 0x08` read `0x00000000` on this unit
+while the outputs are at full level, confirming the raw sense. **[measured]**
+
+ALSA and the ASFW console both present the *inverted* value, `vol = 127 − raw`,
+so the same full-output state displays as **127**. A document that says "0" and
+a UI that says "127" are describing one state, not disagreeing.
+
+That `127` is exactly −127 dB is **[unverified]** — a linear 1 dB/step reading of
+the raw byte, not a confirmed law. The console currently states the honest
+position, that the calibrated dB law is not published; this document should not
+claim more than the UI does.
 
 The output group also carries assignments for hardware knob, mute, and dim
 controls.  MixControl exposes monitor presets such as Stereo (1/2), Quad
@@ -355,7 +498,7 @@ ASFW meter policy:
 |---|---|---|
 | DICE streaming / stopped choreography | working on tested hardware | retain regression tests |
 | Input and output controls | bounded write + readback exists | display output values as dB attenuation; add monitor assignment semantics |
-| Semantic mixer snapshot | verified source grouping; read-only reverb-send pair | capture monitor-bus/link/pan semantics, then add grouped writes |
+| Semantic mixer snapshot | verified source grouping; grouped stereo level+balance writes working on hardware, including the reverb **return** pair (mixer inputs 17/18) | capture mono pan law and monitor-bus link state, then extend to mono strips |
 | Patchbay | read-only active assignments | implement router-image transaction |
 | DSP control surface | readback published | add ordinary DSP transactions only after RMW/fragment path replaces legacy setters |
 | VRM | status only | defer until full bank transition is designed |
@@ -388,10 +531,13 @@ are shared; routing and mixer state are not.
 
 ## 11. Implementation order
 
-1. Capture monitor-bus grouping, channel role/presentation, link state and pan
-   law; do not project raw scalar rows into strips before then.
-2. Implement bounded grouped level/pan writes with readback, then linked stereo
-   semantic mutations.
+1. ~~Capture channel role/presentation and grouping for stereo pairs.~~ **Done**
+   — presentation group and channel role ship in the matrix. Monitor-bus link
+   state and the **mono pan law** are still uncaptured; do not project raw
+   scalar rows into mono strips before then.
+2. ~~Implement bounded grouped level/balance writes with readback.~~ **Done**
+   for verified stereo pairs and hardware-confirmed. Still outstanding: mono
+   level+pan, and linked stereo semantic mutations.
 3. Replace sparse whole-block DSP setters with active-rate, fragment-based
    RMW transactions.  Implement channel-strip stereo link, EQ/compressor
    enable/order, natural compressor parameters, natural reverb parameters,
