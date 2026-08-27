@@ -783,6 +783,32 @@ but matrix completeness is not part of the semantic definition.
 
 ---
 
+## 13.3 Open question: no crosspoint equivalent of `RouteBundle`
+
+§12.2 introduces `RouteBundle` because *"some hardware operations switch several
+signal paths together"*, and §10.1 generalises it as *"the smallest set of routes
+which must change atomically"*. Real mixer gestures have the same property, and
+the mixer model currently has no equivalent.
+
+`MixerNode` holds bare `crosspoints`, and `ParameterTarget` is a single
+`variant<NodeId, PortId, CrosspointId>`. A stereo strip's level-plus-balance is
+one semantic gesture over a **pair** of crosspoints that must be written and
+confirmed together; there is presently no way to express that.
+
+Evidence so far comes from one device. The Saffire Pro 24 DSP's monitor mixer is
+eight stereo mixes of eighteen sources, where both a stereo-source balance and a
+mono-source pan are single gestures writing two cells atomically. ASFW carries
+this today as ad-hoc `presentationGroupId` / `channelRole` fields on the matrix
+wire format — the missing concept under a different name. See
+`documentation/SPRO24DSP.md` §3 and §3.1.
+
+This is §3.7 case 3, *the semantic model is incomplete*, and is recorded as an
+open question rather than a decided change. Per §3.5 the vocabulary should grow
+only when **multiple** real devices demand the shared concept; one device is not
+yet that evidence.
+
+---
+
 # 14. Processor Model
 
 A processor represents signal transformation that is neither routing nor summation.
