@@ -203,6 +203,8 @@ private:
     IOLock* semanticMatrixLock_{nullptr};
     DiceMixerCoefficients semanticMixerCoefficients_{};
     DiceRouterEntries semanticRouterEntries_{};
+    /// Rate mode the cached router image above was read at.
+    DiceRateMode semanticRateMode_{DiceRateMode::Low};
     DiceExtensionCaps semanticExtensionCaps_{};
     uint32_t semanticMatrixRevision_{0};
     bool semanticMatrixReady_{false};

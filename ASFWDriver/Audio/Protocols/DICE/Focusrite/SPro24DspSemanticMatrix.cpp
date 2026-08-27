@@ -6,6 +6,7 @@
 #include "../Core/DICERouterMixerTopology.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace ASFW::Audio::DICE::Focusrite {
@@ -20,65 +21,162 @@ constexpr uint32_t kMixerOutputPresentationGroupBase = 0x5355'0000;
 // Product presentation is applied only after the generic TCAT layer has
 // joined the active router and anonymous 18 x 16 coefficient window.
 
-AudioSemanticSignalKind SignalKindForSource(uint8_t block) noexcept {
-    // Source-block vocabulary is deliberately translated here, rather than
-    // exported as a DICE enum. Unknown/mute routes fall back to a stable
-    // internal auxiliary port while retaining the matrix input position.
-    switch (block) {
-    case 0: return AudioSemanticSignalKind::DigitalSpdif;
-    case 1: return AudioSemanticSignalKind::DigitalAdat;
-    case 4:
-    case 5: return AudioSemanticSignalKind::AnalogLine;
-    case 11:
-    case 12: return AudioSemanticSignalKind::HostStream;
-    case 2: return AudioSemanticSignalKind::Auxiliary;
-    default: return AudioSemanticSignalKind::Auxiliary;
-    }
+// ---------------------------------------------------------------------------
+// Vendor input signal table
+//
+// Decoded from MixControl's `Pro24DSP_IpSigTab`. Every vendor entry names one
+// signal and carries a separate (block, channel) per rate mode, because two
+// pairs move router channel with rate: `FX(Anlg 1/2)` is Ins0:8/9 at 1x but
+// Ins0:4/5 at 2x, and `FmRvb 0/1` is Ins0:14/15 then Ins0:6/7. Deriving a
+// channel number arithmetically instead of consulting the table silently
+// mislabels both pairs above 48 kHz -- and on the output side the same shift
+// swaps a line output with a channel-strip send. See documentation/SPRO24DSP.md
+// sections 5.0 and 5.0.1.
+//
+// Source-block IDs are TCAT vocabulary, cross-validated with the local ALSA
+// control reference: Aes=0, Adat=1, Mixer=2, Ins0=4, Ins1=5, ArmAprAudio=10,
+// Avs0=11, Avs1=12, Mute=15 --
+// references/alsa-userspace-control-protocols-impl/protocols/dice/src/tcat/
+// extension/router_entry.rs:81-95.
+// ---------------------------------------------------------------------------
+
+using Kind = AudioSemanticSignalKind;
+
+constexpr uint8_t kBlockAes = 0;
+constexpr uint8_t kBlockAdat = 1;
+constexpr uint8_t kBlockMixer = 2;
+constexpr uint8_t kBlockIns0 = 4;
+constexpr uint8_t kBlockArmApr = 10;
+constexpr uint8_t kBlockAvs0 = 11;
+constexpr uint8_t kBlockMute = 15;
+
+// A router block field is four bits wide, so this can never match a real
+// route and an absent signal is unreachable by construction.
+constexpr uint8_t kSignalAbsent = 0xff;
+constexpr size_t kRateModeCount = 3;
+
+// Several distinct vendor categories collapse onto `Auxiliary`, which carries
+// no sub-kind, so their signal indices must not overlap. Only the DSP returns
+// are reachable in any measured router image; the rest are numbered so that an
+// unexpected route is merely unnamed rather than reported as another signal.
+constexpr uint32_t kAuxEffectReturnFirst = 1;   // FX(Anlg 1/2)
+constexpr uint32_t kAuxReverbReturnFirst = 3;   // FmRvb 0/1
+constexpr uint32_t kAuxMixReturnFirst = 5;      // FromMix1..8
+constexpr uint32_t kAuxReverbSendFirst = 13;    // RvbSend-1/2
+constexpr uint32_t kAuxArmFirst = 15;           // FromArm-0/1
+constexpr uint32_t kAuxMuted = 17;              // Off
+
+struct SPro24InputSignal final {
+    Kind kind;
+    /// One-based, user-facing, and disjoint within `kind`.
+    uint32_t signalIndex;
+    /// Set only where the vendor table pairs two entries as one stereo source.
+    /// Never inferred from adjacent numbering.
+    bool stereoPair;
+    /// Router coordinates indexed by DiceRateMode.
+    std::array<uint8_t, kRateModeCount> block;
+    std::array<uint8_t, kRateModeCount> channel;
+};
+
+// The Pro 24 DSP publishes 44.1/48/88.2/96 kHz only, so no entry exists at the
+// High mode. That column is left absent rather than assumed to repeat the low
+// one: a High-rate lookup finds nothing and falls back to an unnamed source.
+[[nodiscard]] constexpr SPro24InputSignal SameAtBothRates(
+    Kind kind, uint32_t index, bool stereoPair, uint8_t block, uint8_t channel) noexcept {
+    return {kind, index, stereoPair,
+            {block, block, kSignalAbsent},
+            {channel, channel, kSignalAbsent}};
 }
 
-AudioSemanticSignalKind SignalKindForSPro24Source(const DiceRouterEntry& entry) noexcept {
-    // SPro24 DSP's Ins0 block has profile-defined sub-ranges. Keep the DSP
-    // returns out of the physical-line presentation even though they share a
-    // TCAT source block. Cross-validated with the local
-    // snd-firewire-ctl-services spro24dsp Tcd22xx specification.
-    if (entry.sourceBlock == 4) {
-        // All four analog inputs are one vendor category, "Anlg In 1..4".
-        // Do NOT split channels 2/3 out as a microphone kind: whether inputs
-        // 1/2 are presenting a preamp is an input *mode*, published separately
-        // by the physical-input surface, not the identity of the signal. A
-        // strip labelled MIC while its jack is switched to line is a lie.
-        if (entry.sourceChannel < 4) return AudioSemanticSignalKind::AnalogLine;
-        return AudioSemanticSignalKind::Auxiliary; // channel-strip/reverb return
-    }
-    return SignalKindForSource(entry.sourceBlock);
+[[nodiscard]] constexpr SPro24InputSignal MovesAtMidRate(
+    Kind kind, uint32_t index, bool stereoPair, uint8_t block,
+    uint8_t lowChannel, uint8_t midChannel) noexcept {
+    return {kind, index, stereoPair,
+            {block, block, kSignalAbsent},
+            {lowChannel, midChannel, kSignalAbsent}};
 }
 
-uint32_t SignalIndexForSource(const DiceRouterEntry& entry) noexcept {
-    // Signal indices are one-based user-facing channel numbers. Distinct TCAT
-    // source blocks of one signal kind need disjoint identities as well.
-    switch (entry.sourceBlock) {
-    case 0:
-        // The Pro 24 DSP exposes its coax S/PDIF pair at AES 6/7; keep the
-        // user-facing pair numbered 1/2 rather than leaking router offsets.
-        return entry.sourceChannel >= 6 ? uint32_t{entry.sourceChannel} - 5U
-                                        : uint32_t{entry.sourceChannel} + 1U;
-    case 4:
-        // Vendor analog-input numbering is NOT the router channel order:
-        // Ins0:2 -> Anlg In 1, Ins0:3 -> 2, Ins0:0 -> 3, Ins0:1 -> 4. The rear
-        // pair is 3/4, not 1/2. Recovered from MixControl's Pro24DSP_IpSigTab,
-        // and corroborated by the FIXED meter ordering (Ins0 2,3,0,1).
-        if (entry.sourceChannel < 2) return uint32_t{entry.sourceChannel} + 3U;
-        if (entry.sourceChannel < 4) return uint32_t{entry.sourceChannel} - 1U;
-        if (entry.sourceChannel >= 8 && entry.sourceChannel < 10) {
-            return uint32_t{entry.sourceChannel} - 7U; // channel strip 1/2
+[[nodiscard]] constexpr SPro24InputSignal LowRateOnly(
+    Kind kind, uint32_t index, bool stereoPair, uint8_t block, uint8_t channel) noexcept {
+    return {kind, index, stereoPair,
+            {block, kSignalAbsent, kSignalAbsent},
+            {channel, kSignalAbsent, kSignalAbsent}};
+}
+
+// All 41 entries of Pro24DSP_IpSigTab, in vendor order.
+constexpr auto kSPro24InputSignals = std::to_array<SPro24InputSignal>({
+    // Anlg In 1..4. Vendor numbering is not router channel order: the rear
+    // pair is 3/4. Corroborated by the fixed meter ordering (Ins0 2,3,0,1).
+    SameAtBothRates(Kind::AnalogLine, 1, false, kBlockIns0, 2),
+    SameAtBothRates(Kind::AnalogLine, 2, false, kBlockIns0, 3),
+    SameAtBothRates(Kind::AnalogLine, 3, false, kBlockIns0, 0),
+    SameAtBothRates(Kind::AnalogLine, 4, false, kBlockIns0, 1),
+    // SPDIF 1/2 -- the coax pair, exposed by the vendor at Aes:6/7.
+    SameAtBothRates(Kind::DigitalSpdif, 1, true, kBlockAes, 6),
+    SameAtBothRates(Kind::DigitalSpdif, 2, true, kBlockAes, 7),
+    // ADAT In 1..8. Channels 5..8 exist at 1x only.
+    SameAtBothRates(Kind::DigitalAdat, 1, false, kBlockAdat, 0),
+    SameAtBothRates(Kind::DigitalAdat, 2, false, kBlockAdat, 1),
+    SameAtBothRates(Kind::DigitalAdat, 3, false, kBlockAdat, 2),
+    SameAtBothRates(Kind::DigitalAdat, 4, false, kBlockAdat, 3),
+    LowRateOnly(Kind::DigitalAdat, 5, false, kBlockAdat, 4),
+    LowRateOnly(Kind::DigitalAdat, 6, false, kBlockAdat, 5),
+    LowRateOnly(Kind::DigitalAdat, 7, false, kBlockAdat, 6),
+    LowRateOnly(Kind::DigitalAdat, 8, false, kBlockAdat, 7),
+    // DAW 1..8 -- host playback, four stereo pairs.
+    SameAtBothRates(Kind::HostStream, 1, true, kBlockAvs0, 0),
+    SameAtBothRates(Kind::HostStream, 2, true, kBlockAvs0, 1),
+    SameAtBothRates(Kind::HostStream, 3, true, kBlockAvs0, 2),
+    SameAtBothRates(Kind::HostStream, 4, true, kBlockAvs0, 3),
+    SameAtBothRates(Kind::HostStream, 5, true, kBlockAvs0, 4),
+    SameAtBothRates(Kind::HostStream, 6, true, kBlockAvs0, 5),
+    SameAtBothRates(Kind::HostStream, 7, true, kBlockAvs0, 6),
+    SameAtBothRates(Kind::HostStream, 8, true, kBlockAvs0, 7),
+    // FromMix1..8 -- monitor bus returns.
+    SameAtBothRates(Kind::Auxiliary, kAuxMixReturnFirst + 0, false, kBlockMixer, 0),
+    SameAtBothRates(Kind::Auxiliary, kAuxMixReturnFirst + 1, false, kBlockMixer, 1),
+    SameAtBothRates(Kind::Auxiliary, kAuxMixReturnFirst + 2, false, kBlockMixer, 2),
+    SameAtBothRates(Kind::Auxiliary, kAuxMixReturnFirst + 3, false, kBlockMixer, 3),
+    SameAtBothRates(Kind::Auxiliary, kAuxMixReturnFirst + 4, false, kBlockMixer, 4),
+    SameAtBothRates(Kind::Auxiliary, kAuxMixReturnFirst + 5, false, kBlockMixer, 5),
+    SameAtBothRates(Kind::Auxiliary, kAuxMixReturnFirst + 6, false, kBlockMixer, 6),
+    SameAtBothRates(Kind::Auxiliary, kAuxMixReturnFirst + 7, false, kBlockMixer, 7),
+    // RvbSend-1/2 -- the vendor's own name for mixer rows 8/9.
+    SameAtBothRates(Kind::Auxiliary, kAuxReverbSendFirst + 0, false, kBlockMixer, 8),
+    SameAtBothRates(Kind::Auxiliary, kAuxReverbSendFirst + 1, false, kBlockMixer, 9),
+    // SPDIF 3/4 -- a second vendor pair at Aes:4/5, numbered 3/4 by the table
+    // and not by its router offset.
+    SameAtBothRates(Kind::DigitalSpdif, 3, true, kBlockAes, 4),
+    SameAtBothRates(Kind::DigitalSpdif, 4, true, kBlockAes, 5),
+    // FX(Anlg 1/2) -- channel-strip returns. Two mono strips, not a pair.
+    MovesAtMidRate(Kind::Auxiliary, kAuxEffectReturnFirst + 0, false, kBlockIns0, 8, 4),
+    MovesAtMidRate(Kind::Auxiliary, kAuxEffectReturnFirst + 1, false, kBlockIns0, 9, 5),
+    // FmRvb 0/1 -- the stereo reverb return.
+    MovesAtMidRate(Kind::Auxiliary, kAuxReverbReturnFirst + 0, true, kBlockIns0, 14, 6),
+    MovesAtMidRate(Kind::Auxiliary, kAuxReverbReturnFirst + 1, true, kBlockIns0, 15, 7),
+    // FromArm-0/1 -- ARM/APR audio.
+    SameAtBothRates(Kind::Auxiliary, kAuxArmFirst + 0, false, kBlockArmApr, 0),
+    SameAtBothRates(Kind::Auxiliary, kAuxArmFirst + 1, false, kBlockArmApr, 1),
+    // Off -- a mixer input deliberately wired to silence.
+    SameAtBothRates(Kind::Auxiliary, kAuxMuted, false, kBlockMute, 0),
+});
+
+static_assert(kSPro24InputSignals.size() == 41,
+              "Pro24DSP_IpSigTab has 41 entries; a short table silently unnames a source.");
+
+/// The vendor entry naming `route`'s source at `rateMode`, or null when the
+/// active router points at something the table does not describe.
+[[nodiscard]] const SPro24InputSignal* FindSPro24InputSignal(const DiceRouterEntry& route,
+                                                              DiceRateMode rateMode) noexcept {
+    const auto rate = static_cast<size_t>(rateMode);
+    if (rate >= kRateModeCount) return nullptr;
+    for (const auto& signal : kSPro24InputSignals) {
+        if (signal.block[rate] == route.sourceBlock &&
+            signal.channel[rate] == route.sourceChannel) {
+            return &signal;
         }
-        if (entry.sourceChannel >= 14) return uint32_t{entry.sourceChannel} - 11U; // reverb 1/2
-        return uint32_t{entry.sourceChannel} + 1U;
-    case 5: return uint32_t{entry.sourceChannel} + 17U;
-    case 11: return uint32_t{entry.sourceChannel} + 1U;
-    case 12: return uint32_t{entry.sourceChannel} + 17U;
-    default: return uint32_t{entry.sourceChannel} + 1U;
     }
+    return nullptr;
 }
 
 struct InputPresentation final {
@@ -86,19 +184,15 @@ struct InputPresentation final {
     AudioSemanticMatrixChannelRole role{AudioSemanticMatrixChannelRole::Mono};
 };
 
-InputPresentation PresentationForSource(const DiceRouterEntry& entry,
-                                        AudioSemanticSignalKind kind,
+InputPresentation PresentationForSource(const SPro24InputSignal* signal,
+                                        Kind kind,
                                         uint32_t signalIndex,
                                         uint32_t input) noexcept {
-    // Only pairs verified as one hardware/stereo source receive L/R roles.
-    // ADAT and individual analog/strip sources remain mono, even if their
-    // labels are numerically adjacent: pairing them from index coincidence is
-    // exactly the UI bug this semantic field avoids.
-    const bool stereoPair = kind == AudioSemanticSignalKind::HostStream ||
-        kind == AudioSemanticSignalKind::DigitalSpdif ||
-        (kind == AudioSemanticSignalKind::Auxiliary && entry.sourceBlock == 4 &&
-         entry.sourceChannel >= 14 && entry.sourceChannel < 16);
-    if (!stereoPair) {
+    // Only sources the vendor table pairs receive L/R roles. ADAT and the
+    // individual analog/strip sources stay mono even where their labels are
+    // numerically adjacent: pairing them from index coincidence is exactly the
+    // UI bug this semantic field exists to avoid.
+    if (signal == nullptr || !signal->stereoPair) {
         return {.groupId = kMixerInputPresentationGroupBase + input + 1U,
                 .role = AudioSemanticMatrixChannelRole::Mono};
     }
@@ -110,9 +204,12 @@ InputPresentation PresentationForSource(const DiceRouterEntry& entry,
                                               : AudioSemanticMatrixChannelRole::Right};
 }
 
-[[nodiscard]] bool IsSPro24ReverbReturn(const DiceMixerInputBinding& binding) noexcept {
-    return binding.routed && binding.route.sourceBlock == 4U &&
-           binding.route.sourceChannel >= 14U && binding.route.sourceChannel < 16U;
+/// Reads the published axis rather than the raw route, so it stays correct at
+/// the rate where the reverb return moves from Ins0:14/15 to Ins0:6/7.
+[[nodiscard]] bool IsSPro24ReverbReturn(const AudioSemanticMatrixAxis& axis) noexcept {
+    return axis.signalKind == Kind::Auxiliary &&
+           (axis.signalIndex == kAuxReverbReturnFirst ||
+            axis.signalIndex == kAuxReverbReturnFirst + 1U);
 }
 
 [[nodiscard]] AudioSemanticMatrixOutputRole OutputRoleForSPro24Row(
@@ -169,6 +266,7 @@ InputPresentation PresentationForSource(const DiceRouterEntry& entry,
 
 bool BuildSPro24DspSemanticMatrix(const DiceMixerCoefficients& coefficients,
                                   const DiceRouterEntries& routes,
+                                  DiceRateMode rateMode,
                                   AudioSemanticMatrixSnapshot& outSnapshot) noexcept {
     if (coefficients.inputCount == 0 || coefficients.outputCount == 0 ||
         coefficients.inputCount > kMaxAudioSemanticMatrixInputs ||
@@ -191,15 +289,14 @@ bool BuildSPro24DspSemanticMatrix(const DiceMixerCoefficients& coefficients,
 
     for (uint32_t input = 0; input < coefficients.inputCount; ++input) {
         const auto& binding = topology.inputs[input];
-        const auto& route = binding.route;
-        const bool found = binding.routed;
-        const auto kind = found ? SignalKindForSPro24Source(route)
-                                : AudioSemanticSignalKind::Auxiliary;
-        const uint32_t signalIndex = found ? SignalIndexForSource(route) : input + 1U;
-        const auto presentation = found
-            ? PresentationForSource(route, kind, signalIndex, input)
-            : InputPresentation{.groupId = kMixerInputPresentationGroupBase + input + 1U,
-                                .role = AudioSemanticMatrixChannelRole::Mono};
+        // An unrouted input, or one the vendor table does not describe at this
+        // rate, keeps its matrix position and stays an unnamed mono auxiliary
+        // rather than borrowing a neighbour's identity.
+        const auto* signal = binding.routed
+            ? FindSPro24InputSignal(binding.route, rateMode) : nullptr;
+        const auto kind = signal ? signal->kind : AudioSemanticSignalKind::Auxiliary;
+        const uint32_t signalIndex = signal ? signal->signalIndex : input + 1U;
+        const auto presentation = PresentationForSource(signal, kind, signalIndex, input);
         outSnapshot.inputs[input] = {
             .portId = kMixerInputPortBase + input + 1U,
             .signalKind = kind,
@@ -240,7 +337,7 @@ bool BuildSPro24DspSemanticMatrix(const DiceMixerCoefficients& coefficients,
                 // grouped writes.
                 presentation = AudioSemanticMatrixCrosspointPresentation::ScalarReadback;
             } else if (role == AudioSemanticMatrixOutputRole::EffectSend &&
-                IsSPro24ReverbReturn(topology.inputs[input])) {
+                IsSPro24ReverbReturn(outSnapshot.inputs[input])) {
                 // MixControl's reverb-send source list does not feed the
                 // reverb return back into its own input. The scalar cells
                 // remain in readback, but exposing them as a strip creates a
@@ -266,10 +363,13 @@ bool BuildSPro24DspSemanticMatrix(const DiceMixerCoefficients& coefficients,
 std::optional<SPro24DspStereoStripLayout>
 ResolveSPro24DspStereoStrip(const DiceMixerCoefficients& coefficients,
                             const DiceRouterEntries& routes,
+                            DiceRateMode rateMode,
                             uint32_t outputPresentationGroupId,
                             uint32_t inputPresentationGroupId) noexcept {
     AudioSemanticMatrixSnapshot snapshot{};
-    if (!BuildSPro24DspSemanticMatrix(coefficients, routes, snapshot)) return std::nullopt;
+    if (!BuildSPro24DspSemanticMatrix(coefficients, routes, rateMode, snapshot)) {
+        return std::nullopt;
+    }
 
     std::optional<uint8_t> inputLeft;
     std::optional<uint8_t> inputRight;
@@ -331,10 +431,13 @@ ResolveSPro24DspStereoStrip(const DiceMixerCoefficients& coefficients,
 std::optional<SPro24DspMonoStripLayout>
 ResolveSPro24DspMonoStrip(const DiceMixerCoefficients& coefficients,
                           const DiceRouterEntries& routes,
+                          DiceRateMode rateMode,
                           uint32_t outputPresentationGroupId,
                           uint32_t inputPresentationGroupId) noexcept {
     AudioSemanticMatrixSnapshot snapshot{};
-    if (!BuildSPro24DspSemanticMatrix(coefficients, routes, snapshot)) return std::nullopt;
+    if (!BuildSPro24DspSemanticMatrix(coefficients, routes, rateMode, snapshot)) {
+        return std::nullopt;
+    }
 
     std::optional<uint8_t> input;
     std::optional<uint8_t> outputLeft;

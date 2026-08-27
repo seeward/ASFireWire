@@ -116,9 +116,20 @@ enum SaffireSignalLabel {
         case .hostStream: return "DAW \(axis.signalIndex)"
         case .digitalSpdif: return "S/PDIF \(axis.signalIndex)"
         case .digitalAdat: return "ADAT \(axis.signalIndex)"
+        // Several vendor categories share the auxiliary kind, which carries no
+        // sub-kind of its own, so they are separated by the disjoint index
+        // ranges the driver's signal table allocates. A future matrix revision
+        // should publish the vendor category and retire this mapping.
         case .auxiliary:
-            return axis.signalIndex <= 2 ? "FX (ANLG \(axis.signalIndex))"
-                                         : "REVERB \(axis.signalIndex - 2)"
+            switch axis.signalIndex {
+            case 1...2: return "FX (ANLG \(axis.signalIndex))"
+            case 3...4: return "REVERB \(axis.signalIndex - 2)"
+            case 5...12: return "MIX \(axis.signalIndex - 4)"
+            case 13...14: return "RVB SEND \(axis.signalIndex - 12)"
+            case 15...16: return "ARM \(axis.signalIndex - 14)"
+            case 17: return "OFF"
+            default: return "AUX \(axis.signalIndex)"
+            }
         default: return "SOURCE \(axis.signalIndex)"
         }
     }

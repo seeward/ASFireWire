@@ -10,6 +10,7 @@
 #pragma once
 
 #include "../Core/DICEExtensionState.hpp"
+#include "../Core/DICETypes.hpp"
 #include "../../../Shared/Topology/IAudioSemanticMatrix.hpp"
 
 #include <optional>
@@ -41,9 +42,14 @@ struct SPro24DspStereoStripCoefficients final {
     uint16_t right{0};
 };
 
+/// `rateMode` must be the mode whose CURRENT_CONFIG router image `routes` was
+/// read from. The vendor signal table is rate-scoped -- both DSP return pairs
+/// move router channel between 1x and 2x -- so resolving a source against the
+/// wrong mode mislabels them rather than failing.
 [[nodiscard]] bool BuildSPro24DspSemanticMatrix(
     const DiceMixerCoefficients& coefficients,
     const DiceRouterEntries& routes,
+    DiceRateMode rateMode,
     AudioSemanticMatrixSnapshot& outSnapshot) noexcept;
 
 /// Resolves only a real source L/R pair and mixer-output L/R pair. Mono rows
@@ -51,6 +57,7 @@ struct SPro24DspStereoStripCoefficients final {
 [[nodiscard]] std::optional<SPro24DspStereoStripLayout>
 ResolveSPro24DspStereoStrip(const DiceMixerCoefficients& coefficients,
                             const DiceRouterEntries& routes,
+                            DiceRateMode rateMode,
                             uint32_t outputPresentationGroupId,
                             uint32_t inputPresentationGroupId) noexcept;
 
@@ -60,6 +67,7 @@ ResolveSPro24DspStereoStrip(const DiceMixerCoefficients& coefficients,
 [[nodiscard]] std::optional<SPro24DspMonoStripLayout>
 ResolveSPro24DspMonoStrip(const DiceMixerCoefficients& coefficients,
                           const DiceRouterEntries& routes,
+                          DiceRateMode rateMode,
                           uint32_t outputPresentationGroupId,
                           uint32_t inputPresentationGroupId) noexcept;
 

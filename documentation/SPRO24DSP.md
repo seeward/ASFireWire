@@ -580,10 +580,32 @@ addressed rows that cannot reach any destination.
 
 **The DSP returns move router channel with rate.** `FX(Anlg 1/2)` is `Ins0:8/9`
 at low rate but `Ins0:4/5` at mid; `FmRvb 0/1` is `Ins0:14/15` then `Ins0:6/7`.
-`SignalIndexForSource` currently hardcodes the low-rate channels, so at 88.2/96
-kHz both DSP return pairs would fall through to the generic auxiliary branch and
-be mislabelled. A latent defect, reachable only above 48 kHz, recorded rather
-than fixed while work is scoped to 44.1/48. **[derived]**
+
+**Fixed 2026-08-27.** `SignalIndexForSource` used to derive a channel number
+arithmetically and hardcoded the low-rate positions, so above 48 kHz both DSP
+return pairs fell through to the unnamed auxiliary branch while the channels
+they had moved to were reported as something else. It is now a direct
+transcription of all 41 `Pro24DSP_IpSigTab` entries, each carrying its own
+`(block, channel)` per rate mode, and the lookup takes the mode the active
+router image was read at. The signal kind, the user-facing index, and stereo
+pairing all come from that one table, so no arithmetic remains to be wrong.
+Sources the table does not describe at the active rate stay unnamed mono
+auxiliaries in their matrix position rather than borrowing a neighbour's
+identity. **[implemented]**
+
+Two numbering corrections fell out of the transcription. `SPDIF 3/4` is
+`Aes:4/5` and the vendor numbers it 3/4, where the arithmetic reported 5/6. And
+because several vendor categories collapse onto the single `Auxiliary` signal
+kind, they are now allocated disjoint index ranges — DSP returns 1–4, mix
+returns 5–12, reverb sends 13–14, ARM 15–16, `Off` 17 — where previously a route
+from `Mixer:0` or `Mute:0` would have been reported as `FX (ANLG 1)`. None of
+those sources appears in a measured router image on this unit, so this is a
+correctness fix without an observed symptom. **[implemented]**
+
+The `Auxiliary` collapse is an ABI limitation, not a modelling choice: the
+matrix axis has no vendor-category field, so the console maps those index ranges
+back to names. A later revision should publish the category and retire that
+mapping. **[derived]**
 
 ### 5.0.1 Vendor output signal table (complete)
 
@@ -623,7 +645,12 @@ low-rate channels does not merely lose a label at high rate — it reports the
 **channel-strip send as a line output and vice versa**. Together with the input
 side's `FX(Anlg)` / `FmRvb` shift (§5.0), this is the substantive reason the
 profile must consult a rate-scoped table rather than a `switch` on channel
-number. **[derived]**
+number. The **input** side is now table-driven (§5.0). This output table is
+**not** yet transcribed: the mixer projection does not need it, because its
+output axes are `Mixer:0`…`9` rows whose identity does not move with rate. The
+surfaces that do consume router destinations — the patchbay and monitor
+assignment — still read low-rate positions, so `Line 5/6` and `ToFX 0/1` remain
+swappable there above 48 kHz. **[derived, open]**
 
 ### 5.1 Measured signal fan-out
 
@@ -903,6 +930,7 @@ ASFW meter policy:
 | Semantic mixer snapshot | matrix ABI v5 publishes per-cell presentation; grouped stereo level+balance and ASFW-defined mono level+pan writes use exact two-cell readback and are hardware-confirmed; reverb return is excluded from reverb send | retain the policy unless measured vendor-law evidence justifies replacing it |
 | Generic TCAT router/mixer join | input identity and output reachability come from the active router; inactive rows are omitted; native raw row survives semantic compaction | reuse for other TCD22xx profiles; keep product labels and pairing out of the generic layer |
 | SPro mixer buses | active state publishes monitor rows 0/1 and reverb-send rows 8/9 as separate UI sections | hardware-check both grouped write paths after each topology change |
+| SPro input signal identity | all 41 vendor table entries transcribed with per-rate router coordinates; kind, index and stereo pairing resolved against the mode the router image was read at | transcribe the output table when the patchbay becomes rate-aware |
 | Patchbay | read-only active assignments | implement router-image transaction |
 | DSP control surface | readback published | add ordinary DSP transactions only after RMW/fragment path replaces legacy setters |
 | VRM | status only | defer until full bank transition is designed |
@@ -927,6 +955,16 @@ The 2026-08-27 generic-boundary pass added regression coverage for:
 - grouped stereo and mono resolution through opaque stable port IDs;
 - reverb-return self-send suppression through product-owned cell presentation;
 - constant-power mono centre/endpoints and exact two-write readback.
+
+The signal-table pass added:
+
+- both DSP return pairs resolving to the same semantic identity from their 1x
+  and 2x router channels;
+- 1x channels read at 2x falling back to unnamed mono sources instead of
+  keeping their 1x labels;
+- vendor `SPDIF 1/2` and `SPDIF 3/4` numbering and pairing;
+- reverb-return self-send suppression holding at 2x, where the return has moved
+  to `Ins0:6/7`.
 
 Validation commands and result at the end of that pass:
 

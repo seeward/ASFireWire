@@ -101,6 +101,13 @@ constexpr uint32_t kRouterStreamConfigNoticeMask =
     return SPro24DspControl::OutputRouteSource::Unknown;
 }
 
+// The rate mode whose CURRENT_CONFIG router image the semantic surface is
+// built from. SPro24 publishes 44.1/48 kHz today and both live in the low
+// router block. The vendor signal table is rate-scoped, so publishing the 2x
+// modes is a change to this constant and the reads it feeds, not to the
+// projection: the two DSP return pairs then resolve at their 2x channels.
+constexpr DiceRateMode kSemanticRouterRateMode = DiceRateMode::Low;
+
 [[nodiscard]] constexpr uint32_t ExtensionRateFlag(DiceRateMode mode) noexcept {
     switch (mode) {
     case DiceRateMode::Low: return ExtensionCommandOpcode::kRateLow;
@@ -334,7 +341,8 @@ bool SPro24DspProtocol::CopyAudioSemanticMatrix(
     if (!semanticMatrixLock_) return false;
     IOLockLock(semanticMatrixLock_);
     const bool ready = semanticMatrixReady_ &&
-        BuildSPro24DspSemanticMatrix(semanticMixerCoefficients_, semanticRouterEntries_, outSnapshot);
+        BuildSPro24DspSemanticMatrix(semanticMixerCoefficients_, semanticRouterEntries_,
+                                     semanticRateMode_, outSnapshot);
     if (ready) outSnapshot.stateRevision = semanticMatrixRevision_;
     IOLockUnlock(semanticMatrixLock_);
     return ready;
@@ -399,7 +407,7 @@ void SPro24DspProtocol::ApplyAudioSemanticMatrixStereoStrip(
                         return;
                     }
                     tcat_.Transaction().ReadCurrentConfigRouterEntries(
-                        extensionSections_, caps, DiceRateMode::Low,
+                        extensionSections_, caps, kSemanticRouterRateMode,
                         [this, request, caps, callback = std::move(callback)](
                             IOReturn routeStatus, DiceRouterEntries routes) mutable {
                             if (routeStatus != kIOReturnSuccess) {
@@ -424,7 +432,7 @@ void SPro24DspProtocol::ApplyAudioSemanticMatrixStereoStrip(
                                     std::optional<SPro24DspStereoStripCoefficients> coefficients;
 
                                     if (const auto stereo = ResolveSPro24DspStereoStrip(
-                                        current, routes,
+                                        current, routes, kSemanticRouterRateMode,
                                         request.outputPresentationGroupId,
                                         request.inputPresentationGroupId)) {
                                         layout = ResolvedStripCells{
@@ -436,7 +444,7 @@ void SPro24DspProtocol::ApplyAudioSemanticMatrixStereoStrip(
                                         coefficients = MakeSPro24DspStereoStripCoefficients(
                                             request.levelMilliDb, request.balanceMilli);
                                     } else if (const auto mono = ResolveSPro24DspMonoStrip(
-                                                   current, routes,
+                                                   current, routes, kSemanticRouterRateMode,
                                                    request.outputPresentationGroupId,
                                                    request.inputPresentationGroupId)) {
                                         layout = ResolvedStripCells{
@@ -753,11 +761,10 @@ void SPro24DspProtocol::PrimeSemanticMatrix() noexcept {
                     return;
                 }
                 // The editable router section is a staging image on this
-                // device. The active low-rate image is in CURRENT_CONFIG.
-                // SPro24 currently publishes only the 1x modes (44.1/48 kHz),
-                // both of which use that low router block.
+                // device; the active image is in CURRENT_CONFIG. See
+                // kSemanticRouterRateMode for which mode is read.
                 tcat_.Transaction().ReadCurrentConfigRouterEntries(
-                    extensionSections_, caps, DiceRateMode::Low,
+                    extensionSections_, caps, kSemanticRouterRateMode,
                     [this, caps](IOReturn routeStatus, DiceRouterEntries routes) {
                         if (routeStatus != kIOReturnSuccess) {
                             ASFW_LOG(DICE, "SPro24 semantic matrix unavailable: router 0x%x", routeStatus);
@@ -772,6 +779,10 @@ void SPro24DspProtocol::PrimeSemanticMatrix() noexcept {
                                 IOLockLock(semanticMatrixLock_);
                                 semanticExtensionCaps_ = caps;
                                 semanticRouterEntries_ = routes;
+                                // The cached image and the mode it was read at
+                                // must travel together: the signal table
+                                // resolves a source differently per mode.
+                                semanticRateMode_ = kSemanticRouterRateMode;
                                 semanticMixerCoefficients_ = coefficients;
                                 semanticMatrixReady_ = true;
                                 ++semanticMatrixRevision_;

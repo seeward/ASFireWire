@@ -136,7 +136,8 @@ TEST(AudioSemanticMatrixTests, SPro24MapsRouterSourcesWithoutLeakingBlockIds) {
     };
 
     AudioSemanticMatrixSnapshot snapshot{};
-    ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(coefficients, routes, snapshot));
+    ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(
+        coefficients, routes, DICE::DiceRateMode::Low, snapshot));
     EXPECT_EQ(snapshot.deviceKind, DICE::Focusrite::kSPro24DspSemanticDeviceKind);
     EXPECT_EQ(snapshot.inputCount, 18);
     EXPECT_EQ(snapshot.outputCount, 2);
@@ -188,7 +189,8 @@ TEST(AudioSemanticMatrixTests, SPro24MapsTheCapturedCurrentConfigRouter) {
     coefficients.outputCount = 16;
 
     AudioSemanticMatrixSnapshot snapshot{};
-    ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(coefficients, routes, snapshot));
+    ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(
+        coefficients, routes, DICE::DiceRateMode::Low, snapshot));
     const auto expectInput = [&snapshot](uint32_t index, uint32_t portId,
                                          AudioSemanticSignalKind kind, uint32_t signalIndex) {
         EXPECT_EQ(snapshot.inputs[index].portId, portId);
@@ -258,7 +260,8 @@ TEST(AudioSemanticMatrixTests, SPro24AnalogInputsUseVendorNumbering) {
                          .sourceBlock = 2, .sourceChannel = 1};
 
     AudioSemanticMatrixSnapshot snapshot{};
-    ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(coefficients, routes, snapshot));
+    ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(
+        coefficients, routes, DICE::DiceRateMode::Low, snapshot));
     for (uint32_t slot = 0; slot < 4; ++slot) {
         EXPECT_EQ(snapshot.inputs[slot].signalKind, AudioSemanticSignalKind::AnalogLine)
             << "analog input " << slot << " must not be split into a microphone kind";
@@ -289,10 +292,11 @@ TEST(AudioSemanticMatrixTests, SPro24StereoStripUsesPairedNativeCellsAndHardPanM
                          .sourceBlock = 2, .sourceChannel = 1};
 
     AudioSemanticMatrixSnapshot snapshot{};
-    ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(coefficients, routes, snapshot));
+    ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(
+        coefficients, routes, DICE::DiceRateMode::Low, snapshot));
 
     const auto layout = DICE::Focusrite::ResolveSPro24DspStereoStrip(
-        coefficients, routes,
+        coefficients, routes, DICE::DiceRateMode::Low,
         snapshot.outputs[0].presentationGroupId,
         snapshot.inputs[14].presentationGroupId);
     ASSERT_TRUE(layout.has_value());
@@ -335,9 +339,10 @@ TEST(AudioSemanticMatrixTests, SPro24MonoStripUsesOneInputAndConstantPowerPan) {
                          .sourceBlock = 2, .sourceChannel = 1};
 
     AudioSemanticMatrixSnapshot snapshot{};
-    ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(coefficients, routes, snapshot));
+    ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(
+        coefficients, routes, DICE::DiceRateMode::Low, snapshot));
     const auto layout = DICE::Focusrite::ResolveSPro24DspMonoStrip(
-        coefficients, routes, snapshot.outputs[0].presentationGroupId,
+        coefficients, routes, DICE::DiceRateMode::Low, snapshot.outputs[0].presentationGroupId,
         snapshot.inputs[4].presentationGroupId);
     ASSERT_TRUE(layout.has_value());
     EXPECT_EQ(layout->input, 4U);
@@ -360,6 +365,139 @@ TEST(AudioSemanticMatrixTests, SPro24MonoStripUsesOneInputAndConstantPowerPan) {
     EXPECT_EQ(hardRight->right, 0x4000U);
     EXPECT_FALSE(DICE::Focusrite::MakeSPro24DspMonoStripCoefficients(6001, 0));
     EXPECT_FALSE(DICE::Focusrite::MakeSPro24DspMonoStripCoefficients(0, -1001));
+}
+
+// The two DSP return pairs move router channel between 1x and 2x. Resolving a
+// source against the wrong rate mode does not fail -- it renames the signal --
+// so the same router image is projected at both modes and compared.
+TEST(AudioSemanticMatrixTests, SPro24DspReturnsResolveAgainstTheActiveRateMode) {
+    DICE::DiceMixerCoefficients coefficients{};
+    coefficients.inputCount = 18;
+    coefficients.outputCount = 16;
+
+    // Mixer inputs 5/6/7 are used so a table hit (auxiliary 1, 3, 4) can never
+    // be confused with the unnamed fallback, which numbers by position.
+    const auto project = [&](uint8_t effectChannel, uint8_t reverbLeftChannel,
+                             uint8_t reverbRightChannel, DICE::DiceRateMode mode,
+                             AudioSemanticMatrixSnapshot& snapshot) {
+        DICE::DiceRouterEntries routes{};
+        routes.count = 5;
+        routes.entries[0] = {.destinationBlock = 2, .destinationChannel = 5,
+                             .sourceBlock = 4, .sourceChannel = effectChannel};
+        routes.entries[1] = {.destinationBlock = 2, .destinationChannel = 6,
+                             .sourceBlock = 4, .sourceChannel = reverbLeftChannel};
+        routes.entries[2] = {.destinationBlock = 2, .destinationChannel = 7,
+                             .sourceBlock = 4, .sourceChannel = reverbRightChannel};
+        routes.entries[3] = {.destinationBlock = 4, .destinationChannel = 4,
+                             .sourceBlock = 2, .sourceChannel = 0};
+        routes.entries[4] = {.destinationBlock = 4, .destinationChannel = 5,
+                             .sourceBlock = 2, .sourceChannel = 1};
+        return DICE::Focusrite::BuildSPro24DspSemanticMatrix(coefficients, routes, mode, snapshot);
+    };
+
+    const auto expectResolved = [](const AudioSemanticMatrixSnapshot& snapshot) {
+        EXPECT_EQ(snapshot.inputs[5].signalKind, AudioSemanticSignalKind::Auxiliary);
+        EXPECT_EQ(snapshot.inputs[5].signalIndex, 1U); // FX(Anlg 1), a mono strip.
+        EXPECT_EQ(snapshot.inputs[5].channelRole, AudioSemanticMatrixChannelRole::Mono);
+        EXPECT_EQ(snapshot.inputs[6].signalIndex, 3U); // FmRvb 0/1, one stereo return.
+        EXPECT_EQ(snapshot.inputs[7].signalIndex, 4U);
+        EXPECT_EQ(snapshot.inputs[6].channelRole, AudioSemanticMatrixChannelRole::Left);
+        EXPECT_EQ(snapshot.inputs[7].channelRole, AudioSemanticMatrixChannelRole::Right);
+        EXPECT_EQ(snapshot.inputs[6].presentationGroupId,
+                  snapshot.inputs[7].presentationGroupId);
+    };
+
+    // 1x: FX(Anlg 1/2) at Ins0:8/9 and FmRvb 0/1 at Ins0:14/15.
+    AudioSemanticMatrixSnapshot low{};
+    ASSERT_TRUE(project(8, 14, 15, DICE::DiceRateMode::Low, low));
+    expectResolved(low);
+
+    // 2x: the vendor table moves both pairs to Ins0:4/5 and Ins0:6/7. The same
+    // semantic identities must come back from the moved channels.
+    AudioSemanticMatrixSnapshot middle{};
+    ASSERT_TRUE(project(4, 6, 7, DICE::DiceRateMode::Middle, middle));
+    expectResolved(middle);
+
+    // The 1x channels carry no DSP-return identity at 2x. They must fall back
+    // to unnamed mono sources rather than keep the 1x labels, which is what a
+    // channel-number switch did.
+    AudioSemanticMatrixSnapshot stale{};
+    ASSERT_TRUE(project(8, 14, 15, DICE::DiceRateMode::Middle, stale));
+    EXPECT_EQ(stale.inputs[5].signalIndex, 6U);
+    EXPECT_EQ(stale.inputs[6].signalIndex, 7U);
+    EXPECT_EQ(stale.inputs[7].signalIndex, 8U);
+    EXPECT_EQ(stale.inputs[6].channelRole, AudioSemanticMatrixChannelRole::Mono);
+    EXPECT_EQ(stale.inputs[7].channelRole, AudioSemanticMatrixChannelRole::Mono);
+    EXPECT_NE(stale.inputs[6].presentationGroupId, stale.inputs[7].presentationGroupId);
+}
+
+// Pro24DSP_IpSigTab names Aes:6/7 "SPDIF 1/2" and Aes:4/5 "SPDIF 3/4". The
+// numbering is the vendor's, not the router offset, and the two pairs are
+// separate stereo sources.
+TEST(AudioSemanticMatrixTests, SPro24SpdifPairsUseVendorNumbering) {
+    DICE::DiceMixerCoefficients coefficients{};
+    coefficients.inputCount = 18;
+    coefficients.outputCount = 16;
+    DICE::DiceRouterEntries routes{};
+    routes.count = 6;
+    static constexpr uint8_t kAesChannel[4] = {6, 7, 4, 5};
+    for (uint8_t slot = 0; slot < 4; ++slot) {
+        routes.entries[slot] = {.destinationBlock = 2, .destinationChannel = slot,
+                                .sourceBlock = 0, .sourceChannel = kAesChannel[slot]};
+    }
+    routes.entries[4] = {.destinationBlock = 4, .destinationChannel = 4,
+                         .sourceBlock = 2, .sourceChannel = 0};
+    routes.entries[5] = {.destinationBlock = 4, .destinationChannel = 5,
+                         .sourceBlock = 2, .sourceChannel = 1};
+
+    AudioSemanticMatrixSnapshot snapshot{};
+    ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(
+        coefficients, routes, DICE::DiceRateMode::Low, snapshot));
+    for (uint32_t input = 0; input < 4U; ++input) {
+        EXPECT_EQ(snapshot.inputs[input].signalKind, AudioSemanticSignalKind::DigitalSpdif);
+        EXPECT_EQ(snapshot.inputs[input].signalIndex, input + 1U);
+    }
+    EXPECT_EQ(snapshot.inputs[0].presentationGroupId, snapshot.inputs[1].presentationGroupId);
+    EXPECT_EQ(snapshot.inputs[2].presentationGroupId, snapshot.inputs[3].presentationGroupId);
+    EXPECT_NE(snapshot.inputs[0].presentationGroupId, snapshot.inputs[2].presentationGroupId);
+}
+
+// The reverb return must stay off its own send at every rate. The suppression
+// reads the resolved signal identity, not a hardcoded 1x router channel.
+TEST(AudioSemanticMatrixTests, SPro24ReverbReturnStaysOffItsOwnSendAtMidRate) {
+    DICE::DiceMixerCoefficients coefficients{};
+    coefficients.inputCount = 18;
+    coefficients.outputCount = 16;
+    DICE::DiceRouterEntries routes{};
+    routes.count = 6;
+    // FmRvb 0/1 at their 2x channels.
+    routes.entries[0] = {.destinationBlock = 2, .destinationChannel = 0,
+                         .sourceBlock = 4, .sourceChannel = 6};
+    routes.entries[1] = {.destinationBlock = 2, .destinationChannel = 1,
+                         .sourceBlock = 4, .sourceChannel = 7};
+    // Monitor rows 0/1 reach the line outputs.
+    routes.entries[2] = {.destinationBlock = 4, .destinationChannel = 4,
+                         .sourceBlock = 2, .sourceChannel = 0};
+    routes.entries[3] = {.destinationBlock = 4, .destinationChannel = 5,
+                         .sourceBlock = 2, .sourceChannel = 1};
+    // Rows 8/9 reach the reverb input, which at 2x is Ins0:6/7.
+    routes.entries[4] = {.destinationBlock = 4, .destinationChannel = 6,
+                         .sourceBlock = 2, .sourceChannel = 8};
+    routes.entries[5] = {.destinationBlock = 4, .destinationChannel = 7,
+                         .sourceBlock = 2, .sourceChannel = 9};
+
+    AudioSemanticMatrixSnapshot snapshot{};
+    ASSERT_TRUE(DICE::Focusrite::BuildSPro24DspSemanticMatrix(
+        coefficients, routes, DICE::DiceRateMode::Middle, snapshot));
+    ASSERT_EQ(snapshot.outputCount, 4U);
+    EXPECT_EQ(snapshot.outputs[2].outputRole, AudioSemanticMatrixOutputRole::EffectSend);
+    EXPECT_EQ(snapshot.inputs[0].signalIndex, 3U);
+    EXPECT_EQ(snapshot.CrosspointPresentation(0, 0),
+              AudioSemanticMatrixCrosspointPresentation::StereoLevelBalance);
+    EXPECT_EQ(snapshot.CrosspointPresentation(2, 0),
+              AudioSemanticMatrixCrosspointPresentation::Hidden);
+    EXPECT_EQ(snapshot.CrosspointPresentation(3, 1),
+              AudioSemanticMatrixCrosspointPresentation::Hidden);
 }
 
 } // namespace
