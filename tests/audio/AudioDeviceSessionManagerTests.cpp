@@ -12,6 +12,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "FakeSessionScheduler.hpp"
 
 namespace {
 
@@ -171,7 +172,7 @@ TEST(AudioDeviceSessionManager, ResolvesAndPublishesOneEndpointPerUnit) {
     EXPECT_EQ(harness->acceptedProbeCount, 1U);
 }
 
-TEST(AudioDeviceSessionManager, ProbeFailureIsTerminalAndPublishesNothing) {
+TEST(AudioDeviceSessionManager, ProbeFailureWithoutSchedulerIsTerminal) {
     Fixture fixture;
     RecordingSink sink;
     auto harness = std::make_shared<Template::ProbeHarness>();
@@ -687,3 +688,104 @@ TEST(AudioDeviceSessionManagerBootloader, CuePolicyNeverCreatesAnAdapterOrProbes
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Transport-failure retry
+//
+// A probe that fails on transport says nothing about the device, only that one
+// exchange did not complete. Condemning the session on that made a single missed
+// read permanent: nothing leaves Failed, so the device never reached CoreAudio
+// again for the life of the session. Linux retries bring-up instead
+// (core-device.c:849-850, :1020-1023). Only the transient class is retried.
+// ---------------------------------------------------------------------------
+
+TEST(AudioDeviceSessionManager, TransportFailureRetriesAndSucceeds) {
+    Fixture fixture;
+    RecordingSink sink;
+    ASFW::Testing::FakeSessionScheduler timers;
+    auto harness = std::make_shared<Template::ProbeHarness>();
+    AudioDeviceSessionManager manager(fixture.devices, fixture.routes, sink,
+                                      Fixture::Catalog(), nullptr, &timers);
+    ASSERT_TRUE(manager.RegisterProvider(std::make_unique<Template::Provider>(harness)));
+    manager.Start();
+
+    harness->Complete(std::unexpected(ProbeError::Transport));
+    {
+        const auto sessions = manager.SnapshotAll();
+        ASSERT_EQ(sessions.size(), 1U);
+        EXPECT_EQ(sessions[0].state, AudioSessionState::StaticResolved)
+            << "a transport failure must park the session, not condemn it";
+    }
+    EXPECT_EQ(timers.PendingCount(), 1U) << "a re-probe must be armed";
+
+    timers.Advance(2'000'000'000ULL);
+    // The re-probe runs; let it succeed this time.
+    harness->CompleteSuccess();
+
+    const auto sessions = manager.SnapshotAll();
+    ASSERT_EQ(sessions.size(), 1U);
+    EXPECT_EQ(sessions[0].state, AudioSessionState::Ready);
+    EXPECT_EQ(sink.events, std::vector<std::string>{"ready"});
+}
+
+TEST(AudioDeviceSessionManager, TransportFailureBecomesTerminalOnceBudgetExhausted) {
+    Fixture fixture;
+    RecordingSink sink;
+    ASFW::Testing::FakeSessionScheduler timers;
+    auto harness = std::make_shared<Template::ProbeHarness>();
+    AudioDeviceSessionManager manager(fixture.devices, fixture.routes, sink,
+                                      Fixture::Catalog(), nullptr, &timers);
+    ASSERT_TRUE(manager.RegisterProvider(std::make_unique<Template::Provider>(harness)));
+    manager.Start();
+
+    // Initial attempt plus the whole retry budget, all failing on transport.
+    for (int i = 0; i < 4; ++i) {
+        harness->Complete(std::unexpected(ProbeError::Transport));
+        timers.Advance(2'000'000'000ULL);
+    }
+
+    const auto sessions = manager.SnapshotAll();
+    ASSERT_EQ(sessions.size(), 1U);
+    EXPECT_EQ(sessions[0].state, AudioSessionState::Failed)
+        << "retry is bounded; a link that never answers must still reach a verdict";
+    EXPECT_TRUE(sink.events.empty());
+    EXPECT_EQ(timers.PendingCount(), 0U) << "no timer may be left armed";
+}
+
+TEST(AudioDeviceSessionManager, UnsupportedFailureIsNotRetried) {
+    Fixture fixture;
+    RecordingSink sink;
+    ASFW::Testing::FakeSessionScheduler timers;
+    auto harness = std::make_shared<Template::ProbeHarness>();
+    AudioDeviceSessionManager manager(fixture.devices, fixture.routes, sink,
+                                      Fixture::Catalog(), nullptr, &timers);
+    ASSERT_TRUE(manager.RegisterProvider(std::make_unique<Template::Provider>(harness)));
+    manager.Start();
+
+    // A verdict about the device, not about the link. Retrying re-reads the same
+    // answer and only delays it.
+    harness->Complete(std::unexpected(ProbeError::Unsupported));
+
+    const auto sessions = manager.SnapshotAll();
+    ASSERT_EQ(sessions.size(), 1U);
+    EXPECT_EQ(sessions[0].state, AudioSessionState::Failed);
+    EXPECT_EQ(timers.PendingCount(), 0U);
+}
+
+TEST(AudioDeviceSessionManager, InvalidEvidenceFailureIsNotRetried) {
+    Fixture fixture;
+    RecordingSink sink;
+    ASFW::Testing::FakeSessionScheduler timers;
+    auto harness = std::make_shared<Template::ProbeHarness>();
+    AudioDeviceSessionManager manager(fixture.devices, fixture.routes, sink,
+                                      Fixture::Catalog(), nullptr, &timers);
+    ASSERT_TRUE(manager.RegisterProvider(std::make_unique<Template::Provider>(harness)));
+    manager.Start();
+
+    harness->Complete(std::unexpected(ProbeError::InvalidEvidence));
+
+    const auto sessions = manager.SnapshotAll();
+    ASSERT_EQ(sessions.size(), 1U);
+    EXPECT_EQ(sessions[0].state, AudioSessionState::Failed);
+    EXPECT_EQ(timers.PendingCount(), 0U);
+}

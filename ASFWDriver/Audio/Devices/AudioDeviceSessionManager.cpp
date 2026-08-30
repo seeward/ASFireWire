@@ -13,6 +13,26 @@
 namespace ASFW::Audio::Devices {
 
 namespace {
+// A probe that fails on transport has told us nothing about the device — only
+// that one exchange did not complete. Treating that as a verdict is what made a
+// single missed read permanent: the session went to Failed, nothing leaves
+// Failed, and the device never reached CoreAudio for the rest of the session
+// (observed on a Midas Venice F24, where the probe read went out at a speed the
+// link would not carry).
+//
+// Linux retries device bring-up rather than condemning it on one failure —
+// core-device.c:849-850 MAX_RETRIES 10 / RETRY_DELAY 3*HZ, rescheduled at
+// :1020-1023 and :1234-1237. A smaller budget is used here because our probe
+// runs *after* the Config-ROM scan has already succeeded, so the device is known
+// present and responding; we are covering an intermittent exchange, not waiting
+// for a device to finish booting. Failing over ~6s keeps a genuinely dead
+// device's verdict timely while surviving a transient miss.
+constexpr uint8_t kMaxProbeTransportAttempts = 3;
+constexpr uint64_t kProbeRetryDelayNs = 2'000'000'000ULL; // 2 s
+} // namespace
+
+
+namespace {
 class Lock final {
 public:
     explicit Lock(IOLock* lock) : lock_(lock) { if (lock_) IOLockLock(lock_); }
@@ -27,9 +47,10 @@ AudioDeviceSessionManager::AudioDeviceSessionManager(
     Discovery::DeviceRegistry& routes,
     IAudioSessionSink& sink,
     CatalogResolver catalogResolver,
-    Async::IFireWireBusOps* busOps) noexcept
+    Async::IFireWireBusOps* busOps,
+    Scheduling::ITimerScheduler* timers) noexcept
     : devices_(devices), routes_(routes), sink_(sink), lock_(IOLockAlloc()),
-      catalogResolver_(std::move(catalogResolver)), busOps_(busOps) {
+      catalogResolver_(std::move(catalogResolver)), busOps_(busOps), timers_(timers) {
     if (!catalogResolver_) {
         catalogResolver_ = [](const Discovery::DeviceRecord& record,
                               const Discovery::UnitIdentityEvidence& unit) {
@@ -462,6 +483,11 @@ void AudioDeviceSessionManager::CompleteProbe(
     AudioEndpointId endpointId, uint64_t probeEpoch,
     Discovery::DeviceRecord record,
     std::expected<FamilyProbeFacts, ProbeError> result) noexcept {
+    if (!result) {
+        HandleProbeFailure(endpointId, probeEpoch, std::move(record), result.error());
+        return;
+    }
+
     std::shared_ptr<const ResolvedAudioEndpointProfile> profile;
     std::shared_ptr<IDeviceProtocol> protocol;
     {
@@ -469,14 +495,9 @@ void AudioDeviceSessionManager::CompleteProbe(
         auto* session = FindLocked(endpointId);
         if (!session || session->probeEpoch != probeEpoch ||
             session->state != AudioSessionState::Probing) return;
-        if (!result) {
-            TransitionLocked(*session,
-                result.error() == ProbeError::Cancelled
-                    ? AudioSessionState::StaticResolved
-                    : AudioSessionState::Failed,
-                "probe-complete-error");
-            return;
-        }
+        // A completed probe clears the transient budget: the next failure on this
+        // session starts from a full count rather than inheriting an old streak.
+        session->probeAttempts = 0;
         std::vector<FacetDescriptor> adapterFacets;
         for (const auto& facet : session->adapter->Facets()) {
             if (facet) adapterFacets.push_back(facet->Descriptor());
@@ -507,6 +528,91 @@ void AudioDeviceSessionManager::CompleteProbe(
     sink_.EndpointReady(std::move(profile), std::move(protocol));
 }
 
+void AudioDeviceSessionManager::HandleProbeFailure(
+    AudioEndpointId endpointId, uint64_t probeEpoch,
+    Discovery::DeviceRecord record, ProbeError error) noexcept {
+    uint64_t retryEpoch = 0;
+    uint8_t attempt = 0;
+    bool retry = false;
+    {
+        Lock guard(lock_);
+        auto* session = FindLocked(endpointId);
+        if (!session || session->probeEpoch != probeEpoch ||
+            session->state != AudioSessionState::Probing) return;
+
+        if (error == ProbeError::Cancelled) {
+            TransitionLocked(*session, AudioSessionState::StaticResolved,
+                             "probe-complete-error");
+            return;
+        }
+
+        // Transport is the only transient class. Unsupported and InvalidEvidence
+        // are verdicts about the device itself and read the same on a retry;
+        // StaleRoute means the route moved under us, and rediscovery rebuilds the
+        // session rather than re-probing this one.
+        retry = error == ProbeError::Transport && timers_ != nullptr &&
+                session->probeAttempts < kMaxProbeTransportAttempts;
+        if (!retry) {
+            TransitionLocked(*session, AudioSessionState::Failed, "probe-complete-error");
+            return;
+        }
+
+        attempt = ++session->probeAttempts;
+        retryEpoch = session->probeEpoch;
+        TransitionLocked(*session, AudioSessionState::StaticResolved,
+                         "probe-transport-retry");
+    }
+
+    // Armed outside lock_: ITimerScheduler takes its own lock, and this is the
+    // only place the two could be nested.
+    ScheduleProbeRetry(endpointId, retryEpoch, std::move(record), attempt);
+}
+
+void AudioDeviceSessionManager::ScheduleProbeRetry(
+    AudioEndpointId endpointId, uint64_t probeEpoch,
+    Discovery::DeviceRecord record, uint8_t attempt) noexcept {
+    if (timers_ == nullptr) return;
+
+    ASFW_LOG(Audio,
+             "[AudioSession] endpoint=%llu probe transport failure, retry %u/%u in %llu ms",
+             endpointId.value, attempt, kMaxProbeTransportAttempts,
+             kProbeRetryDelayNs / 1'000'000ULL);
+
+    std::weak_ptr<int> alive = lifetime_;
+    const auto token = timers_->ScheduleAfter(
+        kProbeRetryDelayNs,
+        [this, alive, endpointId, probeEpoch, record = std::move(record)]() mutable {
+            if (alive.expired()) return;
+            {
+                Lock guard(lock_);
+                auto* session = FindLocked(endpointId);
+                // A newer probe, a retire, or a rediscovery in the meantime all
+                // bump probeEpoch or move the state; any of them supersedes this
+                // retry and it must not restart a probe behind their back.
+                if (!session || session->probeEpoch != probeEpoch ||
+                    session->state != AudioSessionState::StaticResolved) return;
+                session->probeRetryToken = Scheduling::kInvalidTimerToken;
+            }
+            // The route may have gone stale while we waited; BeginProbe's own
+            // guards and the provider's StaleRoute check handle that.
+            BeginProbe(endpointId, record);
+        });
+
+    Lock guard(lock_);
+    if (auto* session = FindLocked(endpointId);
+        session && session->probeEpoch == probeEpoch) {
+        session->probeRetryToken = token;
+    }
+}
+
+void AudioDeviceSessionManager::CancelProbeRetryLocked(Session& session) noexcept {
+    if (timers_ == nullptr || session.probeRetryToken == Scheduling::kInvalidTimerToken) {
+        return;
+    }
+    timers_->Cancel(session.probeRetryToken);
+    session.probeRetryToken = Scheduling::kInvalidTimerToken;
+}
+
 void AudioDeviceSessionManager::RetireSession(AudioEndpointId endpointId,
                                               const char* reason) noexcept {
     std::unique_ptr<IAudioDeviceAdapter> adapter;
@@ -524,6 +630,10 @@ void AudioDeviceSessionManager::RetireSession(AudioEndpointId endpointId,
             Lock guard(lock_);
             auto* session = FindLocked(endpointId);
             if (!session || session->state == AudioSessionState::Retired) return;
+            // A retire supersedes any pending re-probe. The weak lifetime guard
+            // in the callback already makes a late firing harmless; cancelling
+            // also releases the scheduler slot.
+            CancelProbeRetryLocked(*session);
             if (session->state == AudioSessionState::Preparing) {
                 ASFW_LOG(Firmware,
                          "[Bootloader] endpoint=%llu torn down in state=%{public}s "

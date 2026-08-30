@@ -4,6 +4,7 @@
 #pragma once
 
 #include "AudioFamilyProvider.hpp"
+#include "../../Scheduling/ITimerScheduler.hpp"
 #include "ResolvedProfileBuilder.hpp"
 #include "../../Discovery/IDeviceManager.hpp"
 #include "../Families/BeBoB/Bootloader/BeBoBBootloaderClient.hpp"
@@ -79,7 +80,8 @@ public:
                               Discovery::DeviceRegistry& routes,
                               IAudioSessionSink& sink,
                               CatalogResolver catalogResolver = {},
-                              Async::IFireWireBusOps* busOps = nullptr) noexcept;
+                              Async::IFireWireBusOps* busOps = nullptr,
+                              Scheduling::ITimerScheduler* timers = nullptr) noexcept;
     ~AudioDeviceSessionManager() override;
 
     AudioDeviceSessionManager(const AudioDeviceSessionManager&) = delete;
@@ -115,6 +117,11 @@ private:
         DeviceProfiles::Audio::StaticAudioEndpointPlan staticPlan{};
         Discovery::QuarantineReason quarantineReason{Discovery::QuarantineReason::None};
         uint64_t probeEpoch{0};
+        /// Consecutive Transport-class probe failures for this session. Reset on
+        /// any successful probe; only this error class is retried.
+        uint8_t probeAttempts{0};
+        /// Pending re-probe timer, kInvalidTimerToken when none is armed.
+        Scheduling::TimerToken probeRetryToken{Scheduling::kInvalidTimerToken};
         std::unique_ptr<IAudioDeviceAdapter> adapter;
         std::shared_ptr<const ResolvedAudioEndpointProfile> profile;
         /// Set only for sessions in Preparing. The client owns transport; the
@@ -140,6 +147,14 @@ private:
     void CompleteProbe(AudioEndpointId endpointId, uint64_t probeEpoch,
                        Discovery::DeviceRecord record,
                        std::expected<FamilyProbeFacts, ProbeError> result) noexcept;
+    /// Applies the failure policy for a probe that did not produce facts.
+    void HandleProbeFailure(AudioEndpointId endpointId, uint64_t probeEpoch,
+                            Discovery::DeviceRecord record, ProbeError error) noexcept;
+    /// Arms a delayed re-probe. Caller must NOT hold lock_.
+    void ScheduleProbeRetry(AudioEndpointId endpointId, uint64_t probeEpoch,
+                            Discovery::DeviceRecord record, uint8_t attempt) noexcept;
+    /// Cancels any armed re-probe for a session. Caller MUST hold lock_.
+    void CancelProbeRetryLocked(Session& session) noexcept;
     void RetireSession(AudioEndpointId endpointId, const char* reason) noexcept;
     void TransitionLocked(Session& session, AudioSessionState next,
                           const char* reason) noexcept;
@@ -160,6 +175,9 @@ private:
     std::map<Discovery::UnitInstanceId, AudioEndpointId> endpointByUnit_;
     CatalogResolver catalogResolver_;
     Async::IFireWireBusOps* busOps_{nullptr};
+    /// Drives the re-probe delay. Null disables retry entirely, leaving the
+    /// original single-shot behaviour.
+    Scheduling::ITimerScheduler* timers_{nullptr};
     std::shared_ptr<int> lifetime_{std::make_shared<int>(0)};
 };
 
