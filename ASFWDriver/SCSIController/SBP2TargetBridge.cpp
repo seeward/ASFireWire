@@ -130,7 +130,7 @@ void SBP2TargetBridge::Shutdown() {
     // reach it: a probe completion arriving with a stale epoch is a no-op
     // instead of scheduling a timer into teardown. The scheduler is still
     // alive here (ServiceContext::Reset shuts the bridge down before resetting
-    // sbp2SessionScheduler).
+    // timerScheduler).
     if (readinessGate_) {
         readinessGate_->Cancel();
     }

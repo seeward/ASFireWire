@@ -507,7 +507,7 @@ kern_return_t ASFWDriver::StartRuntime(IOService* provider) {
                 *ctx.deps.deviceManager, *ctx.deps.deviceRegistry,
                 *ctx.audioCoordinator,
                 ASFW::Audio::Devices::AudioDeviceSessionManager::CatalogResolver{},
-                &bus);
+                &bus, ctx.deps.timerScheduler.get());
         ASFW::Audio::Families::ExistingFamilyProviderDependencies providers{
             bus, bus, *ctx.deps.deviceRegistry, *ctx.deps.avcDiscovery,
             ctx.deps.irmClient.get(), ctx.deps.cmpClient.get(),
