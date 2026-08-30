@@ -10,6 +10,7 @@
 #include "../ASFWDriver/Discovery/DiscoveryTypes.hpp"
 #include "../ASFWDriver/Controller/ControllerTypes.hpp"
 #include "../ASFWDriver/Async/Interfaces/IFireWireBus.hpp"
+#include "FakeTimerScheduler.hpp"
 
 using namespace ASFW::Discovery;
 using namespace ASFW::Driver;
@@ -534,7 +535,8 @@ TEST(ROMScannerCompletion, ManualRead_GeneralROM_RootDirTimeoutRetriesGenericSca
     params.perStepRetries = 0;
     params.configROMReadyRetries = 1;
     params.doIRMCheck = false;
-    ROMScanner scanner(mockAsync, speedPolicy, params);
+    ASFW::Testing::FakeTimerScheduler timers;
+    ROMScanner scanner(mockAsync, speedPolicy, params, nullptr, &timers);
 
     TopologySnapshot topology;
     topology.generation = 44;
@@ -562,6 +564,7 @@ TEST(ROMScannerCompletion, ManualRead_GeneralROM_RootDirTimeoutRetriesGenericSca
     mockAsync.SimulateFullBIBSuccess(CreateStandardBIBWithGuid(kGuid));
     mockAsync.WaitForPendingReads(5);
     mockAsync.SimulateReadTimeout(4);
+    timers.Advance(params.configROMReadyRetryDelayNs);
 
     mockAsync.WaitForPendingReads(6);
     mockAsync.SimulateFullBIBSuccess(CreateStandardBIBWithGuid(kGuid));

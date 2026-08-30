@@ -10,9 +10,10 @@
 namespace ASFW::Discovery {
 
 ROMScanner::ROMScanner(Async::IFireWireBus& bus, SpeedPolicy& speedPolicy,
-                       const ROMScannerParams& params, OSSharedPtr<IODispatchQueue> dispatchQueue)
+                       const ROMScannerParams& params, OSSharedPtr<IODispatchQueue> dispatchQueue,
+                       Scheduling::ITimerScheduler* timerScheduler)
     : bus_(bus), speedPolicy_(speedPolicy), params_(params),
-      dispatchQueue_(std::move(dispatchQueue)),
+      dispatchQueue_(std::move(dispatchQueue)), timerScheduler_(timerScheduler),
       reader_(std::make_shared<ROMReader>(bus_, dispatchQueue_)) {}
 
 ROMScanner::~ROMScanner() {
@@ -50,7 +51,7 @@ bool ROMScanner::Start(const ROMScanRequest& request, ScanCompletionCallback com
                 request.targetNodes.size());
 
     auto session = std::make_shared<ROMScanSession>(bus_, speedPolicy_, params_, reader_,
-                                                    dispatchQueue_, topologyManager_);
+                                                    dispatchQueue_, topologyManager_, timerScheduler_);
     session_ = session;
 
     const std::weak_ptr<ROMScanSession> weakSession = session;

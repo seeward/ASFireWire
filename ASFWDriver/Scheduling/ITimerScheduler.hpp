@@ -23,7 +23,9 @@ public:
     [[nodiscard]] virtual TimerToken ScheduleAfter(uint64_t delayNs,
                                                     std::function<void()> fn) = 0;
 
-    // After Cancel() returns, a callback associated with `token` will not run.
+    // Removes a callback that has not begun execution. A callback already
+    // dispatched by the scheduler may complete, so callers must also use their
+    // own epoch or lifetime guard before making externally visible changes.
     virtual void Cancel(TimerToken token) = 0;
 };
 

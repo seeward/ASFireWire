@@ -57,9 +57,11 @@ void LogMinimalROMSkipped(uint8_t nodeId) {
 ROMScanSession::ROMScanSession(Async::IFireWireBus& bus, SpeedPolicy& speedPolicy,
                                ROMScannerParams params, std::shared_ptr<ROMReader> reader,
                                OSSharedPtr<IODispatchQueue> dispatchQueue,
-                               Driver::TopologyManager* topologyManager)
+                               Driver::TopologyManager* topologyManager,
+                               Scheduling::ITimerScheduler* timerScheduler)
     : bus_(bus), speedPolicy_(speedPolicy), params_(params),
       dispatchQueue_(std::move(dispatchQueue)), topologyManager_(topologyManager),
+      timerScheduler_(timerScheduler),
       reader_(std::move(reader)) {
     executorLock_ = IOLockAlloc();
     if (executorLock_ == nullptr) {
@@ -72,6 +74,13 @@ ROMScanSession::ROMScanSession(Async::IFireWireBus& bus, SpeedPolicy& speedPolic
 
 ROMScanSession::~ROMScanSession() {
     aborted_.store(true, std::memory_order_relaxed);
+    if (timerScheduler_) {
+        for (const auto& [nodeId, token] : configROMRetryTimers_) {
+            (void)nodeId;
+            timerScheduler_->Cancel(token);
+        }
+    }
+    configROMRetryTimers_.clear();
     if (executorLock_ != nullptr) {
         IOLockFree(executorLock_);
         executorLock_ = nullptr;
@@ -143,6 +152,13 @@ void ROMScanSession::Start(ROMScanRequest request, ScanCompletionCallback comple
 
 void ROMScanSession::Abort() {
     aborted_.store(true, std::memory_order_relaxed);
+    if (timerScheduler_) {
+        for (const auto& [nodeId, token] : configROMRetryTimers_) {
+            (void)nodeId;
+            timerScheduler_->Cancel(token);
+        }
+    }
+    configROMRetryTimers_.clear();
     DispatchAsync([self = weak_from_this()] {
         auto session = self.lock();
         if (!session) {
@@ -179,50 +195,6 @@ void ROMScanSession::DispatchAsync(std::function<void()> work) {
     queue->DispatchAsync(^{
       (*captured)();
     });
-}
-
-void ROMScanSession::DispatchDelayed(std::function<void()> work, uint64_t delayNs) {
-    if (!work) {
-        return;
-    }
-
-    if (!dispatchQueue_) {
-#ifdef ASFW_HOST_TEST
-        Post(std::move(work));
-        return;
-#else
-        const uint64_t delayMs = delayNs / 1'000'000ULL;
-        const uint64_t trailingNs = delayNs % 1'000'000ULL;
-        Post([delayMs, trailingNs, work = std::move(work)]() mutable {
-            if (delayMs > 0) {
-                IOSleep(delayMs);
-            }
-            if (trailingNs > 0) {
-                IODelay((trailingNs + 999ULL) / 1000ULL);
-            }
-            work();
-        });
-        return;
-#endif
-    }
-
-#ifdef ASFW_HOST_TEST
-    dispatchQueue_->DispatchAsyncAfter(delayNs, std::move(work));
-#else
-    const uint64_t delayMs = delayNs / 1'000'000ULL;
-    const uint64_t trailingNs = delayNs % 1'000'000ULL;
-    auto queue = dispatchQueue_;
-    auto captured = std::make_shared<std::function<void()>>(std::move(work));
-    queue->DispatchAsync(^{
-      if (delayMs > 0) {
-          IOSleep(delayMs);
-      }
-      if (trailingNs > 0) {
-          IODelay((trailingNs + 999ULL) / 1000ULL);
-      }
-      (*captured)();
-    });
-#endif
 }
 
 void ROMScanSession::Post(std::function<void()> task) {
@@ -564,16 +536,21 @@ void ROMScanSession::ScheduleConfigROMReadyRetry(ROMScanNodeStateMachine& node,
     LogConfigROMReadyRetry(node.NodeId(), reason, node.ConfigROMReadyRetriesLeft());
 
     const uint8_t nodeId = node.NodeId();
+    const Generation expectedGeneration = gen_;
     auto weakSelf = weak_from_this();
     // Cross-validated with Linux: firewire/core-device.c:849-852,1018-1024 and
     // Apple: IOFireWireFamily.kmodproj/IOFireWireController.cpp:2703-2716.
     // Linux reschedules failed Config ROM scans; Apple treats an initial BIB
     // timeout after ACK-pending as a device-not-ready condition.
-    DispatchDelayed(
-        [weakSelf, nodeId]() {
+    const auto retry =
+        [weakSelf, nodeId, expectedGeneration]() {
             if (auto self = weakSelf.lock(); self) {
-                self->DispatchAsync([self = std::move(self), nodeId]() {
+                self->configROMRetryTimers_.erase(nodeId);
+                self->DispatchAsync([self = std::move(self), nodeId, expectedGeneration]() {
                     if (self->aborted_.load(std::memory_order_relaxed)) {
+                        return;
+                    }
+                    if (self->gen_ != expectedGeneration) {
                         return;
                     }
 
@@ -596,8 +573,16 @@ void ROMScanSession::ScheduleConfigROMReadyRetry(ROMScanNodeStateMachine& node,
                     self->Pump();
                 });
             }
-        },
-        params_.configROMReadyRetryDelayNs);
+        };
+    if (!timerScheduler_) {
+        ASFW_LOG(ConfigROM, "ROMScanSession: no timer scheduler for Config ROM retry");
+        return;
+    }
+    const auto token = timerScheduler_->ScheduleAfter(params_.configROMReadyRetryDelayNs,
+                                                        std::move(retry));
+    if (token != Scheduling::kInvalidTimerToken) {
+        configROMRetryTimers_[nodeId] = token;
+    }
 }
 
 void ROMScanSession::CompleteUnsupportedMinimalROM(ROMScanNodeStateMachine& node) {

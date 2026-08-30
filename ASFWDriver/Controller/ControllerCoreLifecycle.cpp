@@ -36,6 +36,7 @@
 #include "../Protocols/AVC/AVCDiscovery.hpp"
 #include "../Protocols/AVC/CMP/CMPClient.hpp"
 #include "../Scheduling/Scheduler.hpp"
+#include "../Scheduling/DriverKitTimerScheduler.hpp"
 #include "../Version/DriverVersion.hpp"
 #include "BringupOverrides.hpp"
 #include "ControllerStateMachine.hpp"
@@ -382,7 +383,8 @@ ControllerCore::ControllerCore(ControllerConfig config, RolePolicy initialPolicy
         Bus::IRMFallbackCoordinator::Deps fallbackDeps{
             .hardware = *deps_.hardware,
             .timing = &deps_.busReset->PostResetTiming(),
-            .scheduler = deps_.scheduler.get()
+            .scheduler = deps_.timerScheduler.get(),
+            .monotonicNowNs = BusResetCoordinator::MonotonicNow,
         };
         irmFallback_ = std::make_shared<Bus::IRMFallbackCoordinator>(fallbackDeps);
         ASFW_LOG(Controller, "✅ IRMFallbackCoordinator created");
@@ -442,7 +444,8 @@ void ControllerCore::LogBuildBanner() const {
 }
 
 kern_return_t ControllerCore::InitializeBusResetAndDiscovery() {
-    if (!(deps_.busReset && deps_.hardware && deps_.scheduler && deps_.asyncController &&
+    if (!(deps_.busReset && deps_.hardware && deps_.scheduler && deps_.timerScheduler &&
+          deps_.asyncController &&
           deps_.selfId && deps_.configRomStager && deps_.interrupts && deps_.topology)) {
         ASFW_LOG(Controller,
                  "❌ CRITICAL: Missing dependencies for BusResetCoordinator initialization");
@@ -457,7 +460,8 @@ kern_return_t ControllerCore::InitializeBusResetAndDiscovery() {
     deps_.busReset->Initialize(deps_.hardware.get(), workQueue, deps_.asyncController.get(),
                                deps_.selfId.get(), deps_.configRomStager.get(),
                                deps_.interrupts.get(), deps_.topology.get(), deps_.busManager.get(),
-                               deps_.romScanner.get(), deps_.topologyMapService.get());
+                               deps_.romScanner.get(), deps_.topologyMapService.get(),
+                               deps_.timerScheduler.get());
 
     ASFW_LOG(Controller, "Binding topology callback for Discovery integration");
     deps_.busReset->BindCallbacks(

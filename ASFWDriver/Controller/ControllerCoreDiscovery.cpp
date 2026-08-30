@@ -1,5 +1,7 @@
 #include "ControllerCore.hpp"
 
+#include "../Scheduling/DriverKitTimerScheduler.hpp"
+
 #include <DriverKit/IOLib.h>
 #include <cstdio>
 #include <string>
@@ -362,7 +364,7 @@ void ControllerCore::OnRootCapabilityProbe(Role::RootCapabilityEvidence evidence
 
 void ControllerCore::StartRootCycleLostWindow(uint32_t generation) {
     if (!haveRootEvidence_ || generation != currentRootEvidence_.generation ||
-        !deps_.hardware || !deps_.interrupts || !deps_.scheduler) {
+        !deps_.hardware || !deps_.interrupts || !deps_.timerScheduler) {
         return;
     }
 
@@ -373,8 +375,12 @@ void ControllerCore::StartRootCycleLostWindow(uint32_t generation) {
     deps_.interrupts->UnmaskInterrupts(deps_.hardware.get(), IntEventBits::kCycleLost);
 
     constexpr uint64_t kCycleLostObservationWindowNs = 2ULL * 1'000'000ULL;
-    deps_.scheduler->DispatchAsyncAfter(kCycleLostObservationWindowNs, [this, generation, epoch] {
-        this->CompleteRootCycleLostWindow(generation, epoch, false);
+    const auto weakSelf = weak_from_this();
+    (void)deps_.timerScheduler->ScheduleAfter(kCycleLostObservationWindowNs,
+                                               [weakSelf, generation, epoch] {
+        if (auto self = weakSelf.lock()) {
+            self->CompleteRootCycleLostWindow(generation, epoch, false);
+        }
     });
 }
 

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -19,6 +20,7 @@
 #include "ASFWDriver/Hardware/OHCIConstants.hpp"
 #include "ASFWDriver/Hardware/RegisterMap.hpp"
 #include "ASFWDriver/Testing/HostDriverKitStubs.hpp"
+#include "FakeTimerScheduler.hpp"
 
 namespace ASFW::Driver {
 
@@ -276,7 +278,10 @@ struct BusResetTestRig {
     ConfigROMStager configRomStager;
     TopologyManager topologyManager;
     BusManager busManager;
-    BusResetCoordinator coordinator;
+    ASFW::Testing::FakeTimerScheduler timers;
+    std::shared_ptr<BusResetCoordinator> coordinatorOwner{
+        std::make_shared<BusResetCoordinator>()};
+    BusResetCoordinator& coordinator{*coordinatorOwner};
 
     uint64_t nowNs{kStartTimeNs};
     std::vector<TopologySnapshot> publishedTopologies;
@@ -301,7 +306,8 @@ struct BusResetTestRig {
 
         coordinator.Initialize(&hardware, queue, &async, &selfIdCapture, &configRomStager,
                                &interrupts, &topologyManager,
-                               withBusManager ? &busManager : nullptr, nullptr);
+                               withBusManager ? &busManager : nullptr, nullptr, nullptr,
+                               &timers);
         coordinator.BindCallbacks([this](const TopologySnapshot& topology) {
             publishedTopologies.push_back(topology);
         });
@@ -335,6 +341,7 @@ struct BusResetTestRig {
 
     void AdvanceMs(uint32_t milliseconds) {
         nowNs += static_cast<uint64_t>(milliseconds) * 1'000'000ULL;
+        timers.Advance(static_cast<uint64_t>(milliseconds) * 1'000'000ULL);
         DrainReady();
     }
 
@@ -581,7 +588,7 @@ TEST(BusResetCoordinatorTests, GapMismatchResetIsDeferredThenSentWithPhyConfig) 
 
     rig.AdvanceMs(1U);
     EXPECT_FALSE(rig.hardware.TestBusResetIssued());
-    EXPECT_GT(rig.queue->PendingTaskCountForTesting(), 0U);
+    EXPECT_GT(rig.timers.PendingCount(), 0U);
 
     rig.AdvanceMs(1999U);
 

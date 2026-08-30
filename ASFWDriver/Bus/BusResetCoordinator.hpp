@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -10,6 +11,7 @@
 #include "../Controller/ControllerTypes.hpp"
 #include "../Discovery/DiscoveryTypes.hpp" // For Discovery::Generation
 #include "../Hardware/RegisterMap.hpp"
+#include "../Scheduling/ITimerScheduler.hpp"
 #include "BusManager.hpp"
 #include "SelfIDCapture.hpp"
 #include "Timing/PostResetTimingCoordinator.hpp"
@@ -65,7 +67,7 @@ class BusResetCoordinatorTestPeer;
  * - IEEE 1394-2008 §8.2.1 for the 2 s software-reset holdoff after Self-ID
  *   completion, with conservative handling of the §8.4.5.2 gap-count flow
  */
-class BusResetCoordinator {
+class BusResetCoordinator : public std::enable_shared_from_this<BusResetCoordinator> {
   public:
     using TopologyReadyCallback = std::function<void(const TopologySnapshot&)>;
 
@@ -94,7 +96,8 @@ class BusResetCoordinator {
                     ConfigROMStager* configRom, InterruptManager* interrupts,
                     TopologyManager* topology, BusManager* busManager = nullptr,
                     Discovery::ROMScanner* romScanner = nullptr,
-                    ASFW::Bus::TopologyMapService* topologyMapService = nullptr);
+                    ASFW::Bus::TopologyMapService* topologyMapService = nullptr,
+                    ASFW::Scheduling::ITimerScheduler* timerScheduler = nullptr);
 
     /**
      * Latch bus-reset related interrupt bits and schedule deferred recovery work.
@@ -372,6 +375,7 @@ class BusResetCoordinator {
     BusManager* busManager_{nullptr};
     Discovery::ROMScanner* romScanner_{nullptr};
     ASFW::Bus::TopologyMapService* topologyMapService_{nullptr};
+    ASFW::Scheduling::ITimerScheduler* timerScheduler_{nullptr};
 
     OSSharedPtr<IODispatchQueue> workQueue_;
 

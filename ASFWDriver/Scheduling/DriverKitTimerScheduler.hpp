@@ -1,9 +1,9 @@
 #pragma once
 
-#include "ISessionScheduler.hpp"
+#include "ITimerScheduler.hpp"
 
 #ifdef ASFW_HOST_TEST
-#include "../../../Testing/HostDriverKitStubs.hpp"
+#include "../Testing/HostDriverKitStubs.hpp"
 #else
 #include <DriverKit/IODispatchQueue.h>
 #include <DriverKit/IOTimerDispatchSource.h>
@@ -18,26 +18,26 @@
 
 class ASFWDriver;
 
-namespace ASFW::Protocols::SBP2 {
+namespace ASFW::Scheduling {
 
-// Production implementation of ISessionScheduler. A single DriverKit timer
-// source wakes the next due SBP-2 session callback; callbacks then run on the
+// Production implementation of ITimerScheduler. A single DriverKit timer
+// source wakes the next due control-plane callback; callbacks then run on the
 // driver's Default queue.
-class DriverKitSessionScheduler final : public ISessionScheduler {
+class DriverKitTimerScheduler final : public ITimerScheduler {
 public:
-    DriverKitSessionScheduler();
-    ~DriverKitSessionScheduler() override;
+    DriverKitTimerScheduler();
+    ~DriverKitTimerScheduler() override;
 
-    DriverKitSessionScheduler(const DriverKitSessionScheduler&) = delete;
-    DriverKitSessionScheduler& operator=(const DriverKitSessionScheduler&) = delete;
+    DriverKitTimerScheduler(const DriverKitTimerScheduler&) = delete;
+    DriverKitTimerScheduler& operator=(const DriverKitTimerScheduler&) = delete;
 
     [[nodiscard]] kern_return_t Prepare(::ASFWDriver& service,
                                         OSSharedPtr<IODispatchQueue> workQueue);
     void Reset() noexcept;
 
-    [[nodiscard]] SchedulerToken ScheduleAfter(uint64_t delayNs,
-                                               std::function<void()> fn) override;
-    void Cancel(SchedulerToken token) override;
+    [[nodiscard]] TimerToken ScheduleAfter(uint64_t delayNs,
+                                           std::function<void()> fn) override;
+    void Cancel(TimerToken token) override;
 
     void HandleTimerFired() noexcept;
 
@@ -60,8 +60,8 @@ private:
     OSSharedPtr<IODispatchQueue> workQueue_{};
     OSSharedPtr<IOTimerDispatchSource> timer_{};
     OSSharedPtr<OSAction> action_{};
-    std::map<SchedulerToken, PendingCallback> pending_;
-    SchedulerToken nextToken_{1};
+    std::map<TimerToken, PendingCallback> pending_;
+    TimerToken nextToken_{1};
 };
 
-} // namespace ASFW::Protocols::SBP2
+} // namespace ASFW::Scheduling

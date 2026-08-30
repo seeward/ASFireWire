@@ -16,6 +16,7 @@
 #include "../Discovery/DiscoveryTypes.hpp"
 #include "../Discovery/SpeedPolicy.hpp"
 #include "../Bus/Role/RolePolicy.hpp"
+#include "../Scheduling/ITimerScheduler.hpp"
 
 namespace ASFW::Async {
 class IFireWireBus;
@@ -73,7 +74,8 @@ class ROMScanner {
      */
     explicit ROMScanner(Async::IFireWireBus& bus, SpeedPolicy& speedPolicy,
                         const ROMScannerParams& params,
-                        OSSharedPtr<IODispatchQueue> dispatchQueue = nullptr);
+                        OSSharedPtr<IODispatchQueue> dispatchQueue = nullptr,
+                        Scheduling::ITimerScheduler* timerScheduler = nullptr);
     ~ROMScanner();
 
     /**
@@ -104,6 +106,7 @@ class ROMScanner {
     SpeedPolicy& speedPolicy_;
     ROMScannerParams params_;
     OSSharedPtr<IODispatchQueue> dispatchQueue_;
+    Scheduling::ITimerScheduler* timerScheduler_{nullptr};
     Driver::TopologyManager* topologyManager_{nullptr};
 
     std::shared_ptr<ROMReader> reader_;

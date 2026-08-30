@@ -15,6 +15,7 @@ IRMFallbackCoordinator::IRMFallbackCoordinator(Deps deps) noexcept
     : deps_(deps), snapshot_{}, csr_(deps.hardware) {}
 
 void IRMFallbackCoordinator::OnBusResetStarted(uint32_t generation) noexcept {
+    CancelDeferredEvaluation();
     const uint32_t staleCount = snapshot_.staleGenerationDrops;
     const uint32_t suppressedCount = snapshot_.suppressedByPolicy;
     const uint32_t probeFailCount = snapshot_.probeFailures;
@@ -48,16 +49,19 @@ void IRMFallbackCoordinator::OnTopologyReady(const Driver::TopologySnapshot& top
     snapshot_.rootCmcCapable = bmState.rootCmcCapable;
 
     if (!snapshot_.roleAllowsIRMHost) {
+        CancelDeferredEvaluation();
         snapshot_.state = IRMFallbackState::Disabled;
         return;
     }
 
     if (!snapshot_.topologyValid) {
+        CancelDeferredEvaluation();
         snapshot_.state = IRMFallbackState::SuppressedByTopology;
         return;
     }
 
     if (!snapshot_.localIsIRM) {
+        CancelDeferredEvaluation();
         snapshot_.state = IRMFallbackState::NotLocalIRM;
         return;
     }
@@ -95,14 +99,22 @@ void IRMFallbackCoordinator::MaybeEvaluate(uint64_t nowNs) noexcept {
 
     if (!gate.allowed) {
         // Gate still closed. Schedule deferred check if we have a scheduler.
-        if (deps_.scheduler) {
+        if (deps_.scheduler && deps_.monotonicNowNs &&
+            deferredEvaluationTimer_ == Scheduling::kInvalidTimerToken) {
             std::weak_ptr<IRMFallbackCoordinator> weakThis = shared_from_this();
-            deps_.scheduler->DispatchAsyncAfter(gate.remainingNs, [weakThis, generation]() {
+            deferredEvaluationGeneration_ = generation;
+            deferredEvaluationTimer_ = deps_.scheduler->ScheduleAfter(gate.remainingNs, [weakThis, generation]() {
                 auto self = weakThis.lock();
                 if (!self) return;
+
+                if (self->deferredEvaluationGeneration_ == generation) {
+                    self->deferredEvaluationTimer_ = Scheduling::kInvalidTimerToken;
+                    self->deferredEvaluationGeneration_ = 0;
+                }
                 
                 // Ensure we are still in the same generation
-                if (self->snapshot_.generation != generation) {
+                if (self->snapshot_.generation != generation ||
+                    self->snapshot_.state != IRMFallbackState::WaitingForAnnexHGate) {
                     self->snapshot_.staleGenerationDrops++;
                     if (self->deps_.timing) {
                         self->deps_.timing->RecordStaleTimerFiring();
@@ -110,7 +122,7 @@ void IRMFallbackCoordinator::MaybeEvaluate(uint64_t nowNs) noexcept {
                     return;
                 }
                 
-                self->MaybeEvaluate(Driver::BusResetCoordinator::MonotonicNow());
+                self->MaybeEvaluate(self->deps_.monotonicNowNs());
             });
         }
         return;
@@ -161,7 +173,16 @@ void IRMFallbackCoordinator::OnRuntimeEvidenceUpdated(const BusManagerRuntimeSta
 }
 
 void IRMFallbackCoordinator::Disable() noexcept {
+    CancelDeferredEvaluation();
     snapshot_.state = IRMFallbackState::Disabled;
+}
+
+void IRMFallbackCoordinator::CancelDeferredEvaluation() noexcept {
+    if (deferredEvaluationTimer_ != Scheduling::kInvalidTimerToken && deps_.scheduler) {
+        deps_.scheduler->Cancel(deferredEvaluationTimer_);
+    }
+    deferredEvaluationTimer_ = Scheduling::kInvalidTimerToken;
+    deferredEvaluationGeneration_ = 0;
 }
 
 bool IRMFallbackCoordinator::RoleAllowsFallbackCheck(const Driver::RolePolicy& policy) const noexcept {

@@ -8,7 +8,7 @@
 #include "../../Common/CSRSpace.hpp"
 #include "../../Controller/ControllerConfig.hpp"
 #include "../../Controller/ControllerTypes.hpp"
-#include "../../Scheduling/Scheduler.hpp"
+#include "../../Scheduling/ITimerScheduler.hpp"
 #include "../BusManager/BusManagerRuntimeState.hpp"
 #include "../Timing/PostResetTiming.hpp"
 #include "LocalCSRAccessor.hpp"
@@ -119,7 +119,8 @@ public:
     struct Deps {
         Driver::HardwareInterface& hardware;
         Timing::PostResetTimingCoordinator* timing{nullptr};
-        Driver::Scheduler* scheduler{nullptr};
+        Scheduling::ITimerScheduler* scheduler{nullptr};
+        uint64_t (*monotonicNowNs)() noexcept {nullptr};
     };
 
     explicit IRMFallbackCoordinator(Deps deps) noexcept;
@@ -161,9 +162,13 @@ public:
     [[nodiscard]] const IRMFallbackSnapshot& Snapshot() const noexcept { return snapshot_; }
 
 private:
+    void CancelDeferredEvaluation() noexcept;
+
     Deps deps_;
     IRMFallbackSnapshot snapshot_;
     LocalCSRAccessor csr_;
+    Scheduling::TimerToken deferredEvaluationTimer_{Scheduling::kInvalidTimerToken};
+    uint32_t deferredEvaluationGeneration_{0};
 
     [[nodiscard]] bool RoleAllowsFallbackCheck(const Driver::RolePolicy& rolePolicy) const noexcept;
     [[nodiscard]] BMIDProbeStatus ProbeBusManagerId(uint32_t* outValue) noexcept;

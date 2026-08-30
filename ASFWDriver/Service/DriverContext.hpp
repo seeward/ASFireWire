@@ -84,6 +84,7 @@ public:
     static kern_return_t EnsureSbp2Deps(ASFWDriver& service, ::ServiceContext& ctx);
     static kern_return_t PrepareQueue(ASFWDriver& service, ::ServiceContext& ctx);
     static kern_return_t PrepareInterrupts(ASFWDriver& service, IOService* provider, ::ServiceContext& ctx);
+    static kern_return_t PrepareTimerScheduler(ASFWDriver& service, ::ServiceContext& ctx);
     static kern_return_t PrepareWatchdog(ASFWDriver& service, ::ServiceContext& ctx);
 };
 

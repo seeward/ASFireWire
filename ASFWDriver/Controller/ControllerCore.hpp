@@ -86,8 +86,11 @@ class FCPResponseRouter;
 
 namespace ASFW::Protocols::SBP2 {
 class AddressSpaceManager;
-class DriverKitSessionScheduler;
 class SessionRegistry;
+}
+
+namespace ASFW::Scheduling {
+class DriverKitTimerScheduler;
 }
 
 namespace ASFW::IRM {
@@ -145,7 +148,7 @@ class ControllerCore final : private Role::IPhyConfigReset,
         std::shared_ptr<ASFW::Protocols::AVC::AVCDiscovery> avcDiscovery;
         std::shared_ptr<ASFW::Protocols::AVC::FCPResponseRouter> fcpResponseRouter;
         std::shared_ptr<ASFW::Protocols::SBP2::AddressSpaceManager> sbp2AddressSpaceManager;
-        std::shared_ptr<ASFW::Protocols::SBP2::DriverKitSessionScheduler> sbp2SessionScheduler;
+        std::shared_ptr<ASFW::Scheduling::DriverKitTimerScheduler> timerScheduler;
         std::shared_ptr<ASFW::Protocols::SBP2::SessionRegistry> sbp2SessionRegistry;
 
         // FW-19: local software CSR responder (STATE_SET/CLEAR, BROADCAST_CHANNEL,

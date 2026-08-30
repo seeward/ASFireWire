@@ -1,12 +1,5 @@
 #include "BusResetCoordinator.hpp"
 
-#ifdef ASFW_HOST_TEST
-#include <chrono>
-#include <thread>
-#else
-#include <DriverKit/IOLib.h>
-#endif
-
 #include "../Async/Interfaces/IAsyncControllerPort.hpp"
 #include "../ConfigROM/ConfigROMStager.hpp"
 #include "../ConfigROM/ROMScanner.hpp"
@@ -39,27 +32,6 @@ void LogDeferredRunAlreadyScheduled(const char* reason) {
                 (reason != nullptr) ? reason : "unspecified");
 }
 
-// TODO(ASFW-concurrency, deferred / not critical): this blocks the dext's "Default"
-// IODispatchQueue, which also owns the OHCI interrupt dispatch source — so sleeping
-// here stalls AR/AT/isoch DMA interrupt servicing for the sleep duration. Tolerable
-// for bus-reset settle (stop-the-world, µs-scale per OHCI "5µs→255µs" rule), but
-// IOSleep is ms-granularity: verify callers pass µs-equivalent delays, not ms. Part
-// of a broader audit of which IOSleep/DispatchSync sites run on Default vs a side
-// queue (FCPTransport, IsochService, DICE bring-up, PayloadRegistry). Possible future
-// fix if it bites: move the OHCI interrupt source to a dedicated queue (which then
-// reintroduces a lock requirement for shared bus state, e.g. TopologyManager).
-void SleepForDelay(uint32_t delayMs) {
-#ifdef ASFW_HOST_TEST
-    if (delayMs > 0U) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
-    }
-#else
-    if (delayMs > 0U) {
-        IOSleep(delayMs);
-    }
-#endif
-}
-
 void LogStateTransition(ASFW::Driver::BusResetCoordinator::State previousState,
                         ASFW::Driver::BusResetCoordinator::State nextState, const char* reason) {
     ASFW_LOG_V2(BusReset, "[FSM] %{public}s -> %{public}s: %{public}s",
@@ -82,7 +54,8 @@ void BusResetCoordinator::Initialize(HardwareInterface* hw, OSSharedPtr<IODispat
                                      SelfIDCapture* selfIdCapture, ConfigROMStager* configRom,
                                      InterruptManager* interrupts, TopologyManager* topology,
                                      BusManager* busManager, Discovery::ROMScanner* romScanner,
-                                     Bus::TopologyMapService* topologyMapService) {
+                                     Bus::TopologyMapService* topologyMapService,
+                                     ASFW::Scheduling::ITimerScheduler* timerScheduler) {
     hardware_ = hw;
     workQueue_ = std::move(workQueue);
     asyncSubsystem_ = asyncSys;
@@ -93,6 +66,7 @@ void BusResetCoordinator::Initialize(HardwareInterface* hw, OSSharedPtr<IODispat
     busManager_ = busManager;
     romScanner_ = romScanner;
     topologyMapService_ = topologyMapService;
+    timerScheduler_ = timerScheduler;
 
     state_ = State::Idle;
     selfIdLatch_.Reset();
@@ -233,7 +207,7 @@ void BusResetCoordinator::CompleteCurrentRun() {
 }
 
 void BusResetCoordinator::YieldAndReschedule(uint32_t delayMs, const char* reason) {
-    if (workQueue_.get() == nullptr) {
+    if (timerScheduler_ == nullptr) {
         return;
     }
 
@@ -243,21 +217,17 @@ void BusResetCoordinator::YieldAndReschedule(uint32_t delayMs, const char* reaso
         return;
     }
 
-#ifdef ASFW_HOST_TEST
-    if (workQueue_->UsesManualDispatchForTesting()) {
-        workQueue_->DispatchAsyncAfter(static_cast<uint64_t>(delayMs) * 1'000'000ULL, ^{
-          deferredRunScheduled_.store(false, std::memory_order_release);
-          RunStateMachine();
+    const auto weakSelf = weak_from_this();
+    const auto token = timerScheduler_->ScheduleAfter(
+        static_cast<uint64_t>(delayMs) * 1'000'000ULL, [weakSelf] {
+            if (auto self = weakSelf.lock()) {
+                self->deferredRunScheduled_.store(false, std::memory_order_release);
+                self->RunStateMachine();
+            }
         });
-        return;
+    if (token == ASFW::Scheduling::kInvalidTimerToken) {
+        deferredRunScheduled_.store(false, std::memory_order_release);
     }
-#endif
-
-    workQueue_->DispatchAsync(^{
-      SleepForDelay(delayMs);
-      deferredRunScheduled_.store(false, std::memory_order_release);
-      RunStateMachine();
-    });
 }
 
 bool BusResetCoordinator::G_ATInactive() {

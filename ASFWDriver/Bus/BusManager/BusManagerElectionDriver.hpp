@@ -11,7 +11,7 @@
 #include "../../Controller/ControllerTypes.hpp"
 #include "../CSR/CSRResponder.hpp"
 #include "../../Controller/ControllerConfig.hpp"
-#include "../../Scheduling/Scheduler.hpp"
+#include "../../Scheduling/ITimerScheduler.hpp"
 #include "BusManagerElection.hpp"
 
 #include <memory>
@@ -39,7 +39,7 @@ public:
 
     struct Deps {
         ASFW::Async::IAsyncControllerPort* asyncController{nullptr};
-        ASFW::Driver::Scheduler* scheduler{nullptr};
+        ASFW::Scheduling::ITimerScheduler* scheduler{nullptr};
         ASFW::Bus::CSRResponder* csrResponder{nullptr};
         ASFW::Driver::HardwareInterface* hardware{nullptr};
         LocalIRMResourceController* localIrmController{nullptr};

@@ -10,6 +10,7 @@
 #include "../ASFWDriver/ConfigROM/ROMScanner.hpp"
 #include "../ASFWDriver/Controller/ControllerTypes.hpp"
 #include "../ASFWDriver/Discovery/SpeedPolicy.hpp"
+#include "FakeTimerScheduler.hpp"
 
 using namespace ASFW::Discovery;
 using namespace ASFW::Driver;
@@ -131,8 +132,9 @@ TEST(ROMScannerMultiNodeFSM, AutomaticTwoNodesCompletesOnce) {
 
     ROMScannerParams params{};
     params.doIRMCheck = false;
+    ASFW::Testing::FakeTimerScheduler timers;
 
-    ROMScanner scanner(mockAsync, speedPolicy, params);
+    ROMScanner scanner(mockAsync, speedPolicy, params, nullptr, &timers);
 
     TopologySnapshot topology;
     topology.generation = 11;
@@ -202,8 +204,9 @@ TEST(ROMScannerMultiNodeFSM, BusyBIBSetsBusyFlagAndRecovers) {
 
     ROMScannerParams params{};
     params.doIRMCheck = false;
+    ASFW::Testing::FakeTimerScheduler timers;
 
-    ROMScanner scanner(mockAsync, speedPolicy, params);
+    ROMScanner scanner(mockAsync, speedPolicy, params, nullptr, &timers);
 
     TopologySnapshot topology;
     topology.generation = 9;
@@ -226,13 +229,15 @@ TEST(ROMScannerMultiNodeFSM, BusyBIBSetsBusyFlagAndRecovers) {
         }));
 
     // First BIB returns not-ready payload (q0 == 0), then retry succeeds.
-    mockAsync.SimulateFullBIBSuccess(0, CreateBusyBIB());
-    mockAsync.SimulateFullBIBSuccess(4, CreateStandardBIBWithCrcLength4());
+    mockAsync.WaitForPendingReads(1);
+    mockAsync.SimulateReadSuccess(0, {CreateBusyBIB()[0]});
+    timers.Advance(params.configROMReadyRetryDelayNs);
+    mockAsync.SimulateFullBIBSuccess(1, CreateStandardBIBWithCrcLength4());
 
     // Full root-directory parse: the recovered node reads its (empty) root-directory
     // header to complete (general ROM with crc_length == bus_info_length).
-    mockAsync.WaitForPendingReads(9);
-    mockAsync.SimulateReadSuccess(8, {0});
+    mockAsync.WaitForPendingReads(6);
+    mockAsync.SimulateReadSuccess(5, {0});
 
     {
         std::unique_lock lock(mtx);

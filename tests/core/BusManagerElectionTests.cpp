@@ -8,9 +8,13 @@
 #include "Bus/Timing/PostResetTimingCoordinator.hpp"
 #include "Controller/ControllerTypes.hpp"
 #include "Common/CSRSpace.hpp"
-#include "Scheduling/Scheduler.hpp"
+#include "Scheduling/ITimerScheduler.hpp"
 
 #include <gtest/gtest.h>
+
+#include <functional>
+#include <set>
+#include <utility>
 
 namespace {
 
@@ -23,6 +27,29 @@ using ASFW::Driver::TopologySnapshot;
 using ASFW::Driver::RolePolicy;
 using ASFW::FW::RoleMode;
 using ASFW::FW::FullBMActivityLevel;
+
+class QueueTimerScheduler final : public ASFW::Scheduling::ITimerScheduler {
+public:
+    explicit QueueTimerScheduler(OSSharedPtr<IODispatchQueue> queue) : queue_(std::move(queue)) {}
+
+    [[nodiscard]] ASFW::Scheduling::TimerToken ScheduleAfter(
+        uint64_t delayNs, std::function<void()> fn) override {
+        const auto token = ++nextToken_;
+        queue_->DispatchAsyncAfter(delayNs, [this, token, fn = std::move(fn)] {
+            if (!cancelled_.contains(token) && fn) {
+                fn();
+            }
+        });
+        return token;
+    }
+
+    void Cancel(ASFW::Scheduling::TimerToken token) override { cancelled_.insert(token); }
+
+private:
+    OSSharedPtr<IODispatchQueue> queue_;
+    ASFW::Scheduling::TimerToken nextToken_{0};
+    std::set<ASFW::Scheduling::TimerToken> cancelled_;
+};
 
 class ScopedMockClock {
 public:
@@ -180,8 +207,7 @@ TEST(BusManagerElection, FsmOldValueInterpretation) {
 
 TEST(BusManagerElectionDriver, GatedByMode) {
     OSSharedPtr<IODispatchQueue> queue(new IODispatchQueue(), OSNoRetain);
-    auto scheduler = std::make_shared<ASFW::Driver::Scheduler>();
-    scheduler->Bind(queue);
+    auto scheduler = std::make_shared<QueueTimerScheduler>(queue);
 
     ASFW::Bus::Timing::PostResetTimingCoordinator timing;
     auto mockAsync = std::make_shared<MockAsyncPort>();
@@ -214,8 +240,7 @@ TEST(BusManagerElectionDriver, GatedByMode) {
 
 TEST(BusManagerElectionDriver, IncumbentImmediateContention) {
     OSSharedPtr<IODispatchQueue> queue(new IODispatchQueue(), OSNoRetain);
-    auto scheduler = std::make_shared<ASFW::Driver::Scheduler>();
-    scheduler->Bind(queue);
+    auto scheduler = std::make_shared<QueueTimerScheduler>(queue);
 
     ASFW::Bus::Timing::PostResetTimingCoordinator timing;
     auto mockAsync = std::make_shared<MockAsyncPort>();
@@ -259,8 +284,7 @@ TEST(BusManagerElectionDriver, FastResetAfterLocalBMWonYieldsStableRemoteRootIRM
     OSSharedPtr<IODispatchQueue> queue(new IODispatchQueue(), OSNoRetain);
     queue->SetManualDispatchForTesting(true);
 
-    auto scheduler = std::make_shared<ASFW::Driver::Scheduler>();
-    scheduler->Bind(queue);
+    auto scheduler = std::make_shared<QueueTimerScheduler>(queue);
 
     ASFW::Bus::Timing::PostResetTimingCoordinator timing;
     auto mockAsync = std::make_shared<MockAsyncPort>();
@@ -320,8 +344,7 @@ TEST(BusManagerElectionDriver, FastResetYieldClearsWhenTopologyChanges) {
     OSSharedPtr<IODispatchQueue> queue(new IODispatchQueue(), OSNoRetain);
     queue->SetManualDispatchForTesting(true);
 
-    auto scheduler = std::make_shared<ASFW::Driver::Scheduler>();
-    scheduler->Bind(queue);
+    auto scheduler = std::make_shared<QueueTimerScheduler>(queue);
 
     ASFW::Bus::Timing::PostResetTimingCoordinator timing;
     auto mockAsync = std::make_shared<MockAsyncPort>();
@@ -397,8 +420,7 @@ TEST(BusManagerElectionDriver, DelayedResetAfterLocalBMWonDoesNotArmStormYield) 
     OSSharedPtr<IODispatchQueue> queue(new IODispatchQueue(), OSNoRetain);
     queue->SetManualDispatchForTesting(true);
 
-    auto scheduler = std::make_shared<ASFW::Driver::Scheduler>();
-    scheduler->Bind(queue);
+    auto scheduler = std::make_shared<QueueTimerScheduler>(queue);
 
     ASFW::Bus::Timing::PostResetTimingCoordinator timing;
     auto mockAsync = std::make_shared<MockAsyncPort>();
@@ -459,8 +481,7 @@ TEST(BusManagerElectionDriver, ChallengerGracePeriod) {
     OSSharedPtr<IODispatchQueue> queue(new IODispatchQueue(), OSNoRetain);
     queue->SetManualDispatchForTesting(true);
     
-    auto scheduler = std::make_shared<ASFW::Driver::Scheduler>();
-    scheduler->Bind(queue);
+    auto scheduler = std::make_shared<QueueTimerScheduler>(queue);
 
     ASFW::Bus::Timing::PostResetTimingCoordinator timing;
     auto mockAsync = std::make_shared<MockAsyncPort>();
@@ -505,8 +526,7 @@ TEST(BusManagerElectionDriver, GenerationSafetyChecks) {
     OSSharedPtr<IODispatchQueue> queue(new IODispatchQueue(), OSNoRetain);
     queue->SetManualDispatchForTesting(true);
     
-    auto scheduler = std::make_shared<ASFW::Driver::Scheduler>();
-    scheduler->Bind(queue);
+    auto scheduler = std::make_shared<QueueTimerScheduler>(queue);
 
     ASFW::Bus::Timing::PostResetTimingCoordinator timing;
     auto mockAsync = std::make_shared<MockAsyncPort>();
@@ -549,8 +569,7 @@ TEST(BusManagerElectionDriver, MaxOneAttemptPerGeneration) {
     OSSharedPtr<IODispatchQueue> queue(new IODispatchQueue(), OSNoRetain);
     queue->SetManualDispatchForTesting(true);
     
-    auto scheduler = std::make_shared<ASFW::Driver::Scheduler>();
-    scheduler->Bind(queue);
+    auto scheduler = std::make_shared<QueueTimerScheduler>(queue);
 
     ASFW::Bus::Timing::PostResetTimingCoordinator timing;
     auto mockAsync = std::make_shared<MockAsyncPort>();
@@ -626,8 +645,7 @@ TEST(BusManagerElectionDriver, DeferredElectionSuppressedByPolicyChange) {
     OSSharedPtr<IODispatchQueue> queue(new IODispatchQueue(), OSNoRetain);
     queue->SetManualDispatchForTesting(true);
     
-    auto scheduler = std::make_shared<ASFW::Driver::Scheduler>();
-    scheduler->Bind(queue);
+    auto scheduler = std::make_shared<QueueTimerScheduler>(queue);
 
     ASFW::Bus::Timing::PostResetTimingCoordinator timing;
     auto mockAsync = std::make_shared<MockAsyncPort>();
@@ -671,8 +689,7 @@ TEST(BusManagerElectionDriver, DeferredElectionSuppressedByActivityChangedToObse
     OSSharedPtr<IODispatchQueue> queue(new IODispatchQueue(), OSNoRetain);
     queue->SetManualDispatchForTesting(true);
     
-    auto scheduler = std::make_shared<ASFW::Driver::Scheduler>();
-    scheduler->Bind(queue);
+    auto scheduler = std::make_shared<QueueTimerScheduler>(queue);
 
     ASFW::Bus::Timing::PostResetTimingCoordinator timing;
     auto mockAsync = std::make_shared<MockAsyncPort>();
@@ -719,8 +736,7 @@ TEST(BusManagerElectionDriver, DeferredElectionSuppressedAfterDriverStop) {
     OSSharedPtr<IODispatchQueue> queue(new IODispatchQueue(), OSNoRetain);
     queue->SetManualDispatchForTesting(true);
     
-    auto scheduler = std::make_shared<ASFW::Driver::Scheduler>();
-    scheduler->Bind(queue);
+    auto scheduler = std::make_shared<QueueTimerScheduler>(queue);
 
     ASFW::Bus::Timing::PostResetTimingCoordinator timing;
     auto mockAsync = std::make_shared<MockAsyncPort>();

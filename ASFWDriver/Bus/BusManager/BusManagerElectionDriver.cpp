@@ -178,7 +178,7 @@ void BusManagerElectionDriver::OnTopologyReady(const ASFW::Driver::TopologySnaps
             inFlight_ = true;
             inFlightGen_ = generation;
             std::weak_ptr<BusManagerElectionDriver> weakSelf = shared_from_this();
-            deps_.scheduler->DispatchAsyncAfter(gate.remainingNs, [weakSelf, generation, localNodeId, irmNodeId, busBase16 = snap.busBase16, candidateClass]() {
+            (void)deps_.scheduler->ScheduleAfter(gate.remainingNs, [weakSelf, generation, localNodeId, irmNodeId, busBase16 = snap.busBase16, candidateClass]() {
                 auto self = weakSelf.lock();
                 if (!self || !self->active_) return;
                 

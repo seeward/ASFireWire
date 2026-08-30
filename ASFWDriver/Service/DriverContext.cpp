@@ -33,8 +33,8 @@
 #include "../Protocols/AVC/FCPResponseRouter.hpp"
 #include "../Protocols/AVC/AVCDiscovery.hpp"
 #include "../Protocols/SBP2/AddressSpaceManager.hpp"
-#include "../Protocols/SBP2/Session/DriverKitSessionScheduler.hpp"
 #include "../Protocols/SBP2/Session/SessionRegistry.hpp"
+#include "../Scheduling/DriverKitTimerScheduler.hpp"
 #include "../SCSIController/SBP2BridgeHub.hpp"
 #include "../SCSIController/SBP2NubPublisher.hpp"
 #include "../SCSIController/SBP2TargetBridge.hpp"
@@ -117,10 +117,13 @@ void ServiceContext::Reset(ResetMode mode) {
     deps.busManagerElectionDriver.reset();
     deps.fcpResponseRouter.reset(); // Clean up FCP router
     deps.sbp2SessionRegistry.reset();
-    deps.sbp2SessionScheduler.reset();
     deps.sbp2AddressSpaceManager.reset();
     deps.avcDiscovery.reset();      // Clean up AV/C discovery
     deps.irmClient.reset();         // Clean up IRM client
+    // This shared control-plane service must outlive every consumer that can
+    // retain a timer token. SBP-2 and AV/C are gone above; audio sessions were
+    // shut down before ControllerCore is released.
+    deps.timerScheduler.reset();
     deps.asyncController.reset();
     deps.asyncSubsystem.reset(); // Stop and cleanup asyncSubsystem
     if (mode == ResetMode::Full) {
@@ -253,23 +256,12 @@ kern_return_t DriverWiring::EnsureSbp2Deps(ASFWDriver& service, ::ServiceContext
         ASFW_LOG(Controller, "[Controller] SBP2 AddressSpaceManager initialized");
     }
 
-    if (!d.sbp2SessionScheduler) {
-        d.sbp2SessionScheduler =
-            std::make_shared<ASFW::Protocols::SBP2::DriverKitSessionScheduler>();
-        const auto kr = d.sbp2SessionScheduler->Prepare(service, ctx.workQueue);
-        if (kr != kIOReturnSuccess) {
-            d.sbp2SessionScheduler.reset();
-            return kr;
-        }
-        ASFW_LOG(Controller, "[Controller] SBP2 session scheduler initialized");
-    }
-
     if (!d.sbp2SessionRegistry && ctx.controller && d.sbp2AddressSpaceManager &&
-        d.deviceRegistry && d.deviceManager && d.sbp2SessionScheduler) {
+        d.deviceRegistry && d.deviceManager && d.timerScheduler) {
         auto& bus = ctx.controller->Bus();
         d.sbp2SessionRegistry = std::make_shared<ASFW::Protocols::SBP2::SessionRegistry>(
             bus, bus, *d.sbp2AddressSpaceManager, *d.deviceRegistry, *d.deviceManager,
-            *d.sbp2SessionScheduler,
+            *d.timerScheduler,
             ctx.workQueue.get());
         if (d.busReset) {
             // Last-resort recovery for targets whose fetch engine wedges so hard
@@ -296,7 +288,7 @@ kern_return_t DriverWiring::EnsureSbp2Deps(ASFWDriver& service, ::ServiceContext
     if (!ctx.sbp2Bridge && d.sbp2SessionRegistry && d.deviceManager && ctx.workQueue) {
         ctx.sbp2Bridge = std::make_shared<ASFW::Protocols::SBP2::SBP2TargetBridge>(
             d.sbp2SessionRegistry, *d.deviceManager, ctx.workQueue.get(),
-            d.sbp2SessionScheduler.get());
+            d.timerScheduler.get());
         ctx.sbp2Bridge->Start();
         ASFW::Protocols::SBP2::SBP2BridgeHub::Set(ctx.sbp2Bridge);
         ASFW_LOG(Controller, "[Controller] SBP2 target bridge initialized");
@@ -378,6 +370,21 @@ kern_return_t DriverWiring::PrepareInterrupts(ASFWDriver& service, IOService* pr
 
 kern_return_t DriverWiring::PrepareWatchdog(ASFWDriver& service, ::ServiceContext& ctx) {
     return ctx.watchdog.Prepare(service, ctx.workQueue);
+}
+
+kern_return_t DriverWiring::PrepareTimerScheduler(ASFWDriver& service, ::ServiceContext& ctx) {
+    if (ctx.deps.timerScheduler) {
+        return kIOReturnSuccess;
+    }
+
+    auto scheduler = std::make_shared<ASFW::Scheduling::DriverKitTimerScheduler>();
+    const auto kr = scheduler->Prepare(service, ctx.workQueue);
+    if (kr != kIOReturnSuccess) {
+        return kr;
+    }
+    ctx.deps.timerScheduler = std::move(scheduler);
+    ASFW_LOG(Controller, "[Controller] Timer scheduler initialized");
+    return kIOReturnSuccess;
 }
 
 } // namespace ASFW::Driver

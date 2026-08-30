@@ -25,6 +25,7 @@
 #include "../Audio/Protocols/DICE/Core/DICETypes.hpp"
 #include "../Protocols/Ports/FireWireRxPort.hpp"
 #include "../Protocols/SBP2/AddressSpaceManager.hpp"
+#include "../Scheduling/DriverKitTimerScheduler.hpp"
 
 #include <array>
 #include <memory>
@@ -245,10 +246,10 @@ void WireLocalRequestDispatch(::ServiceContext& ctx) {
     }
 
     // Create and wire the Bus Manager election driver (FW-18)
-    if (!d.busManagerElectionDriver && d.csrResponder && d.asyncController && d.scheduler) {
+    if (!d.busManagerElectionDriver && d.csrResponder && d.asyncController && d.timerScheduler) {
         ASFW::Bus::BusManagerElectionDriver::Deps electDeps{
             .asyncController = d.asyncController.get(),
-            .scheduler = d.scheduler.get(),
+            .scheduler = d.timerScheduler.get(),
             .csrResponder = d.csrResponder.get(),
             .hardware = d.hardware.get(),
             .localIrmController = ctx.controller ? ctx.controller->GetLocalIRMResourceController() : nullptr,

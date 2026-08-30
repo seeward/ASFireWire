@@ -672,29 +672,18 @@ void BusResetCoordinator::RecordRecoveryReasonCode(RecoveryReasonCode code) {
 }
 
 void BusResetCoordinator::ScheduleManualResetWatchdog(uint32_t manualEpoch, uint32_t resetEpoch) {
-    if (workQueue_.get() == nullptr) {
+    if (timerScheduler_ == nullptr) {
         return;
     }
 
-#ifdef ASFW_HOST_TEST
-    if (workQueue_->UsesManualDispatchForTesting()) {
-        workQueue_->DispatchAsyncAfter(static_cast<uint64_t>(kManualResetWatchdogMs) * 1'000'000ULL,
-                                       ^{
-                                         MaybeRecoverMissingManualResetIrq(manualEpoch, resetEpoch);
-                                       });
-        return;
-    }
-#endif
-
-    workQueue_->DispatchAsync(^{
-#ifdef ASFW_HOST_TEST
-      (void)manualEpoch;
-      (void)resetEpoch;
-#else
-      IOSleep(kManualResetWatchdogMs);
-      MaybeRecoverMissingManualResetIrq(manualEpoch, resetEpoch);
-#endif
-    });
+    const auto weakSelf = weak_from_this();
+    (void)timerScheduler_->ScheduleAfter(
+        static_cast<uint64_t>(kManualResetWatchdogMs) * 1'000'000ULL,
+        [weakSelf, manualEpoch, resetEpoch] {
+            if (auto self = weakSelf.lock()) {
+                self->MaybeRecoverMissingManualResetIrq(manualEpoch, resetEpoch);
+            }
+        });
 }
 
 void BusResetCoordinator::MaybeRecoverMissingManualResetIrq(uint32_t manualEpoch,

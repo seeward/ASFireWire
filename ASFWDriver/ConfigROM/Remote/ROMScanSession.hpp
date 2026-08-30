@@ -5,6 +5,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include <DriverKit/IOLib.h>
@@ -12,6 +13,7 @@
 #include "../Common/ConfigROMUnits.hpp"
 #include "../ROMReader.hpp"
 #include "../ROMScanner.hpp"
+#include "../../Scheduling/ITimerScheduler.hpp"
 #include "ROMScanNodeStateMachine.hpp"
 
 namespace ASFW::Async {
@@ -34,7 +36,8 @@ class ROMScanSession final : public std::enable_shared_from_this<ROMScanSession>
   public:
     ROMScanSession(Async::IFireWireBus& bus, SpeedPolicy& speedPolicy, ROMScannerParams params,
                    std::shared_ptr<ROMReader> reader, OSSharedPtr<IODispatchQueue> dispatchQueue,
-                   Driver::TopologyManager* topologyManager);
+                   Driver::TopologyManager* topologyManager,
+                   Scheduling::ITimerScheduler* timerScheduler);
     ~ROMScanSession();
 
     void Start(ROMScanRequest request, ScanCompletionCallback completion);
@@ -87,17 +90,17 @@ class ROMScanSession final : public std::enable_shared_from_this<ROMScanSession>
     void RetryWithFallback(ROMScanNodeStateMachine& node);
 
     void DispatchAsync(std::function<void()> work);
-    void DispatchDelayed(std::function<void()> work, uint64_t delayNs);
-
     Async::IFireWireBus& bus_;
     SpeedPolicy& speedPolicy_;
     ROMScannerParams params_;
     OSSharedPtr<IODispatchQueue> dispatchQueue_;
     Driver::TopologyManager* topologyManager_{nullptr};
+    Scheduling::ITimerScheduler* timerScheduler_{nullptr};
 
     std::shared_ptr<ROMReader> reader_;
 
     std::atomic<bool> aborted_{false};
+    std::unordered_map<uint8_t, Scheduling::TimerToken> configROMRetryTimers_;
 
     Generation gen_{0};
     Driver::TopologySnapshot topology_{};
