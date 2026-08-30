@@ -150,6 +150,24 @@ bool SBP2ManagementORB::Execute() noexcept {
 
     inProgress_.store(true, std::memory_order_relaxed);
 
+    // Arm the timeout BEFORE the write goes out so it covers the whole
+    // exchange (agent write + status block), not just the wait for status.
+    // Previously armed in OnWriteComplete: a write whose completion never
+    // arrived (wedged target — observed on LS-4000, LUN reset after ORB
+    // timeout) left the management ORB pending forever with no timer running.
+    if (scheduler_ != nullptr && timeoutMs_ > 0) {
+        const std::weak_ptr<int> weakLifetime = lifetimeToken_;
+        const uint64_t delayNs = static_cast<uint64_t>(timeoutMs_) * 1'000'000ULL;
+
+        timeoutToken_ = scheduler_->ScheduleAfter(delayNs, [this, weakLifetime]() {
+            if (weakLifetime.expired()) {
+                return;
+            }
+            timeoutToken_ = kInvalidSchedulerToken;
+            OnTimeout();
+        });
+    }
+
     // Write ORB address to management agent
     const FW::Generation gen{generation_};
     const FW::NodeId node{static_cast<uint8_t>(nodeID_ & 0x3Fu)};
@@ -166,12 +184,23 @@ bool SBP2ManagementORB::Execute() noexcept {
         gen, node, mgmtAddr,
         std::span<const uint8_t>{orbAddressBE_.data(), orbAddressBE_.size()},
         speed,
-        [this](Async::AsyncStatus status, std::span<const uint8_t> response) {
+        [this, weak = std::weak_ptr<int>(lifetimeToken_)](
+            Async::AsyncStatus status, std::span<const uint8_t> response) {
+            // The timeout is armed before this write, so OnTimeout can fire —
+            // and Complete() can destroy the ORB — while the write is still
+            // in flight. Guard like the timer lambda above.
+            if (weak.expired()) {
+                return;
+            }
             OnWriteComplete(status, response);
         });
 
     if (!writeHandle_) {
         ASFW_LOG(Async, "SBP2ManagementORB::Execute: WriteBlock failed");
+        if (scheduler_ != nullptr && timeoutToken_ != kInvalidSchedulerToken) {
+            scheduler_->Cancel(timeoutToken_);
+            timeoutToken_ = kInvalidSchedulerToken;
+        }
         inProgress_.store(false, std::memory_order_relaxed);
         return false;
     }
@@ -193,22 +222,10 @@ void SBP2ManagementORB::OnWriteComplete(Async::AsyncStatus status,
         return;
     }
 
-    // Management agent write ACK'd. Start timeout, wait for status block.
+    // Management agent write ACK'd; the timeout armed in Execute() keeps
+    // running until the status block arrives.
     ASFW_LOG(Async, "SBP2ManagementORB: mgmt agent ACK'd, waiting for status block (timeout=%ums)",
              timeoutMs_);
-
-    if (scheduler_ != nullptr && timeoutMs_ > 0) {
-        const std::weak_ptr<int> weakLifetime = lifetimeToken_;
-        const uint64_t delayNs = static_cast<uint64_t>(timeoutMs_) * 1'000'000ULL;
-
-        timeoutToken_ = scheduler_->ScheduleAfter(delayNs, [this, weakLifetime]() {
-            if (weakLifetime.expired()) {
-                return;
-            }
-            timeoutToken_ = kInvalidSchedulerToken;
-            OnTimeout();
-        });
-    }
 }
 
 void SBP2ManagementORB::OnStatusBlockWrite(uint32_t offset,

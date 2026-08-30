@@ -1007,7 +1007,15 @@ void ASFWDriver::ScheduleAsyncWatchdog(uint64_t delayUsec) {
         return;
     }
     auto& ctx = *ivars->context;
-    if (!ctx.lifecycle || !ctx.lifecycle->AdmitsNormalWork()) {
+    // Gate on the alive states (kStarting/kRunning), NOT AdmitsNormalWork():
+    // the initial arm in StartRuntime happens before CompleteStart() flips the
+    // state to kRunning, so a kRunning-only gate silently no-ops it and the
+    // self-rearming tick chain never starts — no AT transaction timeout can
+    // ever fire (0.3.0 regression, 22c82112; observed as an unrecoverable
+    // SBP-2 wedge when a target stopped responding). Teardown still kills the
+    // chain authoritatively via watchdog.Stop()/Reset() (timer disable), and
+    // every return to kRunning re-enters StartRuntime, which re-arms.
+    if (!ctx.lifecycle || !ctx.lifecycle->AdmitsBringupInterrupts()) {
         return;
     }
     ctx.watchdog.Schedule(delayUsec);
@@ -1019,12 +1027,15 @@ void ASFWDriver::AsyncWatchdogTimerFired_Impl(ASFWDriver_AsyncWatchdogTimerFired
 
     if (ivars && ivars->context) {
         auto& ctx = *ivars->context;
-        if (!ctx.lifecycle || !ctx.lifecycle->AdmitsNormalWork()) {
-            return;
+        // Skip only the WORK when normal work is inadmissible — never the
+        // reschedule below. An early return here breaks the self-rearming
+        // chain permanently on a transient non-running state; the chain's
+        // real kill switch is the timer disable in watchdog.Stop()/Reset().
+        if (ctx.lifecycle && ctx.lifecycle->AdmitsNormalWork()) {
+            ctx.watchdog.HandleTick(ctx.controller.get(), ctx.deps.asyncController.get(),
+                                    ctx.isoch.ReceiveContext(), ctx.isoch.TransmitContext(),
+                                    ctx.statusPublisher);
         }
-        ctx.watchdog.HandleTick(ctx.controller.get(), ctx.deps.asyncController.get(),
-                                ctx.isoch.ReceiveContext(), ctx.isoch.TransmitContext(),
-                                ctx.statusPublisher);
     }
 
     ScheduleAsyncWatchdog(kAsyncWatchdogPeriodUsec);

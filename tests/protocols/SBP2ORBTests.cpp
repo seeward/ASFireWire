@@ -175,6 +175,67 @@ TEST(SBP2ORBTests, ManagementORBStatusWriteCancelsTimeout) {
     EXPECT_EQ(0, completionStatus);
 }
 
+TEST(SBP2ORBTests, ManagementORBTimesOutWhenAgentWriteNeverCompletes) {
+    // Regression: a wedged target whose fetch/management engine stops ACKing
+    // can strand the agent write without a completion. The ORB timeout must
+    // cover that window too (armed in Execute, not OnWriteComplete) —
+    // otherwise the LUN-reset escalation hangs forever (observed: LS-4000).
+    ORBTimerRig rig;
+
+    SBP2ManagementORB orb(rig.bus, rig.bus, rig.addressManager, reinterpret_cast<void*>(0x8));
+    orb.SetFunction(SBP2ManagementORB::Function::LogicalUnitReset);
+    orb.SetLoginID(0x12);
+    orb.SetManagementAgentOffset(0x80);
+    orb.SetTargetNode(1, 0x3F);
+    orb.SetTimeout(5);
+    orb.SetScheduler(&rig.scheduler);
+
+    int completionStatus = 99;
+    orb.SetCompletionCallback([&completionStatus](int status) { completionStatus = status; });
+
+    ASSERT_TRUE(orb.Execute());
+    ASSERT_EQ(1u, rig.bus.PendingWriteCount());
+
+    // Never complete the write — the timer must still fire.
+    rig.AdvanceMs(5);
+    EXPECT_EQ(-2, completionStatus);
+}
+
+TEST(SBP2ORBTests, ManagementORBTimeoutWithWriteInFlightThenLateWriteCompletion) {
+    // With the timeout armed before the agent write (Execute, not
+    // OnWriteComplete), OnTimeout can fire while the write is still in
+    // flight. CommandExecutor destroys the ORB from the completion callback,
+    // so the late write completion must not touch the freed object.
+    // Run under ASan to make the use-after-free observable.
+    ORBTimerRig rig;
+
+    auto orb = std::make_unique<SBP2ManagementORB>(rig.bus, rig.bus, rig.addressManager,
+                                                   reinterpret_cast<void*>(0x8));
+    orb->SetFunction(SBP2ManagementORB::Function::LogicalUnitReset);
+    orb->SetLoginID(0x12);
+    orb->SetManagementAgentOffset(0x80);
+    orb->SetTargetNode(1, 0x3F);
+    orb->SetTimeout(5);
+    orb->SetScheduler(&rig.scheduler);
+
+    int completionStatus = 99;
+    orb->SetCompletionCallback([&](int status) {
+        completionStatus = status;
+        orb.reset();                  // what CommandExecutor.cpp does
+    });
+
+    ASSERT_TRUE(orb->Execute());
+    ASSERT_EQ(1u, rig.bus.PendingWriteCount());
+
+    rig.AdvanceMs(5);                 // timeout fires; ORB destroys itself
+    EXPECT_EQ(-2, completionStatus);
+    EXPECT_EQ(nullptr, orb.get());
+
+    // AT layer resolves the transaction afterwards — real late ACK, or
+    // kIOReturnTimeout from the AT watchdog.
+    EXPECT_TRUE(rig.bus.CompleteNextWrite(ASFW::Async::AsyncStatus::kTimeout));
+}
+
 TEST(SBP2ORBTests, ManagementORBUsesFullBusNodeIdInEmbeddedAddresses) {
     ORBTimerRig rig;
 
