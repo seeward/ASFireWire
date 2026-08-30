@@ -69,7 +69,7 @@
 #include "Protocols/AVC/AVCDiscovery.hpp"
 #include "Protocols/AVC/CMP/CMPClient.hpp"
 #include "Protocols/AVC/FCPResponseRouter.hpp"
-#include "Protocols/SBP2/Session/DriverKitSessionScheduler.hpp"
+#include "Scheduling/DriverKitTimerScheduler.hpp"
 #include "Scheduling/Scheduler.hpp"
 #include "Service/DriverContext.hpp"
 #include "Service/LocalRequestWiring.hpp"
@@ -424,6 +424,14 @@ kern_return_t ASFWDriver::StartRuntime(IOService* provider) {
     }
     ctx.lifecycle->MarkStageComplete(StartStage::kAsyncReady);
 
+    // Before every consumer: SBP-2 sessions, AV/C family providers and the audio
+    // session manager all schedule on this one timer.
+    kr = DriverWiring::PrepareTimerScheduler(*this, ctx);
+    if (kr != kIOReturnSuccess) {
+        ASFW_LOG(Controller, "Failed to prepare timer scheduler: 0x%08x", kr);
+        return failStart(kr, "timer scheduler preparation failed");
+    }
+
     kr = DriverWiring::PrepareWatchdog(*this, ctx);
     if (kr != kIOReturnSuccess) {
         ASFW_LOG(Controller, "Failed to prepare async watchdog: 0x%08x", kr);
@@ -443,7 +451,7 @@ kern_return_t ASFWDriver::StartRuntime(IOService* provider) {
         auto& bus = ctx.controller->Bus();
         ctx.deps.avcDiscovery = std::make_shared<ASFW::Protocols::AVC::AVCDiscovery>(
             *ctx.deps.deviceRegistry, *ctx.deps.deviceManager, bus, bus,
-            *ctx.deps.sbp2SessionScheduler);
+            *ctx.deps.timerScheduler);
         ctx.controller->SetAVCDiscovery(ctx.deps.avcDiscovery);
         ASFW_LOG(Controller, "✅ AVCDiscovery initialized");
     }
@@ -488,7 +496,7 @@ kern_return_t ASFWDriver::StartRuntime(IOService* provider) {
     if (!ctx.audioSessionManager && ctx.audioCoordinator &&
         ctx.deps.deviceManager && ctx.deps.deviceRegistry &&
         ctx.deps.avcDiscovery && ctx.deps.irmClient && ctx.deps.cmpClient &&
-        ctx.deps.sbp2SessionScheduler) {
+        ctx.deps.timerScheduler) {
         auto& bus = ctx.controller->Bus();
         // The final argument exists only for bootloader preparation, which is
         // gated on an explicit catalog cue policy. See
@@ -498,11 +506,11 @@ kern_return_t ASFWDriver::StartRuntime(IOService* provider) {
                 *ctx.deps.deviceManager, *ctx.deps.deviceRegistry,
                 *ctx.audioCoordinator,
                 ASFW::Audio::Devices::AudioDeviceSessionManager::CatalogResolver{},
-                &bus, ctx.deps.sbp2SessionScheduler.get());
+                &bus, ctx.deps.timerScheduler.get());
         ASFW::Audio::Families::ExistingFamilyProviderDependencies providers{
             bus, bus, *ctx.deps.deviceRegistry, *ctx.deps.avcDiscovery,
             ctx.deps.irmClient.get(), ctx.deps.cmpClient.get(),
-            *ctx.deps.sbp2SessionScheduler};
+            *ctx.deps.timerScheduler};
         const bool registered =
             manager->RegisterProvider(
                 ASFW::Audio::Families::MakeGenericAvcFamilyProvider(providers)) &&
@@ -1021,7 +1029,7 @@ void ASFWDriver::AsyncWatchdogTimerFired_Impl(ASFWDriver_AsyncWatchdogTimerFired
     ScheduleAsyncWatchdog(kAsyncWatchdogPeriodUsec);
 }
 
-void ASFWDriver::SBP2SessionTimerFired_Impl(ASFWDriver_SBP2SessionTimerFired_Args) {
+void ASFWDriver::TimerSchedulerFired_Impl(ASFWDriver_TimerSchedulerFired_Args) {
     (void)action;
     (void)time;
 
@@ -1029,11 +1037,11 @@ void ASFWDriver::SBP2SessionTimerFired_Impl(ASFWDriver_SBP2SessionTimerFired_Arg
         return;
     }
     auto& ctx = *ivars->context;
-    if (!ctx.lifecycle || !ctx.lifecycle->AdmitsNormalWork() || !ctx.deps.sbp2SessionScheduler) {
+    if (!ctx.lifecycle || !ctx.lifecycle->AdmitsNormalWork() || !ctx.deps.timerScheduler) {
         return;
     }
 
-    ctx.deps.sbp2SessionScheduler->HandleTimerFired();
+    ctx.deps.timerScheduler->HandleTimerFired();
 }
 
 void ASFWDriver::ProviderNotificationReady_Impl(ASFWDriver_ProviderNotificationReady_Args) {

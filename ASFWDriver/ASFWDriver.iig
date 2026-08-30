@@ -81,8 +81,11 @@ public:
                                          uint64_t time)
         TYPE(IOTimerDispatchSource::TimerOccurred);
 
-    virtual void SBP2SessionTimerFired(OSAction* action,
-                                       uint64_t time)
+    // Drives Scheduling::DriverKitTimerScheduler, the driver-wide deadline timer.
+    // Not SBP-2's: SBP-2, the audio session manager and any future control plane
+    // all schedule through the same source.
+    virtual void TimerSchedulerFired(OSAction* action,
+                                     uint64_t time)
         TYPE(IOTimerDispatchSource::TimerOccurred);
 
     virtual void WakeVerifyTimerFired(OSAction* action,

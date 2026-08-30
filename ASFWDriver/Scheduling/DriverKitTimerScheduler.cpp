@@ -1,7 +1,7 @@
-#include "DriverKitSessionScheduler.hpp"
+#include "DriverKitTimerScheduler.hpp"
 
-#include "../../../Common/TimingUtils.hpp"
-#include "../../../Logging/Logging.hpp"
+#include "../Common/TimingUtils.hpp"
+#include "../Logging/Logging.hpp"
 
 #ifndef ASFW_HOST_TEST
 #include <net.mrmidi.ASFW.ASFWDriver/ASFWDriver.h>
@@ -10,7 +10,7 @@
 #include <algorithm>
 #include <utility>
 
-namespace ASFW::Protocols::SBP2 {
+namespace ASFW::Scheduling {
 
 namespace {
 
@@ -37,11 +37,11 @@ private:
 
 } // namespace
 
-DriverKitSessionScheduler::DriverKitSessionScheduler() {
+DriverKitTimerScheduler::DriverKitTimerScheduler() {
     lock_ = IOLockAlloc();
 }
 
-DriverKitSessionScheduler::~DriverKitSessionScheduler() {
+DriverKitTimerScheduler::~DriverKitTimerScheduler() {
     Reset();
     if (lock_) {
         IOLockFree(lock_);
@@ -49,7 +49,7 @@ DriverKitSessionScheduler::~DriverKitSessionScheduler() {
     }
 }
 
-kern_return_t DriverKitSessionScheduler::Prepare(::ASFWDriver& service,
+kern_return_t DriverKitTimerScheduler::Prepare(::ASFWDriver& service,
                                                  OSSharedPtr<IODispatchQueue> workQueue) {
     if (!workQueue) {
         return kIOReturnNotReady;
@@ -71,7 +71,7 @@ kern_return_t DriverKitSessionScheduler::Prepare(::ASFWDriver& service,
     timer_ = OSSharedPtr(rawTimer, OSNoRetain);
 
     OSAction* rawAction = nullptr;
-    kr = service.CreateActionSBP2SessionTimerFired(0, &rawAction);
+    kr = service.CreateActionTimerSchedulerFired(0, &rawAction);
     if (kr != kIOReturnSuccess || rawAction == nullptr) {
         timer_.reset();
         workQueue_.reset();
@@ -96,7 +96,7 @@ kern_return_t DriverKitSessionScheduler::Prepare(::ASFWDriver& service,
 #endif
 }
 
-void DriverKitSessionScheduler::Reset() noexcept {
+void DriverKitTimerScheduler::Reset() noexcept {
     {
         IOLockGuard guard(lock_);
         pending_.clear();
@@ -110,32 +110,32 @@ void DriverKitSessionScheduler::Reset() noexcept {
     workQueue_.reset();
 }
 
-SchedulerToken DriverKitSessionScheduler::ScheduleAfter(uint64_t delayNs,
+TimerToken DriverKitTimerScheduler::ScheduleAfter(uint64_t delayNs,
                                                         std::function<void()> fn) {
     if (!fn) {
-        return kInvalidSchedulerToken;
+        return kInvalidTimerToken;
     }
 
 #ifdef ASFW_HOST_TEST
     if (!workQueue_) {
         fn();
-        return kInvalidSchedulerToken;
+        return kInvalidTimerToken;
     }
-    const SchedulerToken token = nextToken_++;
+    const TimerToken token = nextToken_++;
     workQueue_->DispatchAsyncAfter(delayNs, std::move(fn));
     return token;
 #else
     if (!timer_) {
-        return kInvalidSchedulerToken;
+        return kInvalidTimerToken;
     }
 
-    SchedulerToken token;
+    TimerToken token;
     uint64_t earliest;
     OSSharedPtr<IOTimerDispatchSource> timer;
     {
         IOLockGuard guard(lock_);
         token = nextToken_++;
-        if (token == kInvalidSchedulerToken) {
+        if (token == kInvalidTimerToken) {
             token = nextToken_++;
         }
         pending_.emplace(token, PendingCallback{
@@ -150,8 +150,8 @@ SchedulerToken DriverKitSessionScheduler::ScheduleAfter(uint64_t delayNs,
 #endif
 }
 
-void DriverKitSessionScheduler::Cancel(SchedulerToken token) {
-    if (token == kInvalidSchedulerToken) {
+void DriverKitTimerScheduler::Cancel(TimerToken token) {
+    if (token == kInvalidTimerToken) {
         return;
     }
 
@@ -171,7 +171,7 @@ void DriverKitSessionScheduler::Cancel(SchedulerToken token) {
     }
 }
 
-void DriverKitSessionScheduler::HandleTimerFired() noexcept {
+void DriverKitTimerScheduler::HandleTimerFired() noexcept {
     std::vector<std::function<void()>> due;
     uint64_t earliest = 0;
     OSSharedPtr<IOTimerDispatchSource> timer;
@@ -199,7 +199,7 @@ void DriverKitSessionScheduler::HandleTimerFired() noexcept {
     }
 }
 
-uint64_t DriverKitSessionScheduler::EarliestDeadlineLocked() const noexcept {
+uint64_t DriverKitTimerScheduler::EarliestDeadlineLocked() const noexcept {
     if (pending_.empty()) {
         return 0;
     }
@@ -211,7 +211,7 @@ uint64_t DriverKitSessionScheduler::EarliestDeadlineLocked() const noexcept {
     return next == pending_.end() ? 0 : next->second.deadlineTicks;
 }
 
-void DriverKitSessionScheduler::ArmTimerUnlocked(IOTimerDispatchSource* timer,
+void DriverKitTimerScheduler::ArmTimerUnlocked(IOTimerDispatchSource* timer,
                                                  uint64_t deadlineTicks) noexcept {
 #ifdef ASFW_HOST_TEST
     (void)timer;
@@ -229,7 +229,7 @@ void DriverKitSessionScheduler::ArmTimerUnlocked(IOTimerDispatchSource* timer,
 #endif
 }
 
-uint64_t DriverKitSessionScheduler::DeadlineTicksFromNow(uint64_t delayNs) const noexcept {
+uint64_t DriverKitTimerScheduler::DeadlineTicksFromNow(uint64_t delayNs) const noexcept {
     (void)ASFW::Timing::initializeHostTimebase();
     uint64_t deltaTicks = ASFW::Timing::nanosToHostTicks(delayNs);
     if (deltaTicks == 0) {
@@ -238,4 +238,4 @@ uint64_t DriverKitSessionScheduler::DeadlineTicksFromNow(uint64_t delayNs) const
     return mach_absolute_time() + deltaTicks;
 }
 
-} // namespace ASFW::Protocols::SBP2
+} // namespace ASFW::Scheduling
