@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) and other ai agents 
 
 ## Project Overview
 
-ASFW is a macOS DriverKit-based FireWire (IEEE 1394) driver restoring FireWire functionality removed in macOS Tahoe (26). It uses PCIDriverKit for user-space OHCI controller access and AudioDriverKit for CoreAudio integration. TODO: MIDIDriverKit and SCSIControllerDriverKit. 
+ASFW is a macOS DriverKit-based FireWire (IEEE 1394) driver restoring FireWire functionality removed in macOS Tahoe (26). It uses PCIDriverKit for user-space OHCI controller access, AudioDriverKit for CoreAudio integration, and SCSIControllerDriverKit for SBP-2 mass storage (SCSI HBA, in all builds since v0.3.0). TODO: MIDIDriverKit.
 
 Two components:
 - **ASFWDriver/** — C++23 DriverKit driver extension (dext)
@@ -99,6 +99,7 @@ CoreAudio / HAL
 | `Discovery/` | FireWire device + unit enumeration (`FWDevice`, `FWUnit`) |
 | `Controller/` | Controller state machine and lifecycle |
 | `Protocols/` | `AVC` (FCP, Music Subunit, stream formats, PCR), `SBP2`, `Ports` (register/PCR IO) |
+| `SCSIController/` | SCSI HBA (`IOUserSCSIParallelInterfaceController`): `ASFWSCSIController`, SBP-2 target bridge/nub publication, readiness gating |
 
 **Audio (AudioDriverKit stack)** — owns content format + CIP/61883 framing; must not reach into OHCI/transport mechanics:
 | Directory | Responsibility |
@@ -268,11 +269,9 @@ template the FireWire side.
 
 **Commit and git history.** Keep history traceable. If changes are getting large, warn the user that it is better to commit the current work first; otherwise unrelated logic shifts can become hard to repair or reason about.
 
-**DriverKit Architecture on Apple Silicon (arm64e requirement).** Xcode's default settings or `build.sh` might sometimes build the `ASFWDriver` target as standard `arm64`. However, on Apple Silicon, macOS strictly requires all System Extensions (DriverKit dexts) to be built for **`arm64e`** (Pointer Authentication ABI). If the driver is built as `arm64`, it will lack an `LC_MAIN` entry point and `kernelmanagerd` will instantly reject it on hardware attach with `OS_REASON_EXEC` / `ENOEXEC` (Exec format error). Always ensure `ARCHS = "x86_64 arm64e";` is explicitly set in the DriverKit target's `project.pbxproj` build settings!
+**DriverKit Architecture on Apple Silicon (arm64e requirement).** Xcode's default settings or `build.sh` might sometimes build the `ASFWDriver` target as standard `arm64`. However, on Apple Silicon, macOS strictly requires all System Extensions (DriverKit dexts) to be built for **`arm64e`** (Pointer Authentication ABI). If the driver is built as `arm64`, it will lack an `LC_MAIN` entry point and `kernelmanagerd` will instantly reject it on hardware attach with `OS_REASON_EXEC` / `ENOEXEC` (Exec format error). Always ensure `ARCHS: x86_64 arm64e` is explicitly set for the DriverKit target in `project.yml` (the pbxproj is generated and gitignored)!
 
 **Code Signing and Hardened Runtime.** If you use Ad-Hoc signing (`CODE_SIGN_IDENTITY="-"`) for local testing (with `amfi_get_out_of_my_way=1` in boot-args), you MUST ensure that `ENABLE_HARDENED_RUNTIME = NO` for the DriverKit target. If Hardened Runtime is enabled with an ad-hoc signature, `amfid` will kill the dext on launch (`OS_REASON_EXEC`).
-
-**DriverKit Architecture on Apple Silicon (arm64e requirement).** Xcode's default settings or `build.sh` might sometimes build the `ASFWDriver` target as standard `arm64`. However, on Apple Silicon, macOS strictly requires all System Extensions (DriverKit dexts) to be built for **`arm64e`** (Pointer Authentication ABI). If the driver is built as `arm64`, it will lack an `LC_MAIN` entry point and `kernelmanagerd` will instantly reject it on hardware attach with `OS_REASON_EXEC` / `ENOEXEC` (Exec format error). Always ensure `ARCHS = "x86_64 arm64e";` is explicitly set in the DriverKit target's `project.pbxproj` build settings!
 
 ## Code Patterns
 

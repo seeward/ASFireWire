@@ -210,6 +210,7 @@ This project is in active development. The following features are implemented:
 - Host-controlled sample-rate switching (44.1 kHz / 48 kHz) driven from the device's advertised clock capabilities, including live rate changes on CoreAudio aggregate devices clocked by the FireWire interface
 - DICE per-channel naming (device nickname plus TX/RX channel labels) surfaced to CoreAudio
 - DV (IEC 61883-2) capture from MiniDV camcorders to raw `.dv` files, with AV/C tape transport control (play/stop/rewind) from the app. DV capture and audio receive are mutually exclusive — both use IR context 0
+- SBP-2 mass storage through the built-in SCSI HBA (`ASFWSCSIControllerService`), exposing FireWire scanners and disks as regular SCSI devices (see [SCSI HBA](#scsi-hba-sbp-2-scannersdisks))
 
 ## Driver initialization (high level)
 
@@ -386,6 +387,10 @@ The driver is organized into functional subsystems:
 - **Protocols/SBP2/** — SBP-2 (storage) protocol: command ORBs, management ORBs, address space management, page tables.
 - **Protocols/Ports/** — Protocol port abstractions (FireWire bus port, RX port, register I/O).
 
+**SCSI HBA:**
+
+- **SCSIController/** — SCSI host adapter (`IOUserSCSIParallelInterfaceController`): controller service, SBP-2 target bridge and nub publication, target readiness gating.
+
 **Supporting subsystems:**
 
 - **DeviceProfiles/** — Device identity and audio profile registry. Vendor-specific profiles for Focusrite, Apogee, Alesis, PreSonus, and Midas.
@@ -541,8 +546,8 @@ You can reach me via:
 
 ## References
 
-- [Apple DriverKit Documentation](https://developer.apple.com/documentation/driverkit) - NB. Oficcial documentation on Apple Developer website is incomplete and sometimes outdated. Refer to header files in DriverKit SDK for more accurate information.
-- [Apple PCIDriverKit Documentation](https://developer.apple.com/documentation/pcidriverkit) s- Same as above
+- [Apple DriverKit Documentation](https://developer.apple.com/documentation/driverkit) - NB. Official documentation on Apple Developer website is incomplete and sometimes outdated. Refer to header files in DriverKit SDK for more accurate information.
+- [Apple PCIDriverKit Documentation](https://developer.apple.com/documentation/pcidriverkit) — Same as above
 - [System Extensions and DriverKit](https://developer.apple.com/videos/play/wwdc2019/702/) — WWDC 2019 session introducing DriverKit and system extensions.
 - [Modernize PCI and SCSI drivers with DriverKit](https://developer.apple.com/videos/play/wwdc2020/10670/) — Small but informative WWDC 2020 session about modernizing PCI and SCSI drivers.
 - [IEEE 1394-2008 Standard](https://standards.ieee.org/ieee/1394/4377/) — Latest edition. This is most complete reference about FireWire 
