@@ -166,6 +166,11 @@ add_core_test(RootSelectionCoordinatorTests
 )
 target_link_libraries(RootSelectionCoordinatorTests PRIVATE GTest::gmock)
 
+# Root Claim Retry Budget Tests (header-only policy)
+add_core_test(RootClaimRetryBudgetTests
+    RootClaimRetryBudgetTests.cpp
+)
+
 # Gap Policy Coordinator Tests
 add_core_test(GapPolicyCoordinatorTests
     GapPolicyCoordinatorTests.cpp

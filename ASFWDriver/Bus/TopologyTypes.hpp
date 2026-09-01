@@ -106,6 +106,10 @@ struct TopologyBuildError {
 };
 
 static constexpr uint8_t kInvalidPhysicalId = 0xFF;
+
+/// Physical IDs run 0..62; 63 (0x3F) is the broadcast/"no node" encoding, so a
+/// per-node table indexed by physical ID needs exactly 63 entries.
+static constexpr uint8_t kMaxPhysicalIds = 63;
 static constexpr uint8_t kMaxFireWireNodes = 63;
 static constexpr uint8_t kMaxPhyPorts = 16;
 
@@ -380,6 +384,44 @@ struct SelfIDSequenceEnumerator {
         return std::make_pair(result_ptr, count);
     }
 };
+
+/**
+ * @brief Hash the parts of a topology that must stay fixed for a retry budget.
+ *
+ * Deliberately excludes @ref TopologySnapshot::rootNodeId and the generation:
+ * forcing a new root or taking a bus reset must NOT refill the budget, or a
+ * node that keeps re-asserting root-hold-off would be chased forever. This is
+ * the ASFW analogue of Linux's `card->bm_retries`, which is likewise reset on
+ * topology change rather than on generation change (core-card.c:493).
+ */
+[[nodiscard]] inline uint32_t StableTopologyKey(const TopologySnapshot& topo) noexcept {
+    uint32_t h = 2166136261u;
+    auto mix = [&h](uint32_t v) noexcept {
+        h ^= v;
+        h *= 16777619u;
+    };
+
+    mix(topo.nodeCount);
+    mix(topo.localNodeId);
+    mix(topo.irmNodeId);
+
+    for (const auto& node : topo.physical.nodes) {
+        mix(node.physicalId);
+        mix(node.portCount);
+        mix(node.linkActive ? 1u : 0u);
+        mix(node.contender ? 1u : 0u);
+        for (uint8_t p = 0; p < node.portCount; ++p) {
+            const auto& link = node.links[p];
+            if (link.connected) {
+                mix((static_cast<uint32_t>(node.physicalId) << 16) |
+                    (static_cast<uint32_t>(p) << 8) |
+                    static_cast<uint32_t>(link.remoteNodeId));
+            }
+        }
+    }
+
+    return h;
+}
 
 } // namespace ASFW::Driver
 

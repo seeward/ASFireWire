@@ -248,3 +248,66 @@ TEST_F(RootSelectionCoordinatorTests, StableTopologyChange_ResetsRetryCounter) {
     EXPECT_EQ(coordinator_.Snapshot().lastDecision, RootSelectionDecision::SelectLocalRoot);
     EXPECT_EQ(coordinator_.Snapshot().attemptsThisTopology, 1);
 }
+
+// The Apple AssignCycleMaster phase in ControllerCore shares this key to bound
+// its root-claim retries. Both users depend on the same two properties, so pin
+// them here: a forced root must not refill the budget (otherwise a device that
+// re-asserts root-hold-off is chased forever, since every claim produces a new
+// generation), while a real topology change must.
+TEST(StableTopologyKeyTests, ForcingANewRootDoesNotRefillTheRetryBudget) {
+    ASFW::Driver::TopologySnapshot topo{};
+    topo.nodeCount = 2;
+    topo.localNodeId = 0;
+    topo.irmNodeId = 0;
+    topo.rootNodeId = 1;
+    topo.physical.nodes.resize(2);
+    topo.physical.nodes[0].physicalId = 0;
+    topo.physical.nodes[0].linkActive = true;
+    topo.physical.nodes[0].contender = true;
+    topo.physical.nodes[1].physicalId = 1;
+    topo.physical.nodes[1].linkActive = true;
+
+    const uint32_t before = ASFW::Driver::StableTopologyKey(topo);
+
+    topo.rootNodeId = 0;
+    topo.generation = 42;
+    EXPECT_EQ(ASFW::Driver::StableTopologyKey(topo), before);
+}
+
+TEST(StableTopologyKeyTests, TopologyChangeRefillsTheRetryBudget) {
+    ASFW::Driver::TopologySnapshot topo{};
+    topo.nodeCount = 2;
+    topo.localNodeId = 0;
+    topo.irmNodeId = 0;
+    topo.physical.nodes.resize(2);
+    topo.physical.nodes[0].physicalId = 0;
+    topo.physical.nodes[0].linkActive = true;
+    topo.physical.nodes[0].contender = true;
+    topo.physical.nodes[1].physicalId = 1;
+    topo.physical.nodes[1].linkActive = true;
+
+    const uint32_t before = ASFW::Driver::StableTopologyKey(topo);
+
+    topo.nodeCount = 3;
+    topo.physical.nodes.resize(3);
+    topo.physical.nodes[2].physicalId = 2;
+    topo.physical.nodes[2].linkActive = true;
+
+    EXPECT_NE(ASFW::Driver::StableTopologyKey(topo), before);
+}
+
+TEST(StableTopologyKeyTests, ContenderLossChangesTheKey) {
+    ASFW::Driver::TopologySnapshot topo{};
+    topo.nodeCount = 2;
+    topo.physical.nodes.resize(2);
+    topo.physical.nodes[0].physicalId = 0;
+    topo.physical.nodes[0].linkActive = true;
+    topo.physical.nodes[0].contender = true;
+    topo.physical.nodes[1].physicalId = 1;
+    topo.physical.nodes[1].linkActive = true;
+
+    const uint32_t before = ASFW::Driver::StableTopologyKey(topo);
+
+    topo.physical.nodes[0].contender = false;
+    EXPECT_NE(ASFW::Driver::StableTopologyKey(topo), before);
+}

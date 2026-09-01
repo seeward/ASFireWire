@@ -196,35 +196,7 @@ uint32_t RootSelectionCoordinator::StableTopologyKey(const RootSelectionInputs& 
     if (inputs.topology == nullptr) {
         return 0;
     }
-
-    const auto& topo = *inputs.topology;
-
-    uint32_t h = 2166136261u;
-    auto mix = [&h](uint32_t v) {
-        h ^= v;
-        h *= 16777619u;
-    };
-
-    mix(topo.nodeCount);
-    mix(topo.localNodeId);
-    mix(topo.irmNodeId);
-
-    for (const auto& node : topo.physical.nodes) {
-        mix(node.physicalId);
-        mix(node.portCount);
-        mix(node.linkActive ? 1u : 0u);
-        mix(node.contender ? 1u : 0u);
-        for (uint8_t p = 0; p < node.portCount; ++p) {
-            const auto& link = node.links[p];
-            if (link.connected) {
-                mix((static_cast<uint32_t>(node.physicalId) << 16) |
-                    (static_cast<uint32_t>(p) << 8) |
-                    static_cast<uint32_t>(link.remoteNodeId));
-            }
-        }
-    }
-
-    return h;
+    return ASFW::Driver::StableTopologyKey(*inputs.topology);
 }
 
 std::vector<RootCandidate>
