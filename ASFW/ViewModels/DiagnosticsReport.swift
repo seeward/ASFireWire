@@ -30,7 +30,7 @@ final class DiagnosticsReport {
     // NOTE: Swift's String(format:) does NOT support %s safely — it expects a C char*,
     // but Swift String/[CChar] bridge to objects, so %s runs strlen on an object pointer
     // and crashes (EXC_BAD_ACCESS). All column alignment is done with Swift padding instead.
-    static func pad(_ s: String, _ width: Int) -> String {
+    nonisolated static func pad(_ s: String, _ width: Int) -> String {
         s.count >= width ? s : s.padding(toLength: width, withPad: " ", startingAt: 0)
     }
 
@@ -115,7 +115,7 @@ enum DiagFormat {
     }
 
     // Extended speed label incl. S1600/S3200 (topology tree edges).
-    static func speedExt(_ s: UInt32) -> String {
+    nonisolated static func speedExt(_ s: UInt32) -> String {
         switch s {
         case ASFWDiagSpeedS100.rawValue: return "S100"
         case ASFWDiagSpeedS200.rawValue: return "S200"

@@ -134,7 +134,10 @@ nonisolated struct SaffireControlSurface: Equatable, Sendable {
 /// ABI and intentionally does not mirror a register map.
 /// App-side ABI names for the driver-owned Saffire control surface. These are
 /// semantic IDs, not vendor application-section offsets.
-enum SaffireControlID {
+/// Wire constants. `nonisolated` because the module defaults to MainActor
+/// isolation (SWIFT_DEFAULT_ACTOR_ISOLATION), which would otherwise confine a
+/// table of UInt32 literals to the main actor and drag every reader onto it.
+nonisolated enum SaffireControlID {
     static let micInputMode1: UInt32 = 0x5350_0001
     static let micInputMode2: UInt32 = 0x5350_0002
     static let lineInputLevel34: UInt32 = 0x5350_0003

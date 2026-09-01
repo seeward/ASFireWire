@@ -259,12 +259,12 @@ public enum BeBoBShellTelemetryParser {
         return StreamRow(severity: severity, label: label, values: values)
     }
 
-    private static func isValueToken(_ token: String) -> Bool {
+    nonisolated private static func isValueToken(_ token: String) -> Bool {
         if token == BeBoBStreamEndpoint.av.rawValue { return true }
         return isNumeric(token)
     }
 
-    private static func isNumeric(_ token: String) -> Bool {
+    nonisolated private static func isNumeric(_ token: String) -> Bool {
         var body = Substring(token)
         if body.first == "-" { body = body.dropFirst() }
         return !body.isEmpty && body.allSatisfy(\.isNumber)

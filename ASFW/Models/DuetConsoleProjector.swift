@@ -177,5 +177,5 @@ nonisolated enum DuetConsoleProjector {
 }
 
 private extension Collection {
-    subscript(safe index: Index) -> Element? { indices.contains(index) ? self[index] : nil }
+    nonisolated subscript(safe index: Index) -> Element? { indices.contains(index) ? self[index] : nil }
 }
