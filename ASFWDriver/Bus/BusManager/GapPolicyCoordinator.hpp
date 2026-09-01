@@ -91,6 +91,7 @@ struct GapPolicyInputs {
 
     bool localIsBM{false};
     bool localIsIRM{false};
+    bool appleSimpleBusManager{false};
 
     bool irmFallbackGateOpen{false};
     bool irmFallbackNoBMDetected{false};

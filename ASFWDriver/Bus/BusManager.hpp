@@ -73,9 +73,9 @@ public:
     };
 
     struct Config {
-        RootPolicy rootPolicy = RootPolicy::Delegate;
+        RootPolicy rootPolicy = RootPolicy::Auto;
         uint8_t forcedRootNodeID = 0xFF;
-        bool delegateCycleMaster = true;
+        bool delegateCycleMaster = false;
         bool enableGapOptimization = true;
         uint8_t forcedGapCount = 0;
         bool forcedGapFlag = false;
@@ -93,9 +93,47 @@ public:
     const Config& GetConfig() const { return config_; }
     [[nodiscard]] static const char* GapDecisionReasonString(GapDecisionReason reason) noexcept;
 
+    /**
+     * @brief Per-generation bus-scan evidence consumed by @ref AssignCycleMaster.
+     *
+     * Mirrors the three facts Apple's IOFireWireController carries out of a bus
+     * scan into AssignCycleMaster()/finishedBusScan(): the per-node scan record
+     * (`fScans[i]`), its IRM verdict (`fIRMisBad`), and whether any remote node
+     * advertised BMC (`fBusMgr`).
+     */
+    struct BusScanEvidence {
+        /// Indexed by physical ID: node failed empirical IRM read/lock
+        /// verification. Apple: `fScans[i]->fIRMisBad`
+        /// (IOFireWireController.cpp:2691, :2785).
+        std::vector<bool> badIRMFlags;
+
+        /// Indexed by physical ID: node's Config ROM was read this generation.
+        /// Apple requires a scan record before a node may be handed root
+        /// (IOFireWireController.cpp:2372 `if( fScans[i] )`). Leave empty when
+        /// no scan evidence exists, and no scan filtering is applied.
+        std::vector<bool> scanned;
+
+        /// Apple `fBusMgr`: a remote node advertised BMC in its bus info block
+        /// (IOFireWireController.cpp:2972-2974). Not proof of BUS_MANAGER_ID
+        /// ownership — it only means a better candidate than us exists.
+        bool remoteBusManagerCapable{false};
+    };
+
     [[nodiscard]] std::optional<PhyConfigCommand> AssignCycleMaster(
         const TopologySnapshot& topology,
-        const std::vector<bool>& badIRMFlags);
+        const BusScanEvidence& evidence);
+
+    /**
+     * @brief Are the validated packet-0 Self-ID gap counts inconsistent?
+     *
+     * Unlike @ref EvaluateGapPolicy this carries no authority gate, because
+     * Apple's mismatch detection in processSelfIDs()
+     * (IOFireWireController.cpp:2139-2151) runs on every node before
+     * bus-manager or IRM policy is resolved. The corrective action a non-IRM
+     * node may take from it is limited to Apple's own: broadcast a PHY config
+     * packet carrying gap 0x3F, without a bus reset.
+     */
+    [[nodiscard]] static bool HasGapCountMismatch(const std::vector<uint32_t>& selfIDs);
 
     /**
      * @brief Decide whether the current validated topology needs a gap retool reset.

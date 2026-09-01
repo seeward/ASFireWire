@@ -6,15 +6,14 @@
 namespace ASFW::Driver {
 
 // Host cycle-master bring-up configuration. Linux firewire_ohci and Apple
-// IOFireWireController both make the local PHY contender-capable during init,
-// while root delegation remains policy-controlled by BusManager.
+// IOFireWireController both make the local PHY contender-capable during init.
+// Apple's IOFireWireController enables root delegation only when its provider
+// carries the explicit "DelegateCycleMaster" property; mirror that opt-in here.
 inline void ApplyBringupOverrides(ControllerConfig& config, BusManager* busManager) {
     config.allowCycleMasterEligibility = true;
 
     if (busManager != nullptr) {
-        // When experimental flag is set, disable delegation so host keeps
-        // root/cycle-master. Otherwise use default delegation policy.
-        busManager->SetDelegateMode(!config.experimentalHostCycleMasterBringup);
+        busManager->SetDelegateMode(config.delegateCycleMaster);
     }
 }
 

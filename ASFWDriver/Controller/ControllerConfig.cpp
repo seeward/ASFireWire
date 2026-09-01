@@ -9,7 +9,7 @@ ControllerConfig ControllerConfig::MakeDefault() {
     config.vendor.vendorName = "Unknown";
     config.localGuid = 0;
     config.enableVerboseLogging = false;
-    config.experimentalHostCycleMasterBringup = false;
+    config.delegateCycleMaster = false;
     config.allowCycleMasterEligibility = false;
     // Role/BM policy is no longer part of ControllerConfig — it lives in the
     // separately-owned, runtime-mutable RolePolicy (see ControllerConfig.hpp).

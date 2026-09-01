@@ -43,40 +43,21 @@ TopologyNodeRecord MakeNode(const uint8_t physicalId, const bool contender, cons
 
 } // namespace
 
-TEST(BusManagerGapOptimizationTests, ControllerConfigDefaultsPreserveDelegatedMode) {
+TEST(BusManagerGapOptimizationTests, ControllerConfigDefaultsKeepCycleMasterDelegationOptIn) {
+    // IOFireWireController only delegates when its provider carries the
+    // "DelegateCycleMaster" property (IOFireWireController.cpp:1047), so the
+    // default posture is to keep root/cycle-master duty local.
     ControllerConfig config{};
     EXPECT_FALSE(config.allowCycleMasterEligibility);
-    EXPECT_FALSE(config.experimentalHostCycleMasterBringup);
+    EXPECT_FALSE(config.delegateCycleMaster);
 
     const ControllerConfig defaultConfig = ControllerConfig::MakeDefault();
     EXPECT_FALSE(defaultConfig.allowCycleMasterEligibility);
-    EXPECT_FALSE(defaultConfig.experimentalHostCycleMasterBringup);
+    EXPECT_FALSE(defaultConfig.delegateCycleMaster);
 }
 
-TEST(BusManagerGapOptimizationTests, DefaultBringupDelegatesRootToPeerContender) {
-    BusManager busManager;
-
-    TopologySnapshot topology{};
-    topology.localNodeId = 1U;
-    topology.rootNodeId = 1U;
-    topology.irmNodeId = 1U;
-    topology.physical.nodes = {
-        MakeNode(0U, true),
-        MakeNode(1U, true),
-    };
-
-    const auto command = busManager.AssignCycleMaster(topology, {});
-    ASSERT_TRUE(command.has_value());
-    ASSERT_TRUE(command->forceRootNodeID.has_value());
-    ASSERT_TRUE(command->setContender.has_value());
-    EXPECT_EQ(*command->forceRootNodeID, 0U);
-    EXPECT_FALSE(*command->setContender);
-}
-
-TEST(BusManagerGapOptimizationTests, ExperimentalHostCycleMasterBringupDisablesDelegation) {
+TEST(BusManagerGapOptimizationTests, DefaultBringupDoesNotDelegateRootToPeerContender) {
     ControllerConfig config{};
-    config.experimentalHostCycleMasterBringup = true;
-
     BusManager busManager;
     ApplyBringupOverrides(config, &busManager);
 
@@ -92,8 +73,36 @@ TEST(BusManagerGapOptimizationTests, ExperimentalHostCycleMasterBringupDisablesD
         MakeNode(1U, true),
     };
 
-    const auto command = busManager.AssignCycleMaster(topology, {});
+    // Local is already root and IRM: Apple's simple-BM phase has nothing to do,
+    // and the delegation heuristic is gated off.
+    const auto command = busManager.AssignCycleMaster(topology, BusManager::BusScanEvidence{});
     EXPECT_FALSE(command.has_value());
+}
+
+TEST(BusManagerGapOptimizationTests, OptedInDelegationHandsRootToPeerContender) {
+    ControllerConfig config{};
+    config.delegateCycleMaster = true;
+
+    BusManager busManager;
+    ApplyBringupOverrides(config, &busManager);
+
+    EXPECT_TRUE(busManager.GetConfig().delegateCycleMaster);
+
+    TopologySnapshot topology{};
+    topology.localNodeId = 1U;
+    topology.rootNodeId = 1U;
+    topology.irmNodeId = 1U;
+    topology.physical.nodes = {
+        MakeNode(0U, true),
+        MakeNode(1U, true),
+    };
+
+    const auto command = busManager.AssignCycleMaster(topology, BusManager::BusScanEvidence{});
+    ASSERT_TRUE(command.has_value());
+    ASSERT_TRUE(command->forceRootNodeID.has_value());
+    ASSERT_TRUE(command->setContender.has_value());
+    EXPECT_EQ(*command->forceRootNodeID, 0U);
+    EXPECT_FALSE(*command->setContender);
 }
 
 TEST(BusManagerGapOptimizationTests, LocalIRMRemoteRootWithoutPeerContenderForcesLocalRoot) {
@@ -109,13 +118,118 @@ TEST(BusManagerGapOptimizationTests, LocalIRMRemoteRootWithoutPeerContenderForce
         MakeNode(2U, false),
     };
 
-    const auto command = busManager.AssignCycleMaster(topology, {});
+    const auto command = busManager.AssignCycleMaster(topology, BusManager::BusScanEvidence{});
 
     ASSERT_TRUE(command.has_value());
     ASSERT_TRUE(command->forceRootNodeID.has_value());
     ASSERT_TRUE(command->setContender.has_value());
     EXPECT_EQ(*command->forceRootNodeID, 0U);
     EXPECT_TRUE(*command->setContender);
+}
+
+TEST(BusManagerGapOptimizationTests, SimpleBusManagerClaimsRootEvenWhenAPeerContenderExists) {
+    // IOFireWireController::finishedBusScan() (IOFireWireController.cpp:3262-3362)
+    // runs no contender survey: once it knows local is IRM and no remote node
+    // advertises BMC, it asserts local root-hold-off and resets. A lower-numbered
+    // peer contender must not suppress that, or a bus whose root is a
+    // non-contender never acquires a cycle master.
+    BusManager busManager;
+
+    TopologySnapshot topology{};
+    topology.localNodeId = 1U;
+    topology.rootNodeId = 2U;
+    topology.irmNodeId = 1U;
+    topology.physical.nodes = {
+        MakeNode(0U, true),
+        MakeNode(1U, true),
+        MakeNode(2U, false),
+    };
+
+    const auto command = busManager.AssignCycleMaster(topology, BusManager::BusScanEvidence{});
+
+    ASSERT_TRUE(command.has_value());
+    ASSERT_TRUE(command->forceRootNodeID.has_value());
+    ASSERT_TRUE(command->setContender.has_value());
+    EXPECT_EQ(*command->forceRootNodeID, 1U);
+    EXPECT_TRUE(*command->setContender);
+}
+
+TEST(BusManagerGapOptimizationTests, UnscannedContenderIsNotARootCandidate) {
+    // Apple only treats a node as a root candidate when it holds a scan record
+    // for it — `if( fScans[i] )` at IOFireWireController.cpp:2372. Node 0 below
+    // is a Self-ID contender whose Config ROM never read, so delegation must not
+    // hand it the bus even though delegation is enabled.
+    BusManager busManager;
+    busManager.SetDelegateMode(true);
+
+    TopologySnapshot topology{};
+    topology.localNodeId = 1U;
+    topology.rootNodeId = 1U;
+    topology.irmNodeId = 1U;
+    topology.physical.nodes = {
+        MakeNode(0U, true),
+        MakeNode(1U, true),
+    };
+
+    BusManager::BusScanEvidence evidence{};
+    evidence.scanned.assign(ASFW::Driver::kMaxPhysicalIds, false);
+    evidence.scanned[1U] = true; // local scanned, node 0 never answered
+
+    EXPECT_FALSE(busManager.AssignCycleMaster(topology, evidence).has_value());
+}
+
+TEST(BusManagerGapOptimizationTests, ScannedContenderRemainsARootCandidate) {
+    BusManager busManager;
+    busManager.SetDelegateMode(true);
+
+    TopologySnapshot topology{};
+    topology.localNodeId = 1U;
+    topology.rootNodeId = 1U;
+    topology.irmNodeId = 1U;
+    topology.physical.nodes = {
+        MakeNode(0U, true),
+        MakeNode(1U, true),
+    };
+
+    BusManager::BusScanEvidence evidence{};
+    evidence.scanned.assign(ASFW::Driver::kMaxPhysicalIds, false);
+    evidence.scanned[0U] = true;
+    evidence.scanned[1U] = true;
+
+    const auto command = busManager.AssignCycleMaster(topology, evidence);
+    ASSERT_TRUE(command.has_value());
+    ASSERT_TRUE(command->forceRootNodeID.has_value());
+    EXPECT_EQ(*command->forceRootNodeID, 0U);
+}
+
+TEST(BusManagerGapOptimizationTests, GapMismatchIsVisibleWithoutAnyAuthorityGate) {
+    // HasGapCountMismatch() is what lets a node with no retool authority still
+    // perform Apple's reset-free gap-63 correction (IOFireWireController.cpp:2139-2151).
+    EXPECT_TRUE(BusManager::HasGapCountMismatch(
+        {MakeBaseSelfID(0U, 10U), MakeBaseSelfID(1U, 20U)}));
+    EXPECT_FALSE(BusManager::HasGapCountMismatch(
+        {MakeBaseSelfID(0U, 10U), MakeBaseSelfID(1U, 10U)}));
+    EXPECT_FALSE(BusManager::HasGapCountMismatch({}));
+}
+
+TEST(BusManagerGapOptimizationTests, RemoteBusManagerCapabilitySuppressesSimpleBusManagerRootClaim) {
+    // Apple gates the whole simple-BM block on !fBusMgr, where fBusMgr means
+    // "some remote node advertised BMC in its bus info block"
+    // (IOFireWireController.cpp:2972-2974). A BM-capable peer owns bus policy.
+    BusManager busManager;
+
+    TopologySnapshot topology{};
+    topology.localNodeId = 1U;
+    topology.rootNodeId = 2U;
+    topology.irmNodeId = 1U;
+    topology.physical.nodes = {
+        MakeNode(0U, true),
+        MakeNode(1U, true),
+        MakeNode(2U, false),
+    };
+
+    const auto command = busManager.AssignCycleMaster(topology, BusManager::BusScanEvidence{.remoteBusManagerCapable = true});
+    EXPECT_FALSE(command.has_value());
 }
 
 TEST(BusManagerGapOptimizationTests, InconsistentObservedBaseGapsForceConservative63) {

@@ -14,6 +14,7 @@
 #include "../Bus/BusManager/CyclePolicyCoordinator.hpp"
 #include "../Bus/BusManager/RootSelectionCoordinator.hpp"
 #include "../Bus/BusManager/GapPolicyCoordinator.hpp"
+#include "../Bus/BusManager/RootClaimRetryBudget.hpp"
 #include "../Bus/BusManager/PowerLinkPolicyCoordinator.hpp"
 #include "../Bus/IRM/IRMBootstrapCoordinator.hpp"
 #include "../Discovery/DiscoveryTypes.hpp" // For Discovery::Generation
@@ -285,7 +286,8 @@ class ControllerCore final : private Role::IPhyConfigReset,
     void EvaluateRootSelectionPolicy() noexcept;
     void EvaluateGapPolicy() noexcept;
     void EvaluatePowerLinkPolicy() noexcept;
-    void EvaluateActivePolicies() noexcept;
+    void MaybeClearSoloRootHoldOff(const TopologySnapshot& topology) noexcept;
+    [[nodiscard]] bool EvaluateActivePolicies() noexcept;
 
     // Async completion callbacks
     void OnRemoteCmstrComplete(uint32_t generation, uint8_t targetNode,
@@ -299,7 +301,7 @@ class ControllerCore final : private Role::IPhyConfigReset,
     void PublishRootCapabilityEvidence();
     void OnDiscoveryScanComplete(Discovery::Generation gen,
                                  const std::vector<Discovery::ConfigROM>& roms,
-                                 bool hadBusyNodes) const;
+                                 bool hadBusyNodes);
     void ForceRootAndReset(uint8_t targetRoot, Role::RoleResetFlavor flavor, uint8_t gapCount,
                            uint32_t generation) override;
     void EnableRemoteCycleMaster(uint8_t rootNodeId, uint32_t generation) override;
@@ -383,6 +385,26 @@ class ControllerCore final : private Role::IPhyConfigReset,
     std::unique_ptr<Bus::GapPolicyCoordinator> gapPolicy_;
     std::unique_ptr<Bus::PowerLinkPolicyCoordinator> powerLinkPolicy_;
     std::shared_ptr<Bus::SpeedMapService> speedMapService_;
+
+    // Apple policy becomes actionable only after the generation's ROM/IRM scan
+    // has completed. fBusMgr in IOFireWireFamily means that at least one remote
+    // node advertised BMC, not that BUS_MANAGER_ID ownership was proven.
+    bool appleBusScanComplete_{false};
+    bool appleRemoteBusManagerCapable_{false};
+
+    // Indexed by physical ID: this generation's Config ROM scan reached the node.
+    // Apple's per-node `fScans[i]` record; empty until the scan completes.
+    std::vector<bool> appleScannedNodes_;
+
+    // Retry budget for the Apple AssignCycleMaster phase; see the header for why
+    // this follows Linux's per-topology bound rather than Apple's unbounded one.
+    Bus::RootClaimRetryBudget appleRootClaimBudget_{};
+
+    // Apple clears root-hold-off when the local node is the only node on the bus
+    // (IOFireWireController.cpp:3336-3339). Tracked per generation so the write
+    // happens once rather than on every policy evaluation.
+    uint32_t appleSoloRootHoldOffClearedGen_{0};
+    bool appleSoloRootHoldOffCleared_{false};
 
     struct PendingReset {
         uint8_t targetRoot{0x3F};

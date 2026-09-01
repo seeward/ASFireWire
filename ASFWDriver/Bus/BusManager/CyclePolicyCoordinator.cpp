@@ -101,13 +101,15 @@ CyclePolicyDecision CyclePolicyCoordinator::Plan(const CyclePolicyInputs& inputs
         return CyclePolicyDecision::LocalCycleMasterClearNotRoot;
     }
 
-    // Two paths to cycle repair: 
+    // Three paths to cycle repair:
     // A. We are the elected Bus Manager.
-    // B. We are the IRM and the fallback gate is open without a detected BM.
+    // B. Apple's post-scan simple-BM condition holds (local IRM, no remote BMC).
+    // C. We are the IRM and the bounded fallback gate is open without a detected BM.
     const bool isBM = inputs.localIsBM;
+    const bool isAppleSimpleBM = inputs.appleSimpleBusManager;
     const bool isFallbackIRM = inputs.localIsIRM && inputs.irmFallbackGateOpen && inputs.irmFallbackNoBMDetected;
 
-    if (!isBM && !isFallbackIRM) {
+    if (!isBM && !isAppleSimpleBM && !isFallbackIRM) {
         return CyclePolicyDecision::SuppressedNotBMOrFallbackIRM;
     }
 
@@ -160,7 +162,15 @@ CyclePolicyDecision CyclePolicyCoordinator::Plan(const CyclePolicyInputs& inputs
         if (inputs.cycleStartObserved) {
             return CyclePolicyDecision::AlreadySatisfiedCycleStartObserved;
         }
-        return CyclePolicyDecision::RootSelectionRequired;
+        // Apple does not use BIB CMC as a force-root trigger. Root selection is
+        // driven by Self-ID contender/link evidence and empirical bad-IRM
+        // probing (IOFireWireController.cpp:2364-2404), and a root that must be
+        // replaced is replaced by the simple-BM phase in finishedBusScan(),
+        // which has already run by the time cycle policy is evaluated.
+        // Accepting a CMC=0 root here keeps this coordinator from contradicting
+        // RootSelectionCoordinator, which treats a contender+link root as
+        // suitable regardless of CMC.
+        return CyclePolicyDecision::AlreadySatisfiedRemoteRootAccepted;
     }
 
     // Elected BM duty: make sure a BIB-CMC-qualified root generates cycle starts.

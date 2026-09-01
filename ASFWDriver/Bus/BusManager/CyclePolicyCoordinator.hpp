@@ -55,6 +55,7 @@ enum class CyclePolicyDecision : uint8_t {
 
     AlreadySatisfiedCycleStartObserved,
     AlreadySatisfiedLocalCycleMasterEnabled,
+    AlreadySatisfiedRemoteRootAccepted,
 
     LocalCycleMasterClearNotRoot,
 
@@ -99,6 +100,10 @@ struct CyclePolicyInputs {
     bool localIsRoot{false};
     bool localIsIRM{false};
     bool localIsBM{false};
+    // Apple IOFireWireFamily's post-scan simple-BM authority: local is IRM and
+    // no remote node advertised BMC. This is intentionally distinct from a
+    // BUS_MANAGER_ID compare-swap result.
+    bool appleSimpleBusManager{false};
     bool localCycleMasterEnabled{false};
 
     bool irmFallbackNoBMDetected{false};

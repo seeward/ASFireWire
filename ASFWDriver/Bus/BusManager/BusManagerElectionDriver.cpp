@@ -270,6 +270,18 @@ void BusManagerElectionDriver::Contend(uint32_t generation, uint8_t localNodeId,
     });
 }
 
+// Linux splits compare-swap failures two ways: RCODE_SEND_ERROR means "we could
+// not send, try again in 1/8 s" (core-card.c:391-398), while any *other*
+// non-COMPLETE rcode is read as "maybe the IRM isn't really IRM capable after
+// all" and escalates straight to forcing the local node root
+// (core-card.c:402-412). We deliberately treat timeout/busy as retryable rather
+// than escalating, because the escalation exists here on Apple's route instead:
+// the ROM scan verifies every node's IRM by reading and locking
+// CHANNELS_AVAILABLE (ROMScanSessionIRM.cpp:84, :165 — Apple
+// IOFireWireController.cpp:2691, :2785), and a failure there marks the node a
+// bad IRM, which AssignCycleMaster turns into a root change. Do not "fix" this
+// into a root force without removing that probe first, or a single unanswered
+// lock would trigger two independent root changes.
 bool BusManagerElectionDriver::IsRetryableFailure(ASFW::Async::AsyncStatus status) noexcept {
     switch (status) {
     case ASFW::Async::AsyncStatus::kTimeout:

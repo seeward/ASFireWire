@@ -62,9 +62,11 @@ struct CycleMasterInputs {
 }
 
 [[nodiscard]] CycleMasterInputs CollectCycleMasterInputs(const TopologySnapshot& topology,
-                                                        const std::vector<bool>& badIRMFlags,
+                                                        const BusManager::BusScanEvidence& evidence,
                                                         const uint8_t localNodeID,
                                                         const uint8_t rootNodeID) {
+    const auto& badIRMFlags = evidence.badIRMFlags;
+
     CycleMasterInputs inputs{};
     inputs.localNodeID = localNodeID;
     inputs.rootNodeID = rootNodeID;
@@ -81,9 +83,27 @@ struct CycleMasterInputs {
         }
 
         const bool isBad = (node.physicalId < badIRMFlags.size() && badIRMFlags[node.physicalId]);
-        if (!isBad) {
-            inputs.otherContenderID = node.physicalId;
+        if (isBad) {
+            continue;
         }
+
+        // Apple only considers a node as a root candidate if it has a scan
+        // record for it — `if( fScans[i] )` at IOFireWireController.cpp:2372.
+        // A node whose Config ROM never read is not a node we can hand bus
+        // policy to. Empty evidence means "no scan has happened yet", in which
+        // case Self-ID contender/link is all we have and we use it.
+        if (!evidence.scanned.empty()) {
+            const bool wasScanned =
+                node.physicalId < evidence.scanned.size() && evidence.scanned[node.physicalId];
+            if (!wasScanned) {
+                ASFW_LOG_V3(BusManager,
+                            "Node %u is a Self-ID contender but was not scanned; not a root candidate",
+                            node.physicalId);
+                continue;
+            }
+        }
+
+        inputs.otherContenderID = node.physicalId;
     }
 
     if (badIRMFlags.empty()) {
@@ -100,12 +120,6 @@ struct CycleMasterInputs {
     }
 
     return inputs;
-}
-
-[[nodiscard]] bool ShouldEvaluateCycleMasterPolicy(const BusManager::Config& config,
-                                                   const std::vector<bool>& badIRMFlags) {
-    return config.delegateCycleMaster || !badIRMFlags.empty() ||
-           config.rootPolicy == BusManager::RootPolicy::Delegate;
 }
 
 [[nodiscard]] std::optional<BusManager::PhyConfigCommand> MaybeForceConfiguredRoot(
@@ -165,26 +179,25 @@ struct CycleMasterInputs {
     return MakePhyConfigCommand(inputs.localNodeID, true);
 }
 
+// Apple's simple-bus-manager phase (IOFireWireController::finishedBusScan(),
+// IOFireWireController.cpp:3262-3362). When no remote node advertises BMC and the
+// local node is the IRM, Apple makes the local node root *unconditionally*: it
+// sends a PHY config packet asserting the local root-hold-off bit (which clears
+// everyone else's), and resets the bus if it is not already root. There is
+// deliberately no contender survey on this path — the contender/delegation
+// heuristic belongs to AssignCycleMaster's earlier phase, which has already run
+// by the time we get here. The local node is necessarily a contender anyway,
+// because the IRM is by construction the highest contender+link node
+// (SelfIDTopologyNormalizer.cpp:114).
 [[nodiscard]] std::optional<BusManager::PhyConfigCommand> MaybeClaimRootForLocalIRM(
     const CycleMasterInputs& inputs) {
     if (inputs.irmNodeID != inputs.localNodeID || inputs.rootNodeID == inputs.localNodeID) {
         return std::nullopt;
     }
 
-    if (inputs.otherContenderID.has_value()) {
-        return std::nullopt;
-    }
-
-    if (!inputs.localContender) {
-        return std::nullopt;
-    }
-
-    // Apple IOFireWireController::finishedBusScan(): when the local node is IRM,
-    // it forces local root before turning on cycle master. This handles buses where
-    // a remote root is not an IRM contender, e.g. Saffire behind a passive middle PHY.
     ASFW_LOG(BusManager,
-             "⚠️  Local node is IRM but remote node %u is root and no peer contender exists; forcing local root",
-             inputs.rootNodeID);
+             "Local node %u is IRM and no remote node advertises BMC; forcing local root (root was %u)",
+             inputs.localNodeID, inputs.rootNodeID);
     return MakePhyConfigCommand(inputs.localNodeID, true);
 }
 
@@ -258,7 +271,7 @@ const char* BusManager::GapDecisionReasonString(const GapDecisionReason reason) 
 
 std::optional<BusManager::PhyConfigCommand> BusManager::AssignCycleMaster(
     const TopologySnapshot& topology,
-    const std::vector<bool>& badIRMFlags)
+    const BusScanEvidence& evidence)
 {
     if (topology.localNodeId == kInvalidPhysicalId || topology.rootNodeId == kInvalidPhysicalId) {
         ASFW_LOG(BusManager, "AssignCycleMaster: Invalid topology (local=%d root=%d)",
@@ -268,41 +281,52 @@ std::optional<BusManager::PhyConfigCommand> BusManager::AssignCycleMaster(
 
     const uint8_t localNodeID = topology.localNodeId;
     const uint8_t rootNodeID = topology.rootNodeId;
-    const CycleMasterInputs inputs = CollectCycleMasterInputs(topology, badIRMFlags, localNodeID, rootNodeID);
+    const CycleMasterInputs inputs = CollectCycleMasterInputs(topology, evidence, localNodeID, rootNodeID);
 
     if (const auto forcedRoot = MaybeForceConfiguredRoot(config_, inputs)) {
         return forcedRoot;
     }
 
-    if (!ShouldEvaluateCycleMasterPolicy(config_, badIRMFlags)) {
-        ASFW_LOG(BusManager, "✅ AssignCycleMaster: No action needed (root=%u IRM=%u local=%u)",
-                 rootNodeID, inputs.irmNodeID, localNodeID);
-        return std::nullopt;
+    // IOFireWireController::AssignCycleMaster() runs its contender/delegation
+    // heuristic only when delegation is explicitly enabled or empirical IRM
+    // verification found a bad IRM. It runs before Apple's later "simple bus
+    // manager" phase. Keep those phases ordered and distinct here.
+    if (config_.delegateCycleMaster || inputs.badIRM ||
+        config_.rootPolicy == RootPolicy::Delegate) {
+        if (const auto rootDecision = MaybeDelegateOrClaimRoot(config_, inputs)) {
+            return rootDecision;
+        }
+
+        if (inputs.badIRM) {
+            ASFW_LOG(BusManager, "⚠️  Bad IRM detected (node %u)", inputs.irmNodeID);
+        }
+
+        if (const auto irmRecovery = MaybeRecoverBadIRM(config_, inputs)) {
+            return irmRecovery;
+        }
     }
 
-    if (const auto rootDecision = MaybeDelegateOrClaimRoot(config_, inputs)) {
-        return rootDecision;
-    }
-
-    if (const auto localIRMRootDecision = MaybeClaimRootForLocalIRM(inputs)) {
-        return localIRMRootDecision;
-    }
-
-    if (inputs.badIRM) {
-        ASFW_LOG(BusManager, "⚠️  Bad IRM detected (node %u)", inputs.irmNodeID);
-    }
-
-    // Apple's AssignCycleMaster fallback (IOFireWireController.cpp):
-    // If bad IRM or no IRM at all, we must ensure *somebody* becomes IRM.
-    // DICE-class devices don't support IRM, so our node must take over
-    // for isochronous resource management to work.
-    if (const auto irmRecovery = MaybeRecoverBadIRM(config_, inputs)) {
-        return irmRecovery;
+    // IOFireWireController::finishedBusScan(): if no remote node advertises
+    // BMC and the host is IRM, the host performs simple bus-manager duties. It
+    // first makes itself root, then enables local cycle master and optimizes
+    // gap count in the resulting generation.
+    if (!evidence.remoteBusManagerCapable) {
+        if (const auto localIRMRootDecision = MaybeClaimRootForLocalIRM(inputs)) {
+            return localIRMRootDecision;
+        }
     }
 
     ASFW_LOG(BusManager, "✅ AssignCycleMaster: No action needed (root=%u IRM=%u local=%u)",
              rootNodeID, inputs.irmNodeID, localNodeID);
     return std::nullopt;
+}
+
+bool BusManager::HasGapCountMismatch(const std::vector<uint32_t>& selfIDs) {
+    const std::vector<uint8_t> observedGaps = ExtractObservedBaseGaps(selfIDs);
+    if (observedGaps.empty()) {
+        return false;
+    }
+    return !AreObservedGapsConsistent(observedGaps);
 }
 
 std::optional<BusManager::GapDecision> BusManager::EvaluateGapPolicy(
@@ -313,6 +337,16 @@ std::optional<BusManager::GapDecision> BusManager::EvaluateGapPolicy(
         return std::nullopt;
     }
 
+    // Authority gate. Apple's early mismatch correction in processSelfIDs()
+    // (IOFireWireController.cpp:2139-2151) is unconditional, but it only
+    // broadcasts a PHY config packet carrying gap 0x3F — it never resets the
+    // bus. Our MismatchForce63 decision *does* carry a long reset
+    // (BusResetCoordinatorFSM.cpp:170-176), which is Linux's shape, and Linux
+    // keeps that reset inside the bus-manager-owned block behind a 5-reset cap
+    // (core-card.c:432-441, :488-515). An unconditional reset-carrying
+    // correction exists in neither reference and invites a reset storm when
+    // more than one node observes the same mismatch, so the reset-carrying path
+    // stays gated on local IRM/BM authority.
     if (topology.localNodeId == kInvalidPhysicalId || topology.irmNodeId == kInvalidPhysicalId) {
         return std::nullopt;
     }

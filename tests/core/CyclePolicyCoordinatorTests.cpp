@@ -169,7 +169,14 @@ TEST_F(CyclePolicyCoordinatorTests, RemoteRootBibCmcFalseAndCycleSeenSuppressesC
     EXPECT_EQ(planner_.Plan(in), CyclePolicyDecision::AlreadySatisfiedCycleStartObserved);
 }
 
-TEST_F(CyclePolicyCoordinatorTests, RemoteRootBibCmcFalseWithoutCycleRequiresRootSelection) {
+// Apple never uses the BIB CMC bit as a force-root trigger: root replacement is
+// driven by Self-ID contender/link evidence and empirical IRM probing
+// (IOFireWireController.cpp:2364-2404), and the simple-BM phase in
+// finishedBusScan() has already had its chance to claim root by the time cycle
+// policy runs. Accepting a CMC=0 root here also keeps this coordinator from
+// contradicting RootSelectionCoordinator, which treats any contender+link root
+// as suitable regardless of CMC.
+TEST_F(CyclePolicyCoordinatorTests, RemoteRootBibCmcFalseWithoutCycleIsAcceptedNotForced) {
     CyclePolicyInputs in{};
     in.topologyValid = true;
     in.roleMode = RoleMode::FullBusManager;
@@ -180,7 +187,7 @@ TEST_F(CyclePolicyCoordinatorTests, RemoteRootBibCmcFalseWithoutCycleRequiresRoo
     in.rootCmcCapable = false;
     MarkRemoteRootSelfIdContender(in);
 
-    EXPECT_EQ(planner_.Plan(in), CyclePolicyDecision::RootSelectionRequired);
+    EXPECT_EQ(planner_.Plan(in), CyclePolicyDecision::AlreadySatisfiedRemoteRootAccepted);
 }
 
 TEST_F(CyclePolicyCoordinatorTests, RemoteRootSelfIDContenderAtCyclePolicyAllowedPlansWrite) {

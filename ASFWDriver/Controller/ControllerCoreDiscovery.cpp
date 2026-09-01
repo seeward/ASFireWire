@@ -121,6 +121,7 @@ const char* CyclePolicyDecisionString(Bus::CyclePolicyDecision decision) {
     case CyclePolicyDecision::SuppressedNotBMOrFallbackIRM: return "not-bm";
     case CyclePolicyDecision::AlreadySatisfiedCycleStartObserved: return "cycle-observed";
     case CyclePolicyDecision::AlreadySatisfiedLocalCycleMasterEnabled: return "local-cm-already";
+    case CyclePolicyDecision::AlreadySatisfiedRemoteRootAccepted: return "remote-root-apple-accepted";
     case CyclePolicyDecision::LocalCycleMasterClearNotRoot: return "local-cm-clear-not-root";
     case CyclePolicyDecision::DeferRootSelfIDUnknown: return "root-selfid-unknown";
     case CyclePolicyDecision::DeferLocalSelfIDUnknown: return "local-selfid-unknown";
@@ -174,6 +175,9 @@ bool ControllerCore::StartDiscoveryScan(const Discovery::ROMScanRequest& request
 void ControllerCore::OnTopologyReady(const TopologySnapshot& snap) {
     // 1. Advance generation and notify role authority first
     currentGeneration_ = snap.generation;
+    appleBusScanComplete_ = false;
+    appleRemoteBusManagerCapable_ = false;
+    appleScannedNodes_.clear();
     roleCoordinator_.OnTopologyChanged(snap.generation, snap);
 
     // 2. Initialize/update Bus Manager/IRM runtime state (FW-14)
@@ -225,7 +229,7 @@ void ControllerCore::OnTopologyReady(const TopologySnapshot& snap) {
                                       BusResetCoordinator::MonotonicNow());
     }
 
-    EvaluateActivePolicies();
+    (void)EvaluateActivePolicies();
 
     if (deps_.topologyMapService) {
         deps_.topologyMapService->Rebuild(snap);
@@ -424,7 +428,7 @@ void ControllerCore::PublishRootCapabilityEvidence() {
         irmFallback_->OnRuntimeEvidenceUpdated(GetBusManagerRuntimeState());
     }
 
-    EvaluateActivePolicies();
+    (void)EvaluateActivePolicies();
 }
 
 void ControllerCore::ForceRootAndReset(uint8_t targetRoot, Role::RoleResetFlavor flavor,
@@ -493,7 +497,7 @@ void ControllerCore::ClearLocalContenderAndDelegate(uint8_t targetRoot, uint32_t
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void ControllerCore::OnDiscoveryScanComplete(Discovery::Generation gen,
                                              const std::vector<Discovery::ConfigROM>& roms,
-                                             bool hadBusyNodes) const {
+                                             bool hadBusyNodes) {
     if (!deps_.romStore || !deps_.deviceRegistry || !deps_.speedPolicy) {
         ASFW_LOG(Discovery, "OnDiscoveryScanComplete: missing Discovery dependencies");
         return;
@@ -516,6 +520,44 @@ void ControllerCore::OnDiscoveryScanComplete(Discovery::Generation gen,
             ASFW_LOG(Discovery, "ROM scan produced 0 ROMs — keeping previous delay state");
             deps_.busReset->EscalateDiscoveryDelay();
         }
+    }
+
+    if (gen.value != currentGeneration_) {
+        ASFW_LOG(Discovery,
+                 "Ignoring stale ROM scan policy result gen=%u current=%u",
+                 gen.value, currentGeneration_);
+        return;
+    }
+
+    appleBusScanComplete_ = true;
+    appleRemoteBusManagerCapable_ = false;
+    appleScannedNodes_.assign(Driver::kMaxPhysicalIds, false);
+    for (const auto& rom : roms) {
+        const auto nodeId = ASFW::Discovery::TryOperationalNodeId(rom.nodeId);
+        if (!nodeId.has_value()) {
+            continue;
+        }
+        if (*nodeId < appleScannedNodes_.size()) {
+            appleScannedNodes_[*nodeId] = true;
+        }
+        if (*nodeId != bmState_.localNodeId && rom.bib.bmc) {
+            appleRemoteBusManagerCapable_ = true;
+        }
+    }
+
+    ASFW_LOG(Controller,
+             "[AppleBusPolicy] scan complete gen=%u remoteBMC=%d localIRM=%d",
+             gen.value, appleRemoteBusManagerCapable_ ? 1 : 0,
+             bmState_.localIsIRM ? 1 : 0);
+
+    // IOFireWireController::finishedBusScan() runs AssignCycleMaster before
+    // publishing the generation. If it requests a root reset, do the same and
+    // leave this scan unpublished; the next generation will be rescanned.
+    if (EvaluateActivePolicies()) {
+        ASFW_LOG(Discovery,
+                 "ROM scan gen=%u superseded by Apple bus-policy reset",
+                 gen.value);
+        return;
     }
 
     bool zeroRomScanInconclusive = false;
@@ -659,7 +701,7 @@ void ControllerCore::OnLocalWonBM(uint32_t generation, uint8_t localNodeId) {
         bmState_.lastBusManagerIdOldValue = deps_.busManagerElectionDriver->FSM().LastOldValue();
         bmState_.staleElectionAbortCount = deps_.busManagerElectionDriver->FSM().StaleElectionAbortCount();
     }
-    EvaluateActivePolicies();
+    (void)EvaluateActivePolicies();
 }
 
 void ControllerCore::OnRemoteBM(uint32_t generation, uint8_t remoteNodeId) {
@@ -671,7 +713,7 @@ void ControllerCore::OnRemoteBM(uint32_t generation, uint8_t remoteNodeId) {
         bmState_.lastBusManagerIdOldValue = deps_.busManagerElectionDriver->FSM().LastOldValue();
         bmState_.staleElectionAbortCount = deps_.busManagerElectionDriver->FSM().StaleElectionAbortCount();
     }
-    EvaluateActivePolicies();
+    (void)EvaluateActivePolicies();
 }
 
 void ControllerCore::OnBMElectionFailed(uint32_t generation, ASFW::Async::AsyncStatus status) {
@@ -680,10 +722,10 @@ void ControllerCore::OnBMElectionFailed(uint32_t generation, ASFW::Async::AsyncS
     if (deps_.busManagerElectionDriver) {
         bmState_.staleElectionAbortCount = deps_.busManagerElectionDriver->FSM().StaleElectionAbortCount();
     }
-    EvaluateActivePolicies();
+    (void)EvaluateActivePolicies();
 }
 
-void ControllerCore::EvaluateActivePolicies() noexcept {
+bool ControllerCore::EvaluateActivePolicies() noexcept {
     pendingReset_.reset();
 
     // 0. Pre-Role IRM Bootstrap Policy (Active when zero usable contenders exist)
@@ -763,7 +805,46 @@ void ControllerCore::EvaluateActivePolicies() noexcept {
         }
     }
 
-    if (!pendingReset_) {
+    // Apple runs ordinary root/cycle/gap policy only after the generation's
+    // ROM scan and empirical IRM verification have completed. Immediate
+    // gap-mismatch correction remains in BusResetCoordinator::processSelfIDs.
+    if (!pendingReset_ && appleBusScanComplete_) {
+        if (deps_.busManager) {
+            const auto topo = LatestTopology();
+            if (topo.has_value()) {
+                BusManager::BusScanEvidence evidence{};
+                if (deps_.topology) {
+                    evidence.badIRMFlags = deps_.topology->GetBadIRMFlags();
+                }
+                evidence.scanned = appleScannedNodes_;
+                evidence.remoteBusManagerCapable = appleRemoteBusManagerCapable_;
+
+                MaybeClearSoloRootHoldOff(*topo);
+
+                const auto command = deps_.busManager->AssignCycleMaster(*topo, evidence);
+                if (command.has_value() && command->forceRootNodeID.has_value()) {
+                    if (!appleRootClaimBudget_.TryConsume(Driver::StableTopologyKey(*topo))) {
+                        ASFW_LOG(Controller,
+                                 "[AppleBusPolicy] root claim budget exhausted (%u attempts on this "
+                                 "topology); leaving root=%u in place",
+                                 appleRootClaimBudget_.AttemptsOnCurrentTopology(),
+                                 topo->rootNodeId);
+                    } else {
+                        pendingReset_ = PendingReset{
+                            .targetRoot = *command->forceRootNodeID,
+                            .longReset = false,
+                            .gapCount = command->gapCount,
+                            .setContender = command->setContender,
+                            .rootHoldoff = std::nullopt,
+                            .reason = "Apple AssignCycleMaster"
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    if (!pendingReset_ && appleBusScanComplete_) {
         // 1. Cycle Repair (M5)
         EvaluateCyclePolicy();
 
@@ -806,7 +887,45 @@ void ControllerCore::EvaluateActivePolicies() noexcept {
                                                setContender,
                                                pendingReset_->reason.empty() ? "BM active policy" : pendingReset_->reason);
         pendingReset_.reset();
+        return true;
     }
+
+    return false;
+}
+
+// IOFireWireController::finishedBusScan() (IOFireWireController.cpp:3336-3339):
+// "If we're the only node, clear root hold off." Apple does this inside the
+// simple-bus-manager block, before it would otherwise assert local RHB. Leaving
+// a stale root-hold-off set on a solo bus means the next device to attach finds
+// us pinned as root regardless of what policy then decides.
+void ControllerCore::MaybeClearSoloRootHoldOff(const TopologySnapshot& topology) noexcept {
+    if (deps_.hardware == nullptr) {
+        return;
+    }
+
+    uint8_t activeNodes = 0;
+    for (const auto& node : topology.physical.nodes) {
+        if (node.linkActive) {
+            ++activeNodes;
+        }
+    }
+
+    if (activeNodes != 1U || topology.localNodeId == Driver::kInvalidPhysicalId ||
+        topology.rootNodeId != topology.localNodeId) {
+        return;
+    }
+
+    if (appleSoloRootHoldOffCleared_ && appleSoloRootHoldOffClearedGen_ == currentGeneration_) {
+        return;
+    }
+
+    appleSoloRootHoldOffCleared_ = true;
+    appleSoloRootHoldOffClearedGen_ = currentGeneration_;
+
+    ASFW_LOG(Controller,
+             "[AppleBusPolicy] local node %u is alone on the bus; clearing root hold-off",
+             topology.localNodeId);
+    deps_.hardware->SetRootHoldOff(false);
 }
 
 void ControllerCore::EvaluateBusManagerPolicy() noexcept {
@@ -832,6 +951,8 @@ void ControllerCore::EvaluateCyclePolicy() noexcept {
     in.localIsRoot = state.localIsRoot;
     in.localIsIRM = state.localIsIRM;
     in.localIsBM = state.localIsBM;
+    in.appleSimpleBusManager = appleBusScanComplete_ && state.localIsIRM &&
+        !appleRemoteBusManagerCapable_;
     in.localCycleMasterEnabled = deps_.hardware ? deps_.hardware->IsLocalCycleMasterEnabled() : false;
 
     if (irmFallback_) {
@@ -943,6 +1064,8 @@ void ControllerCore::EvaluateGapPolicy() noexcept {
     in.bmNodeId = state.bmNodeId;
     in.localIsBM = state.localIsBM;
     in.localIsIRM = state.localIsIRM;
+    in.appleSimpleBusManager = appleBusScanComplete_ && state.localIsIRM &&
+        !appleRemoteBusManagerCapable_;
 
     if (irmFallback_) {
         const auto& fallback = irmFallback_->Snapshot();

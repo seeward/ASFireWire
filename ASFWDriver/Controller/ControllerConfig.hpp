@@ -21,7 +21,9 @@ struct ControllerConfig {
     VendorInfo vendor;
     uint64_t localGuid{0};
     bool enableVerboseLogging{false};
-    bool experimentalHostCycleMasterBringup{false};
+    // Mirrors IOFireWireFamily's "DelegateCycleMaster" provider property.
+    // Apple keeps delegation disabled unless the platform explicitly opts in.
+    bool delegateCycleMaster{false};
     bool allowCycleMasterEligibility{false};
 
     static ControllerConfig MakeDefault();

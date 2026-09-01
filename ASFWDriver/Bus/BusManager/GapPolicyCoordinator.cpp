@@ -212,6 +212,11 @@ bool GapPolicyCoordinator::IsAllowedActor(const GapPolicyInputs& inputs) const n
         inputs.roleMode == ASFW::FW::RoleMode::FullBusManager &&
         inputs.localIsBM;
 
+    const bool appleSimpleBM =
+        (inputs.roleMode == ASFW::FW::RoleMode::IRMResourceHost ||
+         inputs.roleMode == ASFW::FW::RoleMode::FullBusManager) &&
+        inputs.appleSimpleBusManager;
+
     const bool fallbackIRM =
         (inputs.roleMode == ASFW::FW::RoleMode::IRMResourceHost ||
          inputs.roleMode == ASFW::FW::RoleMode::FullBusManager) &&
@@ -219,7 +224,7 @@ bool GapPolicyCoordinator::IsAllowedActor(const GapPolicyInputs& inputs) const n
         inputs.irmFallbackGateOpen &&
         inputs.irmFallbackNoBMDetected;
 
-    return activeBM || fallbackIRM;
+    return activeBM || appleSimpleBM || fallbackIRM;
 }
 
 uint32_t GapPolicyCoordinator::StableTopologyKey(const GapPolicyInputs& inputs) const noexcept {
