@@ -92,6 +92,38 @@ TEST_F(HardwareInterfaceOrderTests, CompareSwapLocalIRMResource_WritesDataCompar
     EXPECT_TRUE(result.compareMatched);
 }
 
+// OHCI's CSR engine has no read operation. Reading one of the four IRM
+// registers means running a compare-swap whose operands cannot change it, and
+// taking the previous contents the hardware leaves in CSRData.
+//
+// Writing CSRControl on its own instead swaps against whatever the staging
+// registers still hold, and can return the previous transaction's result
+// because csrDone may still be set when the first poll runs. That produced a
+// BANDWIDTH_AVAILABLE of 0x3F -- selector 0's initial value -- on the first
+// read after a bus reset on a Focusrite Saffire, refusing the first audio
+// start of every generation.
+//
+// cross-validated with Linux: firewire/ohci.c:1666-1691 services a local
+// quadlet read by zeroing both lock operands and running this same sequence.
+TEST_F(HardwareInterfaceOrderTests, ReadLocalIRMResource_IsAZeroOperandCompareSwap) {
+    InSequence seq;
+
+    const uint32_t selectCode = 1; // BANDWIDTH_AVAILABLE
+    const uint32_t currentValue = 4915;
+
+    EXPECT_CALL(*mockDevice_, MemoryWrite32(0, static_cast<uint64_t>(Register32::kCSRData), 0u));
+    EXPECT_CALL(*mockDevice_, MemoryWrite32(0, static_cast<uint64_t>(Register32::kCSRCompareData), 0u));
+    EXPECT_CALL(*mockDevice_, MemoryWrite32(0, static_cast<uint64_t>(Register32::kCSRControl), selectCode));
+    EXPECT_CALL(*mockDevice_, MemoryRead32(0, static_cast<uint64_t>(Register32::kHCControl), _));
+    EXPECT_CALL(*mockDevice_, MemoryRead32(0, static_cast<uint64_t>(Register32::kCSRControl), _));
+    EXPECT_CALL(*mockDevice_, MemoryRead32(0, static_cast<uint64_t>(Register32::kCSRData), _))
+        .WillOnce([currentValue](uint8_t, uint64_t, uint32_t* val) { *val = currentValue; });
+
+    const auto result = hardware_.ReadLocalIRMResource(selectCode);
+    EXPECT_EQ(result.status, LocalCSRLockResult::Status::Success);
+    EXPECT_EQ(result.value, currentValue);
+}
+
 TEST_F(HardwareInterfaceOrderTests, WriteLocalIRMResource_WritesDataCompareControlInOrder) {
     InSequence seq;
 
@@ -99,7 +131,9 @@ TEST_F(HardwareInterfaceOrderTests, WriteLocalIRMResource_WritesDataCompareContr
     uint32_t value = 4000;
     uint32_t currentValue = 4915;
 
-    // 1. ReadLocalIRMResource (pre-read)
+    // 1. ReadLocalIRMResource (pre-read), itself a zero-operand compare-swap.
+    EXPECT_CALL(*mockDevice_, MemoryWrite32(0, static_cast<uint64_t>(Register32::kCSRData), 0u));
+    EXPECT_CALL(*mockDevice_, MemoryWrite32(0, static_cast<uint64_t>(Register32::kCSRCompareData), 0u));
     EXPECT_CALL(*mockDevice_, MemoryWrite32(0, static_cast<uint64_t>(Register32::kCSRControl), selectCode));
     EXPECT_CALL(*mockDevice_, MemoryRead32(0, static_cast<uint64_t>(Register32::kHCControl), _));
     EXPECT_CALL(*mockDevice_, MemoryRead32(0, static_cast<uint64_t>(Register32::kCSRControl), _));
@@ -119,7 +153,9 @@ TEST_F(HardwareInterfaceOrderTests, WriteLocalIRMResource_WritesDataCompareContr
             *val = currentValue;
         });
 
-    // 3. Verification Read
+    // 3. Verification Read, likewise.
+    EXPECT_CALL(*mockDevice_, MemoryWrite32(0, static_cast<uint64_t>(Register32::kCSRData), 0u));
+    EXPECT_CALL(*mockDevice_, MemoryWrite32(0, static_cast<uint64_t>(Register32::kCSRCompareData), 0u));
     EXPECT_CALL(*mockDevice_, MemoryWrite32(0, static_cast<uint64_t>(Register32::kCSRControl), selectCode));
     EXPECT_CALL(*mockDevice_, MemoryRead32(0, static_cast<uint64_t>(Register32::kHCControl), _));
     EXPECT_CALL(*mockDevice_, MemoryRead32(0, static_cast<uint64_t>(Register32::kCSRControl), _));

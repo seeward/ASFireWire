@@ -1063,31 +1063,27 @@ LocalCSRWriteResult HardwareInterface::WriteLocalIRMResource(uint32_t selectCode
 }
 
 LocalCSRReadResult HardwareInterface::ReadLocalIRMResource(uint32_t selectCode) noexcept {
-    if (!IsAvailable()) {
-        return {LocalCSRLockResult::Status::HardwareUnavailable, 0};
-    }
-    {
-        auto access = TryBeginAccess();
-        if (!access) return {LocalCSRLockResult::Status::HardwareUnavailable, 0};
-        access.WriteAndFlush(Register32::kCSRControl, selectCode & 0x3u);
-    }
-    
-    constexpr int kMaxTries = 10000;
-    for (int i = 0; i < kMaxTries; ++i) {
-        auto access = TryBeginAccess();
-        if (!access) return {LocalCSRLockResult::Status::HardwareUnavailable, 0};
-        uint32_t ctrl = access.Read(Register32::kCSRControl);
-        if (ctrl & 0x80000000u) {
-            return {LocalCSRLockResult::Status::Success, access.Read(Register32::kCSRData)};
-        }
-#ifndef ASFW_HOST_TEST
-        IODelay(5);
-#else
-        std::this_thread::sleep_for(std::chrono::microseconds(5));
-#endif
-    }
-    ASFW_LOG(Hardware, "ReadLocalIRMResource timeout select=%u", selectCode);
-    return {LocalCSRLockResult::Status::Timeout, 0};
+    // OHCI's CSR engine implements exactly one operation: compare-swap. There is
+    // no read. A compare-swap whose compare and data operands are both zero
+    // cannot alter the register — it writes only when the register already holds
+    // zero — and leaves the previous contents in CSRData. That is the read.
+    //
+    // Writing CSRControl alone and polling csrDone, which is what this did, is
+    // not a defined operation. It starts a swap against whatever CSRData and
+    // CSRCompareData still hold, and its first poll can observe a csrDone left
+    // set by the previous transaction and return that transaction's value.
+    // Observed on a Focusrite Saffire: BANDWIDTH_AVAILABLE read 0x3F — which is
+    // selector 0's initial value, not selector 1's — on the first read after a
+    // bus reset, then 0x12F5 later in the same generation with nothing
+    // allocated or released in between. It refused the first audio start after
+    // every bus reset.
+    //
+    // cross-validated with Linux: firewire/ohci.c:1666-1691, where
+    // TCODE_READ_QUADLET_REQUEST against a local IRM CSR is serviced by setting
+    // both lock operands to zero and running the identical
+    // CSRData/CSRCompareData/CSRControl sequence as a compare-swap.
+    const auto swapped = CompareSwapLocalIRMResource(selectCode, 0u, 0u);
+    return {swapped.status, swapped.oldValue};
 }
 
 LocalCSRLockResult HardwareInterface::CompareSwapLocalIRMResource(uint32_t selectCode, uint32_t compareValue, uint32_t newValue) noexcept {
