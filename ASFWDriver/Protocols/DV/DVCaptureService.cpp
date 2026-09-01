@@ -113,7 +113,10 @@ AwaitResourceSnapshot(IRM::IRMClient& irm) {
 [[nodiscard]] kern_return_t ToIOReturn(IRM::AllocationStatus status) noexcept {
     switch (status) {
     case IRM::AllocationStatus::Success: return kIOReturnSuccess;
-    case IRM::AllocationStatus::NoResources: return kIOReturnNoResources;
+    case IRM::AllocationStatus::NoResources:
+    case IRM::AllocationStatus::ChannelBusy:
+    case IRM::AllocationStatus::BandwidthShort:
+        return kIOReturnNoResources;
     case IRM::AllocationStatus::GenerationMismatch: return kIOReturnAborted;
     case IRM::AllocationStatus::Timeout: return kIOReturnTimeout;
     case IRM::AllocationStatus::NoIRM: return kIOReturnNotReady;

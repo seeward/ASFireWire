@@ -57,12 +57,17 @@ class IsochService {
 
     kern_return_t StopReceive();
 
-    kern_return_t StartTransmit(uint8_t channel, HardwareInterface& hardware, uint8_t sid);
-    kern_return_t PrepareTransmit(uint8_t channel, HardwareInterface& hardware, uint8_t sid);
+    kern_return_t StartTransmit(uint8_t channel, HardwareInterface& hardware, uint8_t sid,
+                                FW::FwSpeed speed);
+    /// @param speed Wire speed for transmitted packets; must match the speed the
+    /// isochronous reservation was charged at.
+    kern_return_t PrepareTransmit(uint8_t channel, HardwareInterface& hardware, uint8_t sid,
+                                  FW::FwSpeed speed);
     // Prepare an additional transmit stream on its own OHCI IT context. The
     // caller supplies an opaque shared packet queue separately.
     kern_return_t PrepareTransmitStream(uint32_t streamIndex, uint8_t channel,
-                                        HardwareInterface& hardware, uint8_t sid);
+                                        HardwareInterface& hardware, uint8_t sid,
+                                        FW::FwSpeed speed);
     kern_return_t StartPreparedTransmit();
 
     kern_return_t StopTransmit();

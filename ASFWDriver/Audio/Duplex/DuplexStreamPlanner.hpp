@@ -6,6 +6,7 @@
 #include "DuplexPolicies.hpp"
 #include "../Devices/ResolvedAudioEndpointProfile.hpp"
 #include "../Wire/AMDTP/AmdtpRateGeometry.hpp"
+#include "../../Bus/IRM/IRMTypes.hpp"
 
 #include <array>
 #include <cstdint>
@@ -17,7 +18,7 @@ struct CaptureStreamGeometry final {
     uint32_t pcmChannelOffset{0};
     uint32_t pcmChannels{0};
     uint32_t am824Slots{0};
-    uint32_t bandwidthUnits{0};
+    uint32_t packetBandwidthUnits{0};
     uint64_t allowedIsoChannels{0};
 };
 
@@ -25,12 +26,18 @@ struct PlaybackStreamGeometry final {
     uint8_t isoChannel{AudioStreamWireInfo::kInvalidIsoChannel};
     uint32_t pcmChannels{0};
     uint32_t am824Slots{0};
-    uint32_t bandwidthUnits{0};
+    uint32_t packetBandwidthUnits{0};
     uint64_t allowedIsoChannels{0};
 };
 
 struct StreamPlan final {
     AudioDuplexChannels channels{};
+    // The one speed for this device's isochronous streams: what the packets are
+    // transmitted at and what the IRM was charged for. Apple and Linux both keep
+    // a single per-device value (IOFWIsochChannel.cpp:653-664, dice-stream.c
+    // allocate + amdtp_stream_start); two answers means charging for one bus and
+    // transmitting on another.
+    FW::FwSpeed linkSpeed{FW::FwSpeed::S400};
     AudioStreamRuntimeCaps runtimeCaps{};
     std::array<CaptureStreamGeometry, kMaxAudioStreamsPerDirection> captureStreams{};
     std::array<PlaybackStreamGeometry, kMaxAudioStreamsPerDirection> playbackStreams{};
@@ -79,29 +86,17 @@ private:
         return IsValidIsoChannel(channel) ? (uint64_t{1} << channel) : 0;
     }
 
-    // Cross-validated with Linux sound/firewire/iso-resources.c:48-76. The
-    // conservative 512-unit fallback is used because live gap count is not an
-    // input to this planner yet.
-    [[nodiscard]] static constexpr uint32_t PacketBandwidthUnits(
-        uint32_t maxPayloadBytes, FW::FwSpeed speed) noexcept {
-        const uint32_t packetBytesAtSpeed = 12U + ((maxPayloadBytes + 3U) & ~3U);
-        uint32_t packetUnits = packetBytesAtSpeed;
-        switch (speed) {
-            case FW::FwSpeed::S100: packetUnits *= 4U; break;
-            case FW::FwSpeed::S200: packetUnits *= 2U; break;
-            case FW::FwSpeed::S400: break;
-            case FW::FwSpeed::S800: packetUnits = (packetUnits + 1U) / 2U; break;
-        }
-        return packetUnits + 512U;
-    }
-
-    [[nodiscard]] static constexpr uint32_t AmdtpBandwidthUnits(
+    // The packet term only. Per-allocation bus overhead depends on the live gap
+    // count, which can change between planning and reserving, so it is charged
+    // by the reservation itself (IRM::BandwidthOverheadForGapCount) exactly as
+    // Linux does in fw_iso_resources_allocate (iso-resources.c:113-128).
+    [[nodiscard]] static constexpr uint32_t AmdtpPacketBandwidthUnits(
         uint32_t slots, uint32_t sampleRateHz, FW::FwSpeed speed) noexcept {
         const auto rate = Encoding::AmdtpRateGeometryForSampleRate(
             sampleRateHz != 0 ? sampleRateHz : 48000U);
         const uint32_t blocks = rate ? rate->sytIntervalFrames : 8U;
-        return PacketBandwidthUnits(8U + blocks * (slots != 0 ? slots : 1U) * 4U,
-                                    speed);
+        return IRM::PacketBandwidthUnits(8U + blocks * (slots != 0 ? slots : 1U) * 4U,
+                                         static_cast<uint8_t>(speed));
     }
 
     [[nodiscard]] static AudioDuplexChannels ResolveChannels(
@@ -155,6 +150,7 @@ private:
         const auto& caps = profile.runtimeCaps;
         StreamPlan result{
             .channels = channels,
+            .linkSpeed = linkSpeed,
             .runtimeCaps = caps,
             .captureWireFormat = profile.captureWireFormat,
             .playbackWireFormat = profile.playbackWireFormat,
@@ -173,7 +169,7 @@ private:
             geometry.pcmChannels = multiCapture ? stream.pcmChannels : 0;
             geometry.am824Slots = multiCapture ? stream.am824Slots
                                                : caps.deviceToHostAm824Slots;
-            geometry.bandwidthUnits = AmdtpBandwidthUnits(
+            geometry.packetBandwidthUnits = AmdtpPacketBandwidthUnits(
                 geometry.am824Slots, caps.sampleRateHz, linkSpeed);
             geometry.allowedIsoChannels =
                 profile.captureIsoChannelPolicy == IsoChannelPolicy::IRMSelectable
@@ -192,7 +188,7 @@ private:
             geometry.am824Slots = stream.am824Slots != 0
                                       ? stream.am824Slots
                                       : (i == 0 ? caps.hostToDeviceAm824Slots : 0U);
-            geometry.bandwidthUnits = AmdtpBandwidthUnits(
+            geometry.packetBandwidthUnits = AmdtpPacketBandwidthUnits(
                 geometry.am824Slots, caps.sampleRateHz, linkSpeed);
             geometry.allowedIsoChannels =
                 profile.playbackIsoChannelPolicy == IsoChannelPolicy::IRMSelectable

@@ -38,12 +38,12 @@ class IIsochDuplexHostTransport {
     [[nodiscard]] virtual kern_return_t BeginSplitDuplex(EndpointId endpointId) noexcept = 0;
     [[nodiscard]] virtual kern_return_t
     ReservePlaybackResources(EndpointId endpointId, ::ASFW::IRM::IRMClient& irmClient,
-                             uint64_t allowedChannels, uint32_t bandwidthUnits,
-                             uint8_t& outChannel) noexcept = 0;
+                             uint64_t allowedChannels, uint32_t packetBandwidthUnits,
+                             Duplex::IRMReservationResult& outResult) noexcept = 0;
     [[nodiscard]] virtual kern_return_t
     ReserveCaptureResources(EndpointId endpointId, ::ASFW::IRM::IRMClient& irmClient,
-                            uint64_t allowedChannels, uint32_t bandwidthUnits,
-                            uint8_t& outChannel) noexcept = 0;
+                            uint64_t allowedChannels, uint32_t packetBandwidthUnits,
+                            Duplex::IRMReservationResult& outResult) noexcept = 0;
     [[nodiscard]] virtual kern_return_t
     PrepareReceive(uint8_t channel, Driver::HardwareInterface& hardware,
                    ASFW::Audio::Runtime::IDirectAudioBindingSource* bindingSource,
@@ -55,7 +55,8 @@ class IIsochDuplexHostTransport {
                        {}) noexcept = 0;
     [[nodiscard]] virtual kern_return_t PrepareTransmit(uint8_t channel,
                                                         Driver::HardwareInterface& hardware,
-                                                        uint8_t sourceId) noexcept = 0;
+                                                        uint8_t sourceId,
+                                                        FW::FwSpeed speed) noexcept = 0;
     // Secondary streams (streamIndex >= 1) for multi-stream DICE devices; the
     // master stream uses PrepareReceive/PrepareTransmit above.
     [[nodiscard]] virtual kern_return_t
@@ -66,7 +67,8 @@ class IIsochDuplexHostTransport {
                          uint32_t am824Slots = 0) noexcept = 0;
     [[nodiscard]] virtual kern_return_t PrepareTransmitStream(uint32_t streamIndex, uint8_t channel,
                                                               Driver::HardwareInterface& hardware,
-                                                              uint8_t sourceId) noexcept = 0;
+                                                              uint8_t sourceId,
+                                                              FW::FwSpeed speed) noexcept = 0;
     [[nodiscard]] virtual kern_return_t StartPreparedReceive() noexcept = 0;
     [[nodiscard]] virtual kern_return_t
     StartPreparedReceiveAtCycle(uint32_t cycleTimer) noexcept = 0;
@@ -103,16 +105,14 @@ class IsochDuplexHostTransport final : public IIsochDuplexHostTransport {
     void SetClockAnchorReadyCallback(ClockAnchorReadyCallback callback) noexcept;
 
     [[nodiscard]] kern_return_t BeginSplitDuplex(EndpointId endpointId) noexcept override;
-    [[nodiscard]] kern_return_t ReservePlaybackResources(EndpointId endpointId,
-                                                         ::ASFW::IRM::IRMClient& irmClient,
-                                                         uint64_t allowedChannels,
-                                                         uint32_t bandwidthUnits,
-                                                         uint8_t& outChannel) noexcept override;
-    [[nodiscard]] kern_return_t ReserveCaptureResources(EndpointId endpointId,
-                                                        ::ASFW::IRM::IRMClient& irmClient,
-                                                        uint64_t allowedChannels,
-                                                        uint32_t bandwidthUnits,
-                                                        uint8_t& outChannel) noexcept override;
+    [[nodiscard]] kern_return_t
+    ReservePlaybackResources(EndpointId endpointId, ::ASFW::IRM::IRMClient& irmClient,
+                             uint64_t allowedChannels, uint32_t packetBandwidthUnits,
+                             Duplex::IRMReservationResult& outResult) noexcept override;
+    [[nodiscard]] kern_return_t
+    ReserveCaptureResources(EndpointId endpointId, ::ASFW::IRM::IRMClient& irmClient,
+                            uint64_t allowedChannels, uint32_t packetBandwidthUnits,
+                            Duplex::IRMReservationResult& outResult) noexcept override;
     [[nodiscard]] kern_return_t
     PrepareReceive(uint8_t channel, Driver::HardwareInterface& hardware,
                    ASFW::Audio::Runtime::IDirectAudioBindingSource* bindingSource,
@@ -124,7 +124,8 @@ class IsochDuplexHostTransport final : public IIsochDuplexHostTransport {
                        {}) noexcept override;
     [[nodiscard]] kern_return_t PrepareTransmit(uint8_t channel,
                                                 Driver::HardwareInterface& hardware,
-                                                uint8_t sourceId) noexcept override;
+                                                uint8_t sourceId,
+                                                FW::FwSpeed speed) noexcept override;
     [[nodiscard]] kern_return_t
     PrepareReceiveStream(uint32_t streamIndex, uint8_t channel, Driver::HardwareInterface& hardware,
                          ASFW::Audio::Runtime::IDirectAudioBindingSource* bindingSource,
@@ -133,7 +134,8 @@ class IsochDuplexHostTransport final : public IIsochDuplexHostTransport {
                          uint32_t am824Slots = 0) noexcept override;
     [[nodiscard]] kern_return_t PrepareTransmitStream(uint32_t streamIndex, uint8_t channel,
                                                       Driver::HardwareInterface& hardware,
-                                                      uint8_t sourceId) noexcept override;
+                                                      uint8_t sourceId,
+                                                      FW::FwSpeed speed) noexcept override;
     [[nodiscard]] kern_return_t StartPreparedReceive() noexcept override;
     [[nodiscard]] kern_return_t
     StartPreparedReceiveAtCycle(uint32_t cycleTimer) noexcept override;

@@ -41,8 +41,11 @@ TEST(DuplexStreamProfileTests, PlansResolvedGeometryWithoutIdentityInputs) {
     EXPECT_EQ(plan.captureStreams[0].pcmChannels, 0U);
     EXPECT_EQ(plan.captureStreams[0].am824Slots, 17U);
     EXPECT_EQ(plan.playbackStreams[0].pcmChannels, 16U);
-    EXPECT_EQ(plan.captureStreams[0].bandwidthUnits, 1076U);
-    EXPECT_EQ(plan.playbackStreams[0].bandwidthUnits, 1076U);
+    // Packet term only: 17 slots x 8 blocks x 4 bytes + 8 CIP bytes = 552 payload,
+    // 138 quadlets + 3 header quadlets = 564 units at S400. The per-allocation bus
+    // overhead is charged by the reservation from the live gap count, not here.
+    EXPECT_EQ(plan.captureStreams[0].packetBandwidthUnits, 564U);
+    EXPECT_EQ(plan.playbackStreams[0].packetBandwidthUnits, 564U);
     EXPECT_EQ(plan.captureStreams[0].allowedIsoChannels, uint64_t{1} << 1U);
     EXPECT_EQ(plan.playbackStreams[0].allowedIsoChannels, uint64_t{1} << 0U);
 }

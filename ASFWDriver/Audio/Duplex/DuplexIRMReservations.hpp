@@ -17,9 +17,59 @@
 
 namespace ASFW::Audio::Duplex {
 
+/// Why a reservation was refused. kIOReturnNoResources alone covers a bus that
+/// is genuinely full, a planner that produced no usable channel, a local table
+/// overflow and a lost race with another initiator; those need different fixes,
+/// so the caller is told which one happened.
+enum class IsochReserveFailure : uint8_t {
+    kNone = 0,
+    kNoChannelsAllowed,  ///< the requested channel mask was empty
+    kTableFull,          ///< more streams than this direction can track
+    kInvalidChannel,     ///< channel outside 0..63
+    kBandwidthShort,     ///< the IRM ledger holds fewer units than this stream costs
+    kChannelBusy,        ///< every allowed channel is already allocated on the bus
+    kLockContention,     ///< the ledger moved under us and retries ran out
+    kNoIRM,              ///< no isochronous resource manager in this generation
+    kGenerationChanged,  ///< bus reset invalidated the allocation
+    kSnapshotFailed,     ///< the ledger could not be read
+};
+
+[[nodiscard]] inline const char* ToString(IsochReserveFailure failure) noexcept {
+    switch (failure) {
+        case IsochReserveFailure::kNone: return "None";
+        case IsochReserveFailure::kNoChannelsAllowed: return "NoChannelsAllowed";
+        case IsochReserveFailure::kTableFull: return "TableFull";
+        case IsochReserveFailure::kInvalidChannel: return "InvalidChannel";
+        case IsochReserveFailure::kBandwidthShort: return "BandwidthShort";
+        case IsochReserveFailure::kChannelBusy: return "ChannelBusy";
+        case IsochReserveFailure::kLockContention: return "LockContention";
+        case IsochReserveFailure::kNoIRM: return "NoIRM";
+        case IsochReserveFailure::kGenerationChanged: return "GenerationChanged";
+        case IsochReserveFailure::kSnapshotFailed: return "SnapshotFailed";
+    }
+    return "Unknown";
+}
+
+/// What one stream costs the IRM ledger. The packet term comes from the stream
+/// plan; the overhead term is a property of the bus at the moment of the
+/// allocation, not of the stream.
+struct IsochBandwidthCharge final {
+    uint32_t packetUnits{0};
+    uint32_t overheadUnits{0};
+    uint8_t gapCount{63};
+
+    [[nodiscard]] constexpr uint32_t Total() const noexcept {
+        return packetUnits + overheadUnits;
+    }
+};
+
 struct IRMReservationResult final {
     kern_return_t status{kIOReturnError};
     uint8_t channel{AudioStreamWireInfo::kInvalidIsoChannel};
+    IsochReserveFailure failure{IsochReserveFailure::kNone};
+    IsochBandwidthCharge charge{};
+    uint32_t availableUnits{0};     ///< ledger reading when the request was refused
+    uint64_t refusedChannels{0};    ///< candidates found already allocated
 };
 
 class DuplexIRMReservations final {
@@ -31,21 +81,39 @@ class DuplexIRMReservations final {
     DuplexIRMReservations& operator=(const DuplexIRMReservations&) = delete;
 
     [[nodiscard]] kern_return_t Reserve(IRM::IRMClient& client, uint8_t channel,
-                                        uint32_t bandwidthUnits) noexcept {
-        return ReserveSpecific(client, channel, bandwidthUnits);
+                                        uint32_t packetBandwidthUnits) noexcept {
+        return MapStatus(ReserveSpecific(client, channel,
+                                         ChargeFor(client, packetBandwidthUnits)));
     }
 
     [[nodiscard]] IRMReservationResult ReserveAny(IRM::IRMClient& client,
                                                   uint64_t allowedChannels,
-                                                  uint32_t bandwidthUnits) noexcept {
+                                                  uint32_t packetBandwidthUnits) noexcept {
+        // The overhead half of the charge is a property of the bus, and the bus
+        // manager can optimise the gap count between planning and reserving, so
+        // it is read here rather than carried in from the plan.
+        const IsochBandwidthCharge charge = ChargeFor(client, packetBandwidthUnits);
+        const auto refuse = [charge](IsochReserveFailure failure, kern_return_t status,
+                                     uint32_t available = 0,
+                                     uint64_t refused = 0) noexcept {
+            return IRMReservationResult{.status = status,
+                                        .channel = AudioStreamWireInfo::kInvalidIsoChannel,
+                                        .failure = failure,
+                                        .charge = charge,
+                                        .availableUnits = available,
+                                        .refusedChannels = refused};
+        };
+
         if (count_ >= entries_.size()) {
-            return {.status = kIOReturnNoResources};
+            return refuse(IsochReserveFailure::kTableFull, kIOReturnNoResources);
         }
         if (allowedChannels == 0) {
-            return {.status = kIOReturnNoResources};
+            return refuse(IsochReserveFailure::kNoChannelsAllowed, kIOReturnNoResources);
         }
 
         uint64_t candidates = allowedChannels;
+        uint32_t available = 0;
+        bool lostARace = false;
         while (candidates != 0) {
             auto snapshotState = std::make_shared<SnapshotWaitState>();
             client.ReadResourcesSnapshot(
@@ -56,15 +124,19 @@ class DuplexIRMReservations final {
                 });
             const IRM::AllocationStatus snapshotStatus = WaitSnapshot(snapshotState);
             if (snapshotStatus != IRM::AllocationStatus::Success) {
-                return {.status = MapStatus(snapshotStatus)};
+                return refuse(FailureForStatus(snapshotStatus, IsochReserveFailure::kSnapshotFailed),
+                              MapStatus(snapshotStatus));
             }
-            if (snapshotState->snapshot.bandwidthAvailable < bandwidthUnits) {
-                return {.status = kIOReturnNoResources};
+            available = snapshotState->snapshot.bandwidthAvailable;
+            if (available < charge.Total()) {
+                return refuse(IsochReserveFailure::kBandwidthShort, kIOReturnNoResources,
+                              available);
             }
 
             const uint8_t channel = FirstAvailableChannel(snapshotState->snapshot, candidates);
             if (channel == AudioStreamWireInfo::kInvalidIsoChannel) {
-                return {.status = kIOReturnNoResources};
+                return refuse(IsochReserveFailure::kChannelBusy, kIOReturnNoResources, available,
+                              allowedChannels);
             }
 
             // A competing initiator can consume the selected channel between
@@ -72,16 +144,29 @@ class DuplexIRMReservations final {
             // for a definite no-resource result; timeouts and generation
             // changes have indeterminate/different ownership semantics.
             candidates &= ~(uint64_t{1} << channel);
-            const kern_return_t status = ReserveSpecific(client, channel, bandwidthUnits);
-            if (status == kIOReturnSuccess) {
-                return {.status = status, .channel = channel};
+            const IRM::AllocationStatus status = ReserveSpecific(client, channel, charge);
+            if (status == IRM::AllocationStatus::Success) {
+                return {.status = kIOReturnSuccess, .channel = channel, .charge = charge,
+                        .availableUnits = available};
             }
-            if (status != kIOReturnNoResources) {
-                return {.status = status};
+            // The ledger said this channel was free and the allocation still
+            // failed: another initiator took it in between. Try the next
+            // candidate. Anything else — a short ledger above all — refuses
+            // every candidate equally, so stop and report it.
+            if (status != IRM::AllocationStatus::ChannelBusy &&
+                status != IRM::AllocationStatus::NoResources) {
+                return refuse(FailureForStatus(status, IsochReserveFailure::kSnapshotFailed),
+                              MapStatus(status), available);
             }
+            lostARace = lostARace || status == IRM::AllocationStatus::NoResources;
         }
 
-        return {.status = kIOReturnNoResources};
+        // Every allowed channel looked free in the ledger and was refused when
+        // asked for. Distinguish "the bus owns them all" from "we kept losing
+        // the compare-swap", and report the last ledger reading either way.
+        return refuse(lostARace ? IsochReserveFailure::kLockContention
+                                : IsochReserveFailure::kChannelBusy,
+                      kIOReturnNoResources, available, allowedChannels);
     }
 
     void ReleaseAll() noexcept {
@@ -117,30 +202,64 @@ class DuplexIRMReservations final {
     [[nodiscard]] size_t Count() const noexcept { return count_; }
 
   private:
-    [[nodiscard]] kern_return_t ReserveSpecific(IRM::IRMClient& client, uint8_t channel,
-                                                uint32_t bandwidthUnits) noexcept {
+    /// One stream's charge against the live bus. Linux re-reads the overhead on
+    /// every allocation and reallocation for the same reason
+    /// (sound/firewire/iso-resources.c:119,178): it belongs to the bus, and the
+    /// bus changes underneath a long-lived plan.
+    [[nodiscard]] static IsochBandwidthCharge ChargeFor(const IRM::IRMClient& client,
+                                                        uint32_t packetUnits) noexcept {
+        const uint8_t gapCount = client.CurrentGapCount();
+        return IsochBandwidthCharge{
+            .packetUnits = packetUnits,
+            .overheadUnits = IRM::BandwidthOverheadForGapCount(gapCount),
+            .gapCount = gapCount,
+        };
+    }
+
+    [[nodiscard]] static IsochReserveFailure
+    FailureForStatus(IRM::AllocationStatus status, IsochReserveFailure fallback) noexcept {
+        switch (status) {
+            case IRM::AllocationStatus::NoIRM:
+                return IsochReserveFailure::kNoIRM;
+            case IRM::AllocationStatus::GenerationMismatch:
+                return IsochReserveFailure::kGenerationChanged;
+            case IRM::AllocationStatus::ChannelBusy:
+                return IsochReserveFailure::kChannelBusy;
+            case IRM::AllocationStatus::BandwidthShort:
+                return IsochReserveFailure::kBandwidthShort;
+            case IRM::AllocationStatus::NoResources:
+                return IsochReserveFailure::kLockContention;
+            default:
+                return fallback;
+        }
+    }
+
+    [[nodiscard]] IRM::AllocationStatus ReserveSpecific(IRM::IRMClient& client, uint8_t channel,
+                                                        IsochBandwidthCharge charge) noexcept {
         if (count_ >= entries_.size() || channel > 63) {
-            return kIOReturnNoResources;
+            return IRM::AllocationStatus::NoResources;
         }
 
         // Linux cmp.c:188-209 and iso-resources.c:91-147 reserve channel and
         // bandwidth as one lifecycle-owned resource before establishing a PCR.
+        // The entry records the charged total, because the release has to hand
+        // back exactly what was taken even if the gap count has moved since.
         auto state = std::make_shared<WaitState>();
-        client.AllocateResources(channel, bandwidthUnits, [state](IRM::AllocationStatus status) {
+        client.AllocateResources(channel, charge.Total(), [state](IRM::AllocationStatus status) {
             state->status.store(status, std::memory_order_release);
             state->done.store(true, std::memory_order_release);
         });
         const IRM::AllocationStatus status = Wait(state);
         if (status != IRM::AllocationStatus::Success) {
-            return MapStatus(status);
+            return status;
         }
 
         entries_[count_++] = Entry{
             .client = &client,
             .channel = channel,
-            .bandwidthUnits = bandwidthUnits,
+            .bandwidthUnits = charge.Total(),
         };
-        return kIOReturnSuccess;
+        return IRM::AllocationStatus::Success;
     }
     static constexpr uint32_t kWaitTimeoutMs = 12000;
     static constexpr uint32_t kWaitPollMs = 5;
@@ -208,6 +327,8 @@ class DuplexIRMReservations final {
             case IRM::AllocationStatus::Success:
                 return kIOReturnSuccess;
             case IRM::AllocationStatus::NoResources:
+            case IRM::AllocationStatus::ChannelBusy:
+            case IRM::AllocationStatus::BandwidthShort:
                 return kIOReturnNoResources;
             case IRM::AllocationStatus::GenerationMismatch:
                 return kIOReturnOffline;

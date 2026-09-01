@@ -42,3 +42,8 @@ add_irm_test(IRMBootstrapCoordinatorTests
     IRMBootstrapCoordinatorTests.cpp
     "${ASFW_DRIVER_DIR}/Bus/IRM/IRMBootstrapCoordinator.cpp"
 )
+
+# Isochronous bandwidth allocation math (Apple + Linux cross-checked)
+add_irm_test(IsochBandwidthAllocationTests
+    IsochBandwidthAllocationTests.cpp
+)

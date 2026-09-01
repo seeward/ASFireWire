@@ -5,6 +5,7 @@
 #include "Audio/Devices/ResolvedAudioEndpointProfile.hpp"
 #include "Audio/DriverKit/Runtime/DirectAudioBindingSource.hpp"
 #include "Audio/Duplex/AudioDuplexCoordinator.hpp"
+#include "Bus/IRM/IRMTypes.hpp"
 #include "Audio/Protocols/DICE/Core/DICETypes.hpp"
 #include "Audio/Protocols/Duplex/IDuplexDeviceControl.hpp"
 #include "Audio/Protocols/IDeviceProtocol.hpp"
@@ -169,38 +170,48 @@ class FakeIsochDuplexHostTransport final : public IIsochDuplexHostTransport {
         return beginStatus;
     }
 
-    kern_return_t ReservePlaybackResources(AudioEndpointId endpointId, IRMClient&, uint64_t allowedChannels,
-                                           uint32_t bandwidthUnits,
-                                           uint8_t& outChannel) noexcept override {
+    kern_return_t
+    ReservePlaybackResources(AudioEndpointId endpointId, IRMClient&, uint64_t allowedChannels,
+                             uint32_t packetBandwidthUnits,
+                             ASFW::Audio::Duplex::IRMReservationResult& outResult) noexcept override {
         log_.Add("host.reserve_playback");
         lastEndpointId = endpointId;
         lastPlaybackAllowedChannels = allowedChannels;
-        lastPlaybackBandwidth = bandwidthUnits;
+        lastPlaybackBandwidth = packetBandwidthUnits;
         ++reservePlaybackCalls;
+        outResult = {};
+        outResult.status = reservePlaybackStatus;
         if (reservePlaybackStatus == kIOReturnSuccess) {
-            outChannel = SelectChannel(allowedChannels);
-            if (outChannel == ASFW::Audio::AudioStreamWireInfo::kInvalidIsoChannel) {
+            outResult.channel = SelectChannel(allowedChannels);
+            if (outResult.channel == ASFW::Audio::AudioStreamWireInfo::kInvalidIsoChannel) {
+                outResult.status = kIOReturnNoResources;
+                outResult.failure = ASFW::Audio::Duplex::IsochReserveFailure::kChannelBusy;
                 return kIOReturnNoResources;
             }
-            lastPlaybackChannel = outChannel;
+            lastPlaybackChannel = outResult.channel;
         }
         return reservePlaybackStatus;
     }
 
-    kern_return_t ReserveCaptureResources(AudioEndpointId endpointId, IRMClient&, uint64_t allowedChannels,
-                                          uint32_t bandwidthUnits,
-                                          uint8_t& outChannel) noexcept override {
+    kern_return_t
+    ReserveCaptureResources(AudioEndpointId endpointId, IRMClient&, uint64_t allowedChannels,
+                            uint32_t packetBandwidthUnits,
+                            ASFW::Audio::Duplex::IRMReservationResult& outResult) noexcept override {
         log_.Add("host.reserve_capture");
         lastEndpointId = endpointId;
         lastCaptureAllowedChannels = allowedChannels;
-        lastCaptureBandwidth = bandwidthUnits;
+        lastCaptureBandwidth = packetBandwidthUnits;
         ++reserveCaptureCalls;
+        outResult = {};
+        outResult.status = reserveCaptureStatus;
         if (reserveCaptureStatus == kIOReturnSuccess) {
-            outChannel = SelectChannel(allowedChannels);
-            if (outChannel == ASFW::Audio::AudioStreamWireInfo::kInvalidIsoChannel) {
+            outResult.channel = SelectChannel(allowedChannels);
+            if (outResult.channel == ASFW::Audio::AudioStreamWireInfo::kInvalidIsoChannel) {
+                outResult.status = kIOReturnNoResources;
+                outResult.failure = ASFW::Audio::Duplex::IsochReserveFailure::kChannelBusy;
                 return kIOReturnNoResources;
             }
-            lastCaptureChannel = outChannel;
+            lastCaptureChannel = outResult.channel;
         }
         return reserveCaptureStatus;
     }
@@ -228,11 +239,12 @@ class FakeIsochDuplexHostTransport final : public IIsochDuplexHostTransport {
         return prepareReceiveStatus;
     }
 
-    kern_return_t PrepareTransmit(uint8_t channel, HardwareInterface&,
-                                  uint8_t sourceId) noexcept override {
+    kern_return_t PrepareTransmit(uint8_t channel, HardwareInterface&, uint8_t sourceId,
+                                  ASFW::FW::FwSpeed speed) noexcept override {
         log_.Add("host.prepare_transmit");
         lastTransmitChannel = channel;
         lastTransmitSourceId = sourceId;
+        lastTransmitSpeed = speed;
         ++prepareTransmitCalls;
         return prepareTransmitStatus;
     }
@@ -256,11 +268,13 @@ class FakeIsochDuplexHostTransport final : public IIsochDuplexHostTransport {
     }
 
     kern_return_t PrepareTransmitStream(uint32_t streamIndex, uint8_t channel, HardwareInterface&,
-                                        uint8_t sourceId) noexcept override {
+                                        uint8_t sourceId,
+                                        ASFW::FW::FwSpeed speed) noexcept override {
         log_.Add("host.prepare_transmit_stream");
         lastSecondaryTransmitIndex = streamIndex;
         lastSecondaryTransmitChannel = channel;
         lastSecondaryTransmitSourceId = sourceId;
+        lastSecondaryTransmitSpeed = speed;
         ++prepareTransmitStreamCalls;
         return prepareTransmitStatus;
     }
@@ -333,6 +347,8 @@ class FakeIsochDuplexHostTransport final : public IIsochDuplexHostTransport {
     uint32_t lastScheduledReceiveCycleTimer{0};
     uint8_t lastTransmitChannel{0};
     uint8_t lastTransmitSourceId{0};
+    ASFW::FW::FwSpeed lastTransmitSpeed{ASFW::FW::FwSpeed::S100};
+    ASFW::FW::FwSpeed lastSecondaryTransmitSpeed{ASFW::FW::FwSpeed::S100};
     uint32_t lastTransmitMode{0};
     uint32_t lastTransmitPcmChannels{0};
     uint32_t lastTransmitDataBlockSize{0};
@@ -703,6 +719,13 @@ class AudioDuplexCoordinatorTests : public ::testing::Test {
         ASSERT_NE(runtime_.InsertResolved(MakeProfile(record), protocol), nullptr);
     }
 
+    void InstallDeviceWithLinkSpeed(const std::shared_ptr<IDeviceProtocol>& protocol,
+                                    ASFW::FW::FwSpeed speed) {
+        const auto record = registry_.UpsertFromROM(MakeConfigRom(kObservedGuid),
+                                                    LinkPolicy{.localToNode = speed});
+        ASSERT_NE(runtime_.InsertResolved(MakeProfile(record), protocol), nullptr);
+    }
+
     void InstallDeviceAtGeneration(Generation gen,
                                    const std::shared_ptr<IDeviceProtocol>& protocol) {
         const auto record = registry_.UpsertFromROM(
@@ -771,6 +794,25 @@ class AudioDuplexCoordinatorTests : public ::testing::Test {
     std::atomic<bool> cancel_{false};
     AudioDuplexCoordinator coordinator_;
 };
+
+// One speed per device: the value the IRM reservation is charged at is the same
+// value the isochronous transmit context runs at. Apple and Linux both keep a
+// single per-device speed (IOFWIsochChannel.cpp:653-664; dice-stream.c passes
+// fw_device::max_speed to both the allocation and the stream start). Charging
+// for one bus and transmitting on another is how a link that only answers at
+// S200 ends up being sent S400 packets.
+TEST_F(AudioDuplexCoordinatorTests, TransmitSpeedIsTheSpeedTheReservationWasChargedAt) {
+    InstallDeviceWithLinkSpeed(protocol_, ASFW::FW::FwSpeed::S200);
+
+    ASSERT_EQ(coordinator_.StartStreaming(kTestEndpointId), kIOReturnSuccess);
+
+    EXPECT_EQ(hostTransport_.lastTransmitSpeed, ASFW::FW::FwSpeed::S200);
+    // 9 host->device AM824 slots x 8 events x 4 bytes + 8 CIP bytes = 296 bytes
+    // of payload; 74 payload quadlets + 3 header quadlets, doubled for S200.
+    EXPECT_EQ(hostTransport_.lastPlaybackBandwidth,
+              ASFW::IRM::PacketBandwidthUnits(8 + 8 * 9 * 4,
+                                              static_cast<uint8_t>(ASFW::FW::FwSpeed::S200)));
+}
 
 TEST_F(AudioDuplexCoordinatorTests, ColdStartTransitionsIdleToRunning) {
     ASSERT_EQ(coordinator_.StartStreaming(kTestEndpointId), kIOReturnSuccess);
