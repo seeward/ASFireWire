@@ -47,6 +47,8 @@ void LocalIRMResourceController::OnTopologyReady(uint32_t generation,
     if (!roleAllowsIRMHost) {
         snapshot_.state = LocalIRMResourceState::Disabled;
         broadcastChannel_.ResetImplementedInvalid();
+        ASFW_LOG(IRM, "[LocalIRM] gen=%u disabled by role policy (local=%u irm=%u)",
+                 generation, localNodeId, irmNodeId);
         return;
     }
 
@@ -54,6 +56,11 @@ void LocalIRMResourceController::OnTopologyReady(uint32_t generation,
         snapshot_.state = LocalIRMResourceState::NotLocalIRM;
         snapshot_.localIsIRM = false;
         broadcastChannel_.ResetImplementedInvalid();
+        // Worth stating positively: allocations this generation are wire
+        // transactions to another node, not local CSR operations.
+        ASFW_LOG(IRM, "[LocalIRM] gen=%u local=%u is NOT the IRM (irm=%u); "
+                      "isochronous allocation goes over the wire",
+                 generation, localNodeId, irmNodeId);
         return;
     }
 
@@ -116,7 +123,13 @@ bool LocalIRMResourceController::ProbeActiveResources() noexcept {
         
         snapshot_.state = LocalIRMResourceState::ProbeFailed;
         snapshot_.activeProbeSucceeded = false;
-        
+
+        ASFW_LOG_ERROR(IRM,
+                       "[LocalIRM] gen=%u CSR probe FAILED bm=%u bw=%u chHi=%u chLo=%u",
+                       snapshot_.generation, static_cast<uint32_t>(rBM.status),
+                       static_cast<uint32_t>(rBW.status), static_cast<uint32_t>(rCHi.status),
+                       static_cast<uint32_t>(rCLo.status));
+
         if (rBM.status == ASFW::Driver::LocalCSRLockResult::Status::Timeout ||
             rBW.status == ASFW::Driver::LocalCSRLockResult::Status::Timeout ||
             rCHi.status == ASFW::Driver::LocalCSRLockResult::Status::Timeout ||
@@ -143,6 +156,21 @@ bool LocalIRMResourceController::ProbeActiveResources() noexcept {
     } else {
         snapshot_.state = LocalIRMResourceState::ReadyChanged;
     }
+
+    // The ledger as it stands at the start of this generation, before any
+    // client has allocated. This is the only record of what a bus reset
+    // actually left in the OHCI IRM registers: bw=0x1333 with all channels but
+    // 31 free is the expected reload from the Initial* registers, and anything
+    // else is either a real allocation by another node or a bring-up defect.
+    // One line per topology-ready, never a hot path.
+    ASFW_LOG(IRM,
+             "[LocalIRM] gen=%u local node %u IS the IRM: bm=0x%08x bw=0x%08x (%u units) "
+             "chHi=0x%08x chLo=0x%08x state=%{public}s",
+             snapshot_.generation, snapshot_.localNodeId, snapshot_.busManagerId,
+             snapshot_.bandwidthAvailable, snapshot_.bandwidthAvailable,
+             snapshot_.channelsAvailableHi, snapshot_.channelsAvailableLo,
+             snapshot_.state == LocalIRMResourceState::ReadyDefaults ? "ReadyDefaults"
+                                                                     : "ReadyChanged");
 
     return true;
 }

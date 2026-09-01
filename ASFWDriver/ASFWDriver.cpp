@@ -339,6 +339,20 @@ kern_return_t IMPL(ASFWDriver, Start) {
 kern_return_t ASFWDriver::StartRuntime(IOService* provider) {
     if (!ivars || !ivars->context)
         return kIOReturnNoMemory;
+
+    // First, before anything else in the runtime: an append made before the
+    // ring exists is a silent no-op, so whatever runs earlier can never be
+    // diagnosed from the ring afterwards. This used to sit after
+    // ControllerCore::Start(), which discarded the whole OHCI bring-up --
+    // version detection, PHY and HCControl configuration, and the initial IRM
+    // resource register programming with its readback verification. That is
+    // exactly the evidence needed to tell a mis-programmed BANDWIDTH_AVAILABLE
+    // from a real allocation on the bus. Both calls are idempotent and neither
+    // touches hardware: LogRing allocates its slot array, LogConfig reads
+    // Info.plist properties off the service.
+    ASFW::Logging::LogRing::Shared().Initialize();
+    ASFW::LogConfig::Shared().Initialize(this);
+
     kern_return_t kr = kIOReturnSuccess;
     auto& ctx = *ivars->context;
     DriverWiring::EnsureDeps(this, ctx);
@@ -539,12 +553,6 @@ kern_return_t ASFWDriver::StartRuntime(IOService* provider) {
         ASFW_LOG(Controller,
                  "✅ AudioDeviceSessionManager initialized with explicit family providers");
     }
-
-    // Allocate the queryable log ring before configuration so its
-    // initialization trace (and everything after) is captured. Appends
-    // before this point are silent no-ops by design.
-    ASFW::Logging::LogRing::Shared().Initialize();
-    ASFW::LogConfig::Shared().Initialize(this);
 
     ctx.statusPublisher.Publish(ctx.controller.get(), ctx.deps.asyncController.get(),
                                 SharedStatusReason::Boot);
