@@ -14,33 +14,6 @@ uint8_t GapCountOptimizer::CalculateFromHops(uint8_t maxHops) {
     return GAP_TABLE[maxHops];
 }
 
-uint8_t GapCountOptimizer::CalculateFromPing(uint32_t maxPingNs) {
-    if (maxPingNs > 245) {
-        maxPingNs = 245;
-    }
-
-    if (maxPingNs >= 29) {
-        uint32_t index = (maxPingNs - 20) / 9;
-        if (index > 25) {
-            index = 25;
-        }
-        return GAP_TABLE[index];
-    } else {
-        return 5;
-    }
-}
-
-uint8_t GapCountOptimizer::Calculate(uint8_t maxHops, std::optional<uint32_t> maxPingNs) {
-    uint8_t hopGap = CalculateFromHops(maxHops);
-
-    if (maxPingNs.has_value()) {
-        uint8_t pingGap = CalculateFromPing(*maxPingNs);
-        return std::max(hopGap, pingGap);
-    }
-
-    return hopGap;
-}
-
 bool GapCountOptimizer::AreGapsConsistent(const std::vector<uint8_t>& gaps) {
     if (gaps.empty()) {
         return true;

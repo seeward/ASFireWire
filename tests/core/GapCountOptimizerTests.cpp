@@ -50,87 +50,124 @@ TEST(GapCountOptimizer, CalculateFromHops_BeyondTable) {
 }
 
 // ============================================================================
-// Ping Time Calculation Tests (Apple's Formula)
+// Reference table equivalence
 // ============================================================================
 
-TEST(GapCountOptimizer, CalculateFromPing_VeryShort) {
-    // Ping < 29ns → gap=5 (minimum)
-    EXPECT_EQ(GapCountOptimizer::CalculateFromPing(20), 5);
-    EXPECT_EQ(GapCountOptimizer::CalculateFromPing(28), 5);
+// P1394a draft 4 table C-2. Both references carry it verbatim; if ours ever
+// drifts from either, gap selection stops being wire-compatible. Apple's table
+// is IOFireWireController.cpp:3209-3212; Linux's is core-card.c:276-278, which
+// stops at 16 hops and treats everything beyond as 63.
+TEST(GapCountOptimizer, TableMatchesAppleGapTable) {
+    static constexpr uint8_t kAppleGaps[25] = {
+        63, 5, 7, 8, 10, 13, 16, 18, 21, 24, 26, 29, 32, 35, 37, 40,
+        43, 46, 48, 51, 54, 57, 59, 62, 63
+    };
+
+    for (uint8_t hops = 0; hops < 25; ++hops) {
+        EXPECT_EQ(GapCountOptimizer::CalculateFromHops(hops), kAppleGaps[hops])
+            << "hop count " << static_cast<int>(hops);
+    }
 }
 
-TEST(GapCountOptimizer, CalculateFromPing_Boundary) {
-    // Ping = 29ns → first table entry
-    // (29 - 20) / 9 = 1 → GAP_TABLE[1] = 5
-    EXPECT_EQ(GapCountOptimizer::CalculateFromPing(29), 5);
+TEST(GapCountOptimizer, TableMatchesLinuxGapCountTableOverItsRange) {
+    static constexpr uint8_t kLinuxGaps[16] = {
+        63, 5, 7, 8, 10, 13, 16, 18, 21, 24, 26, 29, 32, 35, 37, 40
+    };
+
+    for (uint8_t hops = 0; hops < 16; ++hops) {
+        EXPECT_EQ(GapCountOptimizer::CalculateFromHops(hops), kLinuxGaps[hops])
+            << "hop count " << static_cast<int>(hops);
+    }
 }
 
-TEST(GapCountOptimizer, CalculateFromPing_TwoHopRange) {
-    // Ping 29-37ns should give gap for 2 hops
-    // (37 - 20) / 9 = 1.88 → index 1 → gap=5
-    // (38 - 20) / 9 = 2 → index 2 → gap=7
-    EXPECT_EQ(GapCountOptimizer::CalculateFromPing(37), 5);
-    EXPECT_EQ(GapCountOptimizer::CalculateFromPing(38), 7);
-}
-
-TEST(GapCountOptimizer, CalculateFromPing_ThreeHopRange) {
-    // Ping 38-46ns should give gap for 3 hops
-    // (46 - 20) / 9 = 2.88 → index 2 → gap=7
-    // (47 - 20) / 9 = 3 → index 3 → gap=8
-    EXPECT_EQ(GapCountOptimizer::CalculateFromPing(46), 7);
-    EXPECT_EQ(GapCountOptimizer::CalculateFromPing(47), 8);
-}
-
-TEST(GapCountOptimizer, CalculateFromPing_MaxPing) {
-    // Ping > 245ns should clamp to 63
-    EXPECT_EQ(GapCountOptimizer::CalculateFromPing(245), 63);
-    EXPECT_EQ(GapCountOptimizer::CalculateFromPing(300), 63);
-    EXPECT_EQ(GapCountOptimizer::CalculateFromPing(1000), 63);
+// Apple clamps maxHops to 25 before indexing (IOFireWireController.cpp:3300-3302);
+// Linux falls back to 63 once max_hops leaves its table (core-card.c:482-485).
+// Both land on the conservative maximum, and so must we.
+TEST(GapCountOptimizer, OverRangeHopCountsAreConservative) {
+    EXPECT_EQ(GapCountOptimizer::CalculateFromHops(24), 63);
+    EXPECT_EQ(GapCountOptimizer::CalculateFromHops(25), 63);
+    EXPECT_EQ(GapCountOptimizer::CalculateFromHops(63), 63);
+    EXPECT_EQ(GapCountOptimizer::CalculateFromHops(255), 63);
 }
 
 // ============================================================================
-// Combined Calculation Tests (Hop + Ping, use maximum)
+// Apple ping-term equivalence
 // ============================================================================
 
-TEST(GapCountOptimizer, Calculate_HopOnlyMode) {
-    // No ping time available → use hop count
-    EXPECT_EQ(GapCountOptimizer::Calculate(2, std::nullopt), 7);
-    EXPECT_EQ(GapCountOptimizer::Calculate(3, std::nullopt), 8);
-}
+namespace {
 
-TEST(GapCountOptimizer, Calculate_BothModesAgree) {
-    // Hops suggest gap=7, ping suggests gap=7 → use 7
-    uint8_t hops = 2;  // gap=7
-    uint32_t ping = 38;  // gap=7
-    EXPECT_EQ(GapCountOptimizer::Calculate(hops, ping), 7);
-}
+// IOFireWireController::finishedBusScan() gap selection, transcribed verbatim
+// from IOFireWireController.cpp:3290-3333, including the ping term.
+uint8_t AppleFinishedBusScanGap(uint8_t maxHops, const uint32_t* pingTimes, uint8_t rootNodeId) {
+    static constexpr uint32_t kAppleGaps[26] = {
+        63, 5, 7, 8, 10, 13, 16, 18, 21, 24, 26, 29, 32, 35, 37, 40,
+        43, 46, 48, 51, 54, 57, 59, 62, 63, 63
+    };
 
-TEST(GapCountOptimizer, Calculate_PingMoreConservative) {
-    // Hops suggest gap=5 (1 hop), but ping suggests gap=7 (longer propagation)
-    // Should use the LARGER (safer) value
-    uint8_t hops = 1;  // gap=5
-    uint32_t ping = 38;  // gap=7
-    EXPECT_EQ(GapCountOptimizer::Calculate(hops, ping), 7);  // Use larger
-}
-
-TEST(GapCountOptimizer, Calculate_HopMoreConservative) {
-    // Hops suggest gap=8 (3 hops), but ping suggests gap=5 (short cables)
-    // Should use the LARGER (safer) value
-    uint8_t hops = 3;  // gap=8
-    uint32_t ping = 28;  // gap=5
-    EXPECT_EQ(GapCountOptimizer::Calculate(hops, ping), 8);  // Use larger
-}
-
-TEST(GapCountOptimizer, Calculate_NeverReturnsZero) {
-    // Verify we NEVER return gap=0 under any circumstances
-    for (uint8_t hops = 0; hops < 30; ++hops) {
-        uint8_t gap = GapCountOptimizer::Calculate(hops, std::nullopt);
-        EXPECT_GE(gap, 5) << "Gap count should never be < 5 for hops=" << (int)hops;
+    uint32_t maxPing = 0;
+    for (uint8_t i = 0; i <= rootNodeId; ++i) {
+        if (pingTimes[i] > maxPing) {
+            maxPing = pingTimes[i];
+        }
     }
 
-    for (uint32_t ping = 0; ping < 300; ping += 10) {
-        uint8_t gap = GapCountOptimizer::Calculate(10, ping);
-        EXPECT_GE(gap, 5) << "Gap count should never be < 5 for ping=" << ping;
+    if (maxHops > 25) {
+        maxHops = 25;
+    }
+    if (maxPing > 245) {
+        maxPing = 245;
+    }
+
+    const uint32_t pingGap = (maxPing >= 29) ? kAppleGaps[(maxPing - 20) / 9] : 5;
+    const uint32_t hopGap = kAppleGaps[maxHops];
+
+    return static_cast<uint8_t>(hopGap > pingGap ? hopGap : pingGap);
+}
+
+} // namespace
+
+// The reason this driver has no ping term. AppleFWOHCI::getPingTimes()
+// (AppleFWOHCI559 __text:0x861C) returns a 64-entry inline array at +0xBC0 that
+// nothing in the kext ever writes — the `lea` in that three-instruction
+// accessor is the only reference to 0xBC0..0xCBF in the whole __text segment,
+// and IOKit zeroes instance memory. So Apple's maxPing is always 0, pingGap is
+// always 5, and 5 is the table minimum for every hop count >= 1. The ping term
+// cannot change the answer on shipping Apple hardware, and this test says so in
+// a form that fails if anyone reintroduces it believing otherwise.
+TEST(GapCountOptimizer, ApplePingTermIsInertWithTheZeroPingTimesTheFwimSupplies) {
+    const uint32_t kZeroPingTimes[64] = {};
+
+    for (uint8_t hops = 1; hops <= 25; ++hops) {
+        // rootNodeId only bounds Apple's scan over the (all-zero) array.
+        EXPECT_EQ(AppleFinishedBusScanGap(hops, kZeroPingTimes, 63),
+                  GapCountOptimizer::CalculateFromHops(hops))
+            << "hop count " << static_cast<int>(hops);
+    }
+}
+
+// And the term is *not* inert if a FWIM ever did fill the array — proof that
+// the equivalence above rests on the zeroes, not on the formula.
+TEST(GapCountOptimizer, ApplePingTermWouldRaiseTheGapIfAFwimEverFilledTheArray) {
+    uint32_t pingTimes[64] = {};
+    pingTimes[3] = 200; // (200 - 20) / 9 = 20 -> gaps[20] = 54
+
+    // One hop would otherwise select 5.
+    EXPECT_EQ(GapCountOptimizer::CalculateFromHops(1), 5);
+    EXPECT_EQ(AppleFinishedBusScanGap(1, pingTimes, 63), 54);
+}
+
+// ============================================================================
+// Floor invariant
+// ============================================================================
+
+// A gap count of 0 is invalid on the wire and 1-4 is below anything either
+// reference will select: the table's smallest non-63 entry is 5. Whatever the
+// hop count, selection must never fall through that floor.
+TEST(GapCountOptimizer, NeverSelectsBelowTheTableFloor) {
+    for (uint16_t hops = 0; hops < 300; ++hops) {
+        const uint8_t gap = GapCountOptimizer::CalculateFromHops(static_cast<uint8_t>(hops));
+        EXPECT_GE(gap, 5) << "hop count " << hops;
+        EXPECT_LE(gap, 63) << "hop count " << hops;
     }
 }
 
@@ -276,7 +313,7 @@ TEST(GapCountOptimizer, RealWorldScenario_ThreeNodeBus) {
 
     // Step 1: Calculate optimal gap
     uint8_t maxHops = 2;  // Root node ID
-    uint8_t optimalGap = GapCountOptimizer::Calculate(maxHops, std::nullopt);
+    uint8_t optimalGap = GapCountOptimizer::CalculateFromHops(maxHops);
     EXPECT_EQ(optimalGap, 7);
 
     // Step 2: Check if update needed (first boot)
