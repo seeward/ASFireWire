@@ -162,11 +162,15 @@ void BusResetCoordinator::MaybeRequestTopologyDrivenReset() {
     const auto gapDecision =
         busManager_->EvaluateGapPolicy(*cycle_.acceptedTopology,
                                        cycle_.acceptedSelfId->quads);
-    if (!gapDecision) {
-        return;
-    }
 
-    if (gapDecision->reason != BusManager::GapDecisionReason::MismatchForce63) {
+    if (!gapDecision || gapDecision->reason != BusManager::GapDecisionReason::MismatchForce63) {
+        // No authority to retool the gap with a reset. Apple still corrects a
+        // mismatch from processSelfIDs() on every node, but its correction is
+        // only a PHY config packet carrying gap 0x3F with no bus reset
+        // (IOFireWireController.cpp:2139-2151). A mismatched bus arbitrates
+        // unreliably, so make that safe correction here even when the
+        // reset-carrying path above declined.
+        BroadcastConservativeGapOnMismatch();
         return;
     }
 
@@ -175,6 +179,22 @@ void BusResetCoordinator::MaybeRequestTopologyDrivenReset() {
     RequestSoftwareReset({ResetRequestKind::GapCorrection, ResetFlavor::Long, command,
                           BusManager::GapDecisionReasonString(gapDecision->reason),
                           gapDecision->reason});
+}
+
+void BusResetCoordinator::BroadcastConservativeGapOnMismatch() {
+    if (hardware_ == nullptr || busManager_ == nullptr || !cycle_.acceptedSelfId.has_value()) {
+        return;
+    }
+
+    if (!BusManager::HasGapCountMismatch(cycle_.acceptedSelfId->quads)) {
+        return;
+    }
+
+    // Once per reset cycle: MaybeRequestTopologyDrivenReset() runs once per
+    // accepted topology, so no additional latch is needed here.
+    ASFW_LOG(BusReset,
+             "Gap count mismatch observed without retool authority; broadcasting conservative gap 63");
+    (void)hardware_->SendPhyConfig(0x3F, std::nullopt, "gap-mismatch-broadcast");
 }
 
 BusResetCoordinator::StepResult BusResetCoordinator::StepClearingBusReset() {

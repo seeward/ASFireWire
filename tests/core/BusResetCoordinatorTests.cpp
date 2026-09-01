@@ -854,7 +854,15 @@ TEST(BusResetCoordinatorTests, EarlyTopologyPolicyDoesNotDelegateBeforeEvidence)
 
     rig.AdvanceMs(2000U);
 
-    EXPECT_FALSE(rig.hardware.TestPhyConfigIssued());
+    // The Self-IDs above carry mismatched gap counts (10 vs 20) and local node 1
+    // is not the IRM, so no root/gap *delegation* may happen — but Apple still
+    // corrects a mismatch from processSelfIDs() on every node, with a PHY config
+    // packet carrying gap 0x3F and no bus reset
+    // (IOFireWireController.cpp:2139-2151). Assert exactly that shape: gap 63,
+    // no forced root, no reset.
+    EXPECT_TRUE(rig.hardware.TestPhyConfigIssued());
+    EXPECT_EQ(rig.hardware.TestLastGapCount(), std::optional<uint8_t>{0x3F});
+    EXPECT_FALSE(rig.hardware.TestLastForceRootNode().has_value());
     EXPECT_FALSE(rig.hardware.TestBusResetIssued());
     ASSERT_EQ(rig.publishedTopologies.size(), 1U);
 }

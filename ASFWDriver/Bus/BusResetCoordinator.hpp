@@ -323,6 +323,7 @@ class BusResetCoordinator : public std::enable_shared_from_this<BusResetCoordina
     void ArmSoftwareResetHoldoffAfterSelfIDCompletion(uint64_t timestampNs) noexcept;
     void SendGlobalResumeIfNeeded();
     void MaybeRequestTopologyDrivenReset();
+    void BroadcastConservativeGapOnMismatch();
     void EvaluateRootDelegation(const TopologySnapshot& topo);
     void RequestSoftwareReset(ResetRequest request);
     [[nodiscard]] ResetRequest MergeResetRequests(const ResetRequest& current,
