@@ -40,8 +40,8 @@ struct ServiceContext {
     // Initial (wiring-time) role policy. The runtime-mutable copy is owned by
     // ControllerCore; this is the seed passed at construction and read by
     // wiring that runs before ControllerCore exists (e.g. the election driver).
-    // Keep normal hardware passive; FullBusManager is an explicit validation
-    // profile because it can emit PHY configuration and reset the whole bus.
+    // The live host participates in BM/IRM management so it can optimize gap
+    // count and maintain cycle-master service when attached devices do not.
     ASFW::Driver::RolePolicy rolePolicy{
         ASFW::Driver::RolePolicy::MakeLiveDefault()};
     std::shared_ptr<ASFW::Driver::ControllerCore> controller;

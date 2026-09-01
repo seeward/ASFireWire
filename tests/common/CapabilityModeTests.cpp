@@ -107,19 +107,18 @@ TEST(CapabilityMode, HardwareValidationDefault_AdvertisesFullBMAndIRM) {
     EXPECT_TRUE(IsLegalCapabilityCombo(out));
 }
 
-TEST(CapabilityMode, LiveDefault_IsPassiveClient) {
+TEST(CapabilityMode, LiveDefault_AdvertisesFullBMAndIRM) {
     const auto policy = ASFW::Driver::RolePolicy::MakeLiveDefault();
-    EXPECT_EQ(policy.roleMode, RoleMode::ClientOnly);
-    EXPECT_EQ(policy.fullBMActivityLevel, ASFW::FW::FullBMActivityLevel::ObserveOnly);
-    EXPECT_EQ(policy.powerPolicyLevel, ASFW::Driver::PowerPolicyLevel::ObserveOnly);
+    EXPECT_EQ(policy.roleMode, RoleMode::FullBusManager);
+    EXPECT_EQ(policy.fullBMActivityLevel, ASFW::FW::FullBMActivityLevel::ForceRootAllowed);
+    EXPECT_EQ(policy.powerPolicyLevel, ASFW::Driver::PowerPolicyLevel::LinkOnAllowed);
 
-    // A passive client must not advertise management ownership, but it still
-    // preserves genuine controller content capabilities.  This is the live
-    // controller value observed on the FW643, including CMC/ISC.
+    // A live OHCI host advertises the management capabilities backed by its
+    // autonomous IRM CSRs and active BM policy.
     const auto decoded = DecodeBusOptions(
         NormalizeLocalBusOptions(0xF000B003u, policy.roleMode, policy.fullBMActivityLevel));
-    EXPECT_FALSE(decoded.bmc);
-    EXPECT_FALSE(decoded.irmc);
+    EXPECT_TRUE(decoded.bmc);
+    EXPECT_TRUE(decoded.irmc);
     EXPECT_TRUE(decoded.cmc);
     EXPECT_TRUE(decoded.isc);
 }

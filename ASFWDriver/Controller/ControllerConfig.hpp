@@ -46,9 +46,9 @@ enum class PowerPolicyLevel : uint8_t {
 };
 
 // FW-22: roleMode selects which capabilities the local Config ROM advertises.
-// The normal live profile is deliberately passive.  Becoming a contender/BM is
-// wire-visible and can reset a bus, so it is a hardware-validation opt-in rather
-// than the default for an attached audio device.
+// Value initialization remains passive for tests and explicit client-only use.
+// The live OHCI controller profile participates in BM/IRM management so it can
+// perform the cycle-master and gap-count duties expected of a host controller.
 struct RolePolicy {
     ASFW::FW::RoleMode roleMode{ASFW::FW::RoleMode::ClientOnly};
     ASFW::FW::FullBMActivityLevel fullBMActivityLevel{ASFW::FW::FullBMActivityLevel::ObserveOnly};
@@ -60,21 +60,18 @@ struct RolePolicy {
     bool linuxStyleCmcForceRoot{false};
 
     [[nodiscard]] static constexpr RolePolicy MakeLiveDefault() noexcept {
-        return RolePolicy{};
-    }
-
-    /// Explicit test-only profile for controlled BM/IRM validation. Do not use as
-    /// the service default on a user bus.
-    [[nodiscard]] static constexpr RolePolicy MakeHardwareValidationDefault() noexcept {
         RolePolicy policy{};
-        // cross-validated with Linux: core-card.c:425-428 Apple: IOFireWireController.cpp:3258-3367
+        // cross-validated with Linux: core-card.c:425-515
+        // Apple: IOFireWireController.cpp:3258-3367
         policy.roleMode = ASFW::FW::RoleMode::FullBusManager;
-        // Hardware validation needs the complete BM mutation envelope except the
-        // legacy remote STATE_SET.cmstr path. ForceRootAllowed unlocks M6 root
-        // selection and M7 gap optimization; RemoteCmstrAllowed remains opt-in.
         policy.fullBMActivityLevel = ASFW::FW::FullBMActivityLevel::ForceRootAllowed;
         policy.powerPolicyLevel = PowerPolicyLevel::LinkOnAllowed;
         return policy;
+    }
+
+    /// Compatibility name retained for controlled BM/IRM validation callers.
+    [[nodiscard]] static constexpr RolePolicy MakeHardwareValidationDefault() noexcept {
+        return MakeLiveDefault();
     }
 };
 
