@@ -60,9 +60,20 @@ void ControllerCore::HandleInterrupt(const InterruptSnapshot& snapshot) {
     HandleFaultInterrupts(events);
     NotifyBusResetCoordinator(events, snapshot.timestamp);
     if ((events & IntEventBits::kBusReset) != 0U) {
-        auto access = hw.TryBeginAccess();
-        if (!access) return;
-        const uint32_t generation = access.Read(Register32::kSelfIDGeneration);
+        // The gate serialises MMIO batches and is deliberately not recursive
+        // (HardwareAccessGate.hpp). Take it for the one register this needs and
+        // release it before notifying anyone: everything below is a cascade
+        // that reaches back into hardware — isoch stop by way of
+        // DeviceManager::SuspendAllForBusReset, plus election and policy
+        // hooks — so holding the scope across it deadlocks the interrupt
+        // thread against itself. Observed as a recursive os_unfair_lock abort
+        // once a live isochronous receive context existed to be stopped.
+        uint32_t generation = 0;
+        {
+            auto access = hw.TryBeginAccess();
+            if (!access) return;
+            generation = access.Read(Register32::kSelfIDGeneration);
+        }
         // A reset edge is a hard liveness boundary: no higher layer may retain
         // the old (generation,node) address while Self-ID and ROM discovery are
         // in flight. This matches the legacy IOFireWireFamily policy of

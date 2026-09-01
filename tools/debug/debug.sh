@@ -121,14 +121,35 @@ if [[ "$mode" == "logs" ]]; then
     'eventMessage CONTAINS "TX FRAME MATRIX" OR eventMessage CONTAINS "TX FRAME SRC_RING" OR eventMessage CONTAINS "IT TX DMA MATRIX" OR eventMessage CONTAINS "IT TX DMA FRAME" OR eventMessage CONTAINS "TX PAYLOAD UNCOVERED" OR eventMessage CONTAINS "ADK FATAL TX PREP"'
 fi
 
+# Executable is not the same as working: Homebrew's lldb links libLLVM against a
+# pinned libz3, and a z3 major bump leaves the binary in place but unable to
+# load ("Library not loaded: libz3.4.16.dylib"). Probe each candidate by
+# actually running it, so a broken Homebrew install falls through to Xcode's.
 LLDB_BIN=""
+lldb_candidates=()
 if command -v brew >/dev/null 2>&1; then
-  homebrew_lldb="$(brew --prefix llvm)/bin/lldb"
-  if [[ -x "$homebrew_lldb" ]]; then
-    LLDB_BIN="$homebrew_lldb"
-  fi
+  lldb_candidates+=("$(brew --prefix llvm)/bin/lldb")
 fi
-LLDB_BIN="${LLDB_BIN:-/usr/bin/lldb}"
+if command -v xcrun >/dev/null 2>&1; then
+  xcode_lldb="$(xcrun -f lldb 2>/dev/null || true)"
+  [[ -n "$xcode_lldb" ]] && lldb_candidates+=("$xcode_lldb")
+fi
+lldb_candidates+=(/usr/bin/lldb)
+
+for candidate in "${lldb_candidates[@]}"; do
+  if [[ -x "$candidate" ]] && "$candidate" --version >/dev/null 2>&1; then
+    LLDB_BIN="$candidate"
+    break
+  fi
+  if [[ -x "$candidate" ]]; then
+    echo "Skipping unusable LLDB: $candidate" >&2
+  fi
+done
+
+if [[ -z "$LLDB_BIN" ]]; then
+  echo "No working lldb found (tried: ${lldb_candidates[*]})" >&2
+  exit 1
+fi
 echo "Using LLDB: $LLDB_BIN"
 
 if [[ -z "$driver_pid" ]]; then
