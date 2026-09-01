@@ -6,14 +6,9 @@
 //   - evidence accumulated for the current bus generation, and
 //   - the ping-pong guard (topology fingerprint + same-topology reset count).
 // It is NOT a state machine: on each event it rebuilds an immutable RoleInputs
-// snapshot, calls the pure EvaluateRolePolicy, and dispatches the resulting
-// RoleAction to injected executors. A new bus reset is a clean slate by
-// construction. See the FW-6 design comment in Linear.
-//
-// SKELETON (FW-6): executors default to nullptr (no-op) and the coordinator is
-// not yet wired into the live BusResetCoordinator FSM — it is exercised only by
-// host tests. The live notification call sites and executor adapters land with
-// FW-7/FW-8/FW-9.
+// snapshot and calls the pure EvaluateRolePolicy. Dispatch to the legacy
+// executors is optional: the live controller disables it because the active
+// BM-authorized Cycle/Root/Gap coordinators are the single mutation authority.
 
 #include <cstdint>
 
@@ -78,12 +73,16 @@ class RoleCoordinator {
     void SetActivityLevel(ASFW::FW::FullBMActivityLevel level) noexcept { activity_ = level; }
     // EXPERIMENTAL Linux-style force-root on verified CMC=0 (default OFF = Apple).
     void SetLinuxStyleCmcForceRoot(bool enabled) noexcept { linuxStyleCmcForceRoot_ = enabled; }
+    // Compatibility/test hook. Production disables legacy dispatch while still
+    // feeding this coordinator evidence for diagnostics.
+    void SetMutationEnabled(bool enabled) noexcept { mutationEnabled_ = enabled; }
 
     // ---- Test / diagnostic accessors -----------------------------------------
     [[nodiscard]] uint32_t Generation() const noexcept { return generation_; }
     [[nodiscard]] RoleAction LastAction() const noexcept { return lastAction_; }
     [[nodiscard]] uint8_t ResetRetriesThisTopology() const noexcept { return resetRetries_; }
     [[nodiscard]] bool HaveTopology() const noexcept { return haveTopology_; }
+    [[nodiscard]] bool MutationEnabled() const noexcept { return mutationEnabled_; }
     [[nodiscard]] RootCapabilityEvidence LastRootEvidence() const noexcept {
         return rootEvidence_;
     }
@@ -108,6 +107,7 @@ class RoleCoordinator {
     // Policy configuration (default = Apple-compatible, observe-only).
     ASFW::FW::FullBMActivityLevel activity_{ASFW::FW::FullBMActivityLevel::ObserveOnly};
     bool linuxStyleCmcForceRoot_{false};
+    bool mutationEnabled_{true};
 
     // Ping-pong guard.
     uint64_t topologyFingerprint_{0};
