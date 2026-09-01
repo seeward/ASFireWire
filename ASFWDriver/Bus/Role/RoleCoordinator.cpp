@@ -107,10 +107,6 @@ void RoleCoordinator::Reevaluate() {
 }
 
 void RoleCoordinator::Dispatch() {
-    if (!mutationEnabled_) {
-        return;
-    }
-
     switch (lastAction_.kind) {
         case RoleAction::Kind::None:
         case RoleAction::Kind::DeferForEvidence:

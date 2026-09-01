@@ -367,12 +367,9 @@ ControllerCore::ControllerCore(ControllerConfig config, RolePolicy initialPolicy
           static_cast<Role::IRemoteCsrWriter*>(this),
           static_cast<Role::IContenderControl*>(this)}) {
 
-    // The legacy RoleCoordinator remains the root-evidence/diagnostic projection,
-    // but must not compete with the active BM-authorized Cycle/Root/Gap policy
-    // coordinators for hardware or reset authority.
-    roleCoordinator_.SetMutationEnabled(false);
-
-    // Keep its projected verdict aligned with the configured capability ladder.
+    // FW-21: the RoleCoordinator's mutating actions are gated by the capability
+    // ladder. Seed it from the initial role policy; ApplyRolePolicy() keeps the
+    // gate in sync on any subsequent runtime change.
     roleCoordinator_.SetActivityLevel(rolePolicy_.fullBMActivityLevel);
     roleCoordinator_.SetLinuxStyleCmcForceRoot(rolePolicy_.linuxStyleCmcForceRoot);
 

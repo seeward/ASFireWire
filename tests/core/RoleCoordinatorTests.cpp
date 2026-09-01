@@ -177,23 +177,6 @@ TEST(RoleCoordinatorTests, LocalCmcRootDispatchedToLocalCycleMasterExecutor) {
     EXPECT_EQ(contender.lastGen, 10U);
 }
 
-TEST(RoleCoordinatorTests, MutationDisabledKeepsVerdictButDoesNotDispatch) {
-    FakeContender contender;
-    RoleCoordinator::Executors ex{};
-    ex.contender = &contender;
-    RoleCoordinator rc(ex);
-    rc.SetActivityLevel(Level::GapPolicyAllowed);
-    rc.SetMutationEnabled(false);
-
-    rc.OnTopologyChanged(11, MakeTopo(0, 0, 0, 1));
-    rc.OnLocalCycleMasterCapability(11, true);
-    rc.OnRootCapability(11, RootCapability::CapableByBIB);
-
-    EXPECT_EQ(rc.LastAction().kind, RoleAction::Kind::EnableLocalCycleMaster);
-    EXPECT_FALSE(rc.MutationEnabled());
-    EXPECT_EQ(contender.localCycleMasterCalls, 0);
-}
-
 TEST(RoleCoordinatorTests, PingPongGuardStopsAfterMax) {
     FakeReset reset;
     RoleCoordinator::Executors ex{};
