@@ -43,7 +43,7 @@ extension ASFWDriverConnector {
         guard kr == KERN_SUCCESS else {
             let errorMsg = "asyncRead failed: \(interpretIOReturn(kr))"
             log(errorMsg, level: .error)
-            lastError = errorMsg
+            setLastError(errorMsg)
             return nil
         }
 
@@ -90,7 +90,7 @@ extension ASFWDriverConnector {
         guard kr == KERN_SUCCESS else {
             let errorMsg = "asyncWrite failed: \(interpretIOReturn(kr))"
             log(errorMsg, level: .error)
-            lastError = errorMsg
+            setLastError(errorMsg)
             return nil
         }
 
@@ -131,7 +131,7 @@ extension ASFWDriverConnector {
         guard kr == KERN_SUCCESS else {
             let errorMsg = "asyncBlockRead failed: \(interpretIOReturn(kr))"
             log(errorMsg, level: .error)
-            lastError = errorMsg
+            setLastError(errorMsg)
             return nil
         }
 
@@ -178,7 +178,7 @@ extension ASFWDriverConnector {
         guard kr == KERN_SUCCESS else {
             let errorMsg = "asyncBlockWrite failed: \(interpretIOReturn(kr))"
             log(errorMsg, level: .error)
-            lastError = errorMsg
+            setLastError(errorMsg)
             return nil
         }
 
@@ -228,7 +228,7 @@ extension ASFWDriverConnector {
         guard kr == KERN_SUCCESS else {
             let errorMsg = "getTransactionResult failed: \(interpretIOReturn(kr))"
             log(errorMsg, level: .error)
-            lastError = errorMsg
+            setLastError(errorMsg)
             return nil
         }
 
@@ -267,13 +267,13 @@ extension ASFWDriverConnector {
         // Validate size (must be 4 or 8 bytes)
         guard compareValue.count == newValue.count else {
             log("asyncCompareSwap: compareValue and newValue size mismatch", level: .error)
-            lastError = "Compare and new values must be the same size"
+            setLastError("Compare and new values must be the same size")
             return nil
         }
 
         guard compareValue.count == 4 || compareValue.count == 8 else {
             log("asyncCompareSwap: Invalid size (must be 4 or 8 bytes)", level: .error)
-            lastError = "Size must be 4 (32-bit) or 8 (64-bit) bytes"
+            setLastError("Size must be 4 (32-bit) or 8 (64-bit) bytes")
             return nil
         }
 
@@ -313,7 +313,7 @@ extension ASFWDriverConnector {
         guard kr == KERN_SUCCESS else {
             let errorMsg = "asyncCompareSwap failed: \(interpretIOReturn(kr))"
             log(errorMsg, level: .error)
-            lastError = errorMsg
+            setLastError(errorMsg)
             return nil
         }
 

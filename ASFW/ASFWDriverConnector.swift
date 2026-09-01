@@ -110,7 +110,9 @@ final class ASFWDriverConnector: ObservableObject {
     // MARK: - Published Properties
 
     @Published var isConnected: Bool = false
-    @Published var lastError: String?
+    /// `private(set)` on purpose: every mutation must go through `setLastError`,
+    /// which guarantees the main thread. See that method for why.
+    @Published private(set) var lastError: String?
     @Published var logMessages: [LogMessage] = []
     @Published var latestStatus: DriverStatus?
 
@@ -174,9 +176,7 @@ final class ASFWDriverConnector: ObservableObject {
             self?.interpretIOReturn(kr) ?? String(format: "Unknown error 0x%x (%d)", UInt32(bitPattern: kr), kr)
         },
         errorHandler: { [weak self] message in
-            DispatchQueue.main.async { [weak self] in
-                self?.lastError = message
-            }
+            self?.setLastError(message)
         }
     )
 
@@ -389,6 +389,26 @@ final class ASFWDriverConnector: ObservableObject {
     }
 
     // MARK: - Logging helpers
+
+    /// Publishes `lastError` on the main thread.
+    ///
+    /// SwiftUI subscribes to `objectWillChange` and runs layout synchronously
+    /// from `ObservableObjectPublisher.send()`. Assigning a `@Published`
+    /// property on `connectionQueue` therefore drives a SwiftUI layout pass on
+    /// that queue, which then blocks waiting for the main thread. If the main
+    /// thread is meanwhile inside `send()` for this same object — publishing a
+    /// log line, say — it is holding the publisher's lock and waiting for that
+    /// layout to finish. The two deadlock, which is what a match notification
+    /// arriving while the log is updating used to produce.
+    func setLastError(_ message: String?) {
+        if Thread.isMainThread {
+            lastError = message
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.lastError = message
+            }
+        }
+    }
 
     func log(_ message: String, level: LogMessage.Level = .info) {
         let logEntry = LogMessage(timestamp: Date(), level: level, message: message)

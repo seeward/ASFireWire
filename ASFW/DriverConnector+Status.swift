@@ -25,7 +25,7 @@ extension ASFWDriverConnector {
         guard kr == KERN_SUCCESS else {
             let errorMsg = "getBusResetCount failed: \(interpretIOReturn(kr))"
             log(errorMsg, level: .error)
-            lastError = errorMsg
+            setLastError(errorMsg)
             return nil
         }
 
@@ -54,7 +54,7 @@ extension ASFWDriverConnector {
         guard kr == KERN_SUCCESS, outputCount == 1 else {
             let message = "requestUserBusReset failed: \(interpretIOReturn(kr))"
             log(message, level: .error)
-            lastError = message
+            setLastError(message)
             return nil
         }
         return UInt32(truncatingIfNeeded: output[0])
@@ -78,7 +78,7 @@ extension ASFWDriverConnector {
         }
 
         guard kr == KERN_SUCCESS else {
-            lastError = "getControllerStatus failed: \(interpretIOReturn(kr))"
+            setLastError("getControllerStatus failed: \(interpretIOReturn(kr))")
             return nil
         }
 
@@ -111,7 +111,7 @@ extension ASFWDriverConnector {
             )
         }
         guard result == KERN_SUCCESS else {
-            lastError = "getBusResetHistory failed: \(interpretIOReturn(result))"
+            setLastError("getBusResetHistory failed: \(interpretIOReturn(result))")
             return nil
         }
         bytes.count = byteCount
@@ -140,7 +140,7 @@ extension ASFWDriverConnector {
         )
 
         guard kr == KERN_SUCCESS else {
-            lastError = "clearHistory failed: \(interpretIOReturn(kr))"
+            setLastError("clearHistory failed: \(interpretIOReturn(kr))")
             return false
         }
 
@@ -217,7 +217,7 @@ extension ASFWDriverConnector {
         guard kr == KERN_SUCCESS else {
             let errorMsg = "ping failed: \(interpretIOReturn(kr))"
             log(errorMsg, level: .error)
-            lastError = errorMsg
+            setLastError(errorMsg)
             return nil
         }
 

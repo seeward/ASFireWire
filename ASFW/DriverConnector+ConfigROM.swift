@@ -48,7 +48,7 @@ extension ASFWDriverConnector {
         guard kr == KERN_SUCCESS else {
             let errorMsg = "getConfigROM failed: \(interpretIOReturn(kr))"
             log(errorMsg, level: .error)
-            lastError = errorMsg
+            setLastError(errorMsg)
             return nil
         }
 
@@ -101,7 +101,7 @@ extension ASFWDriverConnector {
         guard kr == KERN_SUCCESS else {
             let errorMsg = "triggerROMRead failed: \(interpretIOReturn(kr))"
             log(errorMsg, level: .error)
-            lastError = errorMsg
+            setLastError(errorMsg)
             print("[Connector] ❌ triggerROMRead failed: \(errorMsg)")
             return .failed
         }

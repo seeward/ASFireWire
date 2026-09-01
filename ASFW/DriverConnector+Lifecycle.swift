@@ -72,7 +72,7 @@ extension ASFWDriverConnector {
         let service = IOServiceGetMatchingService(kIOMainPortDefault, matchingDict)
         guard service != 0 else {
             log("ASFWDriver service not found in IORegistry", level: .error)
-            lastError = "ASFWDriver service not found"
+            setLastError("ASFWDriver service not found")
             return
         }
 
@@ -91,12 +91,12 @@ extension ASFWDriverConnector {
         guard kr == KERN_SUCCESS else {
             let errorMsg = "Failed to open service: \(interpretIOReturn(kr))"
             log(errorMsg, level: .error)
-            lastError = errorMsg
+            setLastError(errorMsg)
             return
         }
 
         connection = newConnection
-        lastError = nil
+        setLastError(nil)
 
         if !mapSharedStatusMemoryLocked() {
             closeConnectionLocked(reason: "Failed to map shared status memory")

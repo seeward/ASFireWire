@@ -287,7 +287,7 @@ extension ASFWDriverConnector {
         guard submitKR == KERN_SUCCESS, scalarOutputCount >= 1 else {
             let error = "probeSignalFormat submit failed: \(interpretIOReturn(submitKR))"
             log(error, level: .error)
-            lastError = error
+            setLastError(error)
             return nil
         }
 
@@ -314,7 +314,7 @@ extension ASFWDriverConnector {
                 guard let result = SignalFormatProbeResult(wire: out) else {
                     let error = "probeSignalFormat: short result (\(outSize) bytes)"
                     log(error, level: .error)
-                    lastError = error
+                    setLastError(error)
                     return nil
                 }
                 return result
@@ -325,13 +325,13 @@ extension ASFWDriverConnector {
             }
             let error = "probeSignalFormat poll failed: \(interpretIOReturn(pollKR))"
             log(error, level: .error)
-            lastError = error
+            setLastError(error)
             return nil
         }
 
         let error = "probeSignalFormat timed out waiting for response (\(timeoutMs) ms)"
         log(error, level: .error)
-        lastError = error
+        setLastError(error)
         return nil
     }
 
@@ -351,7 +351,7 @@ extension ASFWDriverConnector {
         guard frame.count >= 3 && frame.count <= 512 else {
             let message = "sendRawFCPCommand: Invalid frame length \(frame.count) (must be 3-512)"
             log(message, level: .error)
-            lastError = message
+            setLastError(message)
             return nil
         }
 
@@ -377,7 +377,7 @@ extension ASFWDriverConnector {
         guard submitKR == KERN_SUCCESS, scalarOutputCount >= 1 else {
             let error = "sendRawFCPCommand submit failed: \(interpretIOReturn(submitKR))"
             log(error, level: .error)
-            lastError = error
+            setLastError(error)
             return nil
         }
 
@@ -409,13 +409,13 @@ extension ASFWDriverConnector {
             }
             let error = "sendRawFCPCommand poll failed: \(interpretIOReturn(pollKR))"
             log(error, level: .error)
-            lastError = error
+            setLastError(error)
             return nil
         }
 
         let error = "sendRawFCPCommand timed out waiting for response (\(timeoutMs) ms)"
         log(error, level: .error)
-        lastError = error
+        setLastError(error)
         return nil
     }
 
