@@ -166,6 +166,11 @@ add_core_test(RootSelectionCoordinatorTests
 )
 target_link_libraries(RootSelectionCoordinatorTests PRIVATE GTest::gmock)
 
+# Topology Speed Tests (header-only helper)
+add_core_test(TopologySpeedTests
+    TopologySpeedTests.cpp
+)
+
 # Root Claim Retry Budget Tests (header-only policy)
 add_core_test(RootClaimRetryBudgetTests
     RootClaimRetryBudgetTests.cpp

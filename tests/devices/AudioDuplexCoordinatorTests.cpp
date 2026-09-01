@@ -719,11 +719,21 @@ class AudioDuplexCoordinatorTests : public ::testing::Test {
         ASSERT_NE(runtime_.InsertResolved(MakeProfile(record), protocol), nullptr);
     }
 
+    // asyncSpeed is SpeedPolicy's demotable per-node speed; isochSpeed is the
+    // Self-ID path speed. They are deliberately separate, so tests must be able
+    // to drive them apart.
+    void InstallDeviceWithLinkSpeed(const std::shared_ptr<IDeviceProtocol>& protocol,
+                                    ASFW::FW::FwSpeed isochSpeed,
+                                    ASFW::FW::FwSpeed asyncSpeed) {
+        const auto record = registry_.UpsertFromROM(
+            MakeConfigRom(kObservedGuid),
+            LinkPolicy{.localToNode = asyncSpeed, .isochToNode = isochSpeed});
+        ASSERT_NE(runtime_.InsertResolved(MakeProfile(record), protocol), nullptr);
+    }
+
     void InstallDeviceWithLinkSpeed(const std::shared_ptr<IDeviceProtocol>& protocol,
                                     ASFW::FW::FwSpeed speed) {
-        const auto record = registry_.UpsertFromROM(MakeConfigRom(kObservedGuid),
-                                                    LinkPolicy{.localToNode = speed});
-        ASSERT_NE(runtime_.InsertResolved(MakeProfile(record), protocol), nullptr);
+        InstallDeviceWithLinkSpeed(protocol, speed, speed);
     }
 
     void InstallDeviceAtGeneration(Generation gen,
@@ -795,12 +805,9 @@ class AudioDuplexCoordinatorTests : public ::testing::Test {
     AudioDuplexCoordinator coordinator_;
 };
 
-// One speed per device: the value the IRM reservation is charged at is the same
-// value the isochronous transmit context runs at. Apple and Linux both keep a
-// single per-device speed (IOFWIsochChannel.cpp:653-664; dice-stream.c passes
-// fw_device::max_speed to both the allocation and the stream start). Charging
-// for one bus and transmitting on another is how a link that only answers at
-// S200 ends up being sent S400 packets.
+// The value the IRM reservation is charged at is the same value the isochronous
+// transmit context runs at. Charging for one speed and transmitting at another
+// is how a reservation that fits turns into packets the bus was not paid for.
 TEST_F(AudioDuplexCoordinatorTests, TransmitSpeedIsTheSpeedTheReservationWasChargedAt) {
     InstallDeviceWithLinkSpeed(protocol_, ASFW::FW::FwSpeed::S200);
 
@@ -810,6 +817,34 @@ TEST_F(AudioDuplexCoordinatorTests, TransmitSpeedIsTheSpeedTheReservationWasChar
     // 9 host->device AM824 slots x 8 events x 4 bytes + 8 CIP bytes = 296 bytes
     // of payload; 74 payload quadlets + 3 header quadlets, doubled for S200.
     EXPECT_EQ(hostTransport_.lastPlaybackBandwidth,
+              ASFW::IRM::PacketBandwidthUnits(8 + 8 * 9 * 4,
+                                              static_cast<uint8_t>(ASFW::FW::FwSpeed::S200)));
+}
+
+// Isochronous speed comes from Self-ID, never from async outcomes. SpeedPolicy
+// demotes localToNode when a device times out a request — the Midas Venice F24
+// genuinely needs async at S200 — and isoch used to inherit that demotion,
+// which doubled the bandwidth charge (`unitsAtS1600 >> speedCode`) and put a
+// two-node S400 bus at the edge of the 4915-unit budget for no reason.
+//
+// Apple keeps these apart deliberately: isoch speed comes from the PHY
+// (IOFWIsochChannel.cpp:653) while the demotable per-node-pair fSpeedVector
+// (demoted at IOFireWireController.cpp:2755-2759) is read only by async
+// transmit (:7058).
+TEST_F(AudioDuplexCoordinatorTests, AsyncSpeedDemotionDoesNotLowerIsochronousSpeed) {
+    InstallDeviceWithLinkSpeed(protocol_,
+                               /*isochSpeed=*/ASFW::FW::FwSpeed::S400,
+                               /*asyncSpeed=*/ASFW::FW::FwSpeed::S200);
+
+    ASSERT_EQ(coordinator_.StartStreaming(kTestEndpointId), kIOReturnSuccess);
+
+    EXPECT_EQ(hostTransport_.lastTransmitSpeed, ASFW::FW::FwSpeed::S400);
+    EXPECT_EQ(hostTransport_.lastPlaybackBandwidth,
+              ASFW::IRM::PacketBandwidthUnits(8 + 8 * 9 * 4,
+                                              static_cast<uint8_t>(ASFW::FW::FwSpeed::S400)));
+
+    // And the charge really is half what the demoted async speed would have cost.
+    EXPECT_EQ(hostTransport_.lastPlaybackBandwidth * 2,
               ASFW::IRM::PacketBandwidthUnits(8 + 8 * 9 * 4,
                                               static_cast<uint8_t>(ASFW::FW::FwSpeed::S200)));
 }

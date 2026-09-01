@@ -238,7 +238,7 @@ kern_return_t DVCaptureService::Start(
                     const uint8_t effectiveSpeed = static_cast<uint8_t>(
                         std::min({CMP::MPRBits::GetDataRate(*ompr),
                                   CMP::PCRBits::GetDataRate(selected->pcr),
-                                  static_cast<uint8_t>(record->link.localToNode),
+                                  static_cast<uint8_t>(record->link.isochToNode),
                                   uint8_t{2}}));
                     if (const auto units =
                             CalculateBandwidthUnits(selected->pcr,

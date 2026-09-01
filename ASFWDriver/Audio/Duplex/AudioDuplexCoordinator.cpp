@@ -920,7 +920,7 @@ IOReturn DuplexStartTransaction::Run(const StartRequest& request) noexcept {
     }
 
     const Duplex::StreamPlan initialProfile = Duplex::StreamPlanner::Resolve(
-        *resolvedProfile, record.link.localToNode);
+        *resolvedProfile, record.link.isochToNode);
     AudioDuplexChannels channels = initialProfile.channels;
     const uint64_t restartId = AllocateRestartId();
     const bool useMAudioDuplexChoreography =
@@ -1098,7 +1098,7 @@ IOReturn DuplexStartTransaction::Run(const StartRequest& request) noexcept {
     session.runtimeCaps = prepare.value.runtimeCaps;
     auto liveProfile = WithRuntimeCaps(*resolvedProfile, session.runtimeCaps);
     Duplex::StreamPlan streamProfile = Duplex::StreamPlanner::Resolve(
-        liveProfile, record.link.localToNode, channels);
+        liveProfile, record.link.isochToNode, channels);
     SetSessionPhase(session, DuplexRestartPhase::kPrepared);
     StoreSession(session);
 
@@ -1179,7 +1179,7 @@ IOReturn DuplexStartTransaction::Run(const StartRequest& request) noexcept {
     deviceControl.SetAssignedChannels(channels);
     liveProfile = WithRuntimeCaps(*resolvedProfile, session.runtimeCaps);
     streamProfile = Duplex::StreamPlanner::Resolve(
-        liveProfile, record.link.localToNode, channels);
+        liveProfile, record.link.isochToNode, channels);
     StoreSession(session);
 
     // Log the plan after the IRM-assigned channels have been projected back
@@ -1659,7 +1659,7 @@ IOReturn DuplexStartTransaction::Stop(const StopRequest& request) noexcept {
     if (!resolvedProfile) return kIOReturnNotReady;
     const auto liveProfile = WithRuntimeCaps(*resolvedProfile, session.runtimeCaps);
     const Duplex::StreamPlan profile = Duplex::StreamPlanner::Resolve(
-        liveProfile, record.link.localToNode, session.channels);
+        liveProfile, record.link.isochToNode, session.channels);
     if (profile.stopOrder
             .disconnectPlaybackThenStopTransmitThenDisconnectCaptureThenStopReceive) {
         const auto disconnectPlayback = WaitForAsyncResult<bool>(
