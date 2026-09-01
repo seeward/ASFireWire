@@ -24,72 +24,6 @@ bool BusManagerElectionDriver::ElectionStillAllowed() const noexcept {
            rolePolicy_.fullBMActivityLevel >= ASFW::FW::FullBMActivityLevel::ElectionOnly;
 }
 
-bool BusManagerElectionDriver::ShouldYieldForStableRemoteIRM(const ASFW::Driver::TopologySnapshot& snap) noexcept {
-    if (stormYieldPending_) {
-        stormYieldPending_ = false;
-        // IEEE 1394-2008 H.4 / 8.5.4 leave "most suitable" BM choice and
-        // abdication heuristics implementation-defined. If a remote root/IRM
-        // immediately resets after ASFW wins BM, treat that as bus-specific
-        // evidence to yield instead of fighting the incumbent device.
-        stormYieldActive_ =
-            snap.localNodeId != Driver::kInvalidPhysicalId &&
-            snap.rootNodeId != Driver::kInvalidPhysicalId &&
-            snap.irmNodeId != Driver::kInvalidPhysicalId &&
-            snap.localNodeId != snap.rootNodeId &&
-            snap.rootNodeId == snap.irmNodeId;
-        if (stormYieldActive_) {
-            stormYieldKey_ = YieldTopologyKey{
-                .localNodeId = snap.localNodeId,
-                .rootNodeId = snap.rootNodeId,
-                .irmNodeId = snap.irmNodeId,
-                .nodeCount = snap.nodeCount
-            };
-            ASFW_LOG(Controller,
-                     "[BM Election] Fast reset after local BM win; yielding BM contention while "
-                     "remote root/IRM topology stays stable (local=%u root=%u irm=%u nodes=%u)",
-                     static_cast<unsigned>(stormYieldKey_.localNodeId),
-                     static_cast<unsigned>(stormYieldKey_.rootNodeId),
-                     static_cast<unsigned>(stormYieldKey_.irmNodeId),
-                     static_cast<unsigned>(stormYieldKey_.nodeCount));
-        }
-    }
-
-    if (!stormYieldActive_) {
-        return false;
-    }
-
-    // IEEE 1394-2008 Q.8 explicitly permits a cable bus with an IRM and no BM.
-    // Maintaining that state is preferable to repeatedly destabilizing a bus
-    // that just rejected our BM ownership.
-    const bool sameTopology =
-        snap.localNodeId == stormYieldKey_.localNodeId &&
-        snap.rootNodeId == stormYieldKey_.rootNodeId &&
-        snap.irmNodeId == stormYieldKey_.irmNodeId &&
-        snap.nodeCount == stormYieldKey_.nodeCount;
-    if (!sameTopology) {
-        ASFW_LOG(Controller,
-                 "[BM Election] Clearing fast-reset BM yield: topology changed "
-                 "(local=%u root=%u irm=%u nodes=%u)",
-                 static_cast<unsigned>(snap.localNodeId),
-                 static_cast<unsigned>(snap.rootNodeId),
-                 static_cast<unsigned>(snap.irmNodeId),
-                 static_cast<unsigned>(snap.nodeCount));
-        stormYieldActive_ = false;
-        return false;
-    }
-
-    // cross-validated with Linux: core-topology.c:483-485 Apple: IOFireWireController.cpp:3258-3263
-    ASFW_LOG(Controller,
-             "[BM Election] Yielding BM contention for gen=%u after fast reset storm evidence "
-             "(stable remote root/IRM=%u, local=%u)",
-             snap.generation, static_cast<unsigned>(snap.irmNodeId),
-             static_cast<unsigned>(snap.localNodeId));
-    lastAction_ = 3;
-    lastElectionPath_ = 0;
-    inFlight_ = false;
-    return true;
-}
-
 void BusManagerElectionDriver::OnTopologyReady(const ASFW::Driver::TopologySnapshot& snap, uint64_t nowNs) noexcept {
     if (!active_) {
         return;
@@ -111,11 +45,8 @@ void BusManagerElectionDriver::OnTopologyReady(const ASFW::Driver::TopologySnaps
     localNodeId_ = localNodeId;
     irmNodeId_ = irmNodeId;
 
-    if (ShouldYieldForStableRemoteIRM(snap)) {
-        return;
-    }
-
-    // Milestone 3: Max one election attempt per generation
+    // Start at most one election sequence per generation. A sequence may contain
+    // one bounded transient retry scheduled by HandleCompareSwapResult().
     if (attemptedGeneration_ == generation && attemptsThisGeneration_ >= 1) {
         return;
     }
@@ -223,20 +154,6 @@ void BusManagerElectionDriver::OnTopologyReady(const ASFW::Driver::TopologySnaps
 
 void BusManagerElectionDriver::OnBusReset() noexcept {
     const bool localWasBM = fsm_.Owner() == BmOwner::Local;
-    if (localWasBM && deps_.monotonicNowNs && lastLocalBMWinNs_ != 0) {
-        const uint64_t nowNs = deps_.monotonicNowNs();
-        if (nowNs >= lastLocalBMWinNs_ && nowNs - lastLocalBMWinNs_ <= kFastResetAfterBMWinNs) {
-            // IEEE 1394-2008 H.4 models BM abdication as a valid path when a
-            // better-suited manager is detected; the standard deliberately does
-            // not define that suitability heuristic.
-            stormYieldPending_ = true;
-            ASFW_LOG(Controller,
-                     "[BM Election] Reset arrived %llu ms after local BM win; next stable "
-                     "remote-root topology may suppress BM re-contention",
-                     (nowNs - lastLocalBMWinNs_) / 1000000ULL);
-        }
-    }
-
     if (localWasBM) {
         wasIncumbent_ = true;
     } else {
@@ -254,6 +171,10 @@ void BusManagerElectionDriver::OnBusReset() noexcept {
         }
         inFlightHandle_ = {};
     }
+    if (retryTimer_ != ASFW::Scheduling::kInvalidTimerToken && deps_.scheduler) {
+        deps_.scheduler->Cancel(retryTimer_);
+    }
+    retryTimer_ = ASFW::Scheduling::kInvalidTimerToken;
 }
 
 void BusManagerElectionDriver::Stop() noexcept {
@@ -265,6 +186,10 @@ void BusManagerElectionDriver::Stop() noexcept {
         }
         inFlightHandle_ = {};
     }
+    if (retryTimer_ != ASFW::Scheduling::kInvalidTimerToken && deps_.scheduler) {
+        deps_.scheduler->Cancel(retryTimer_);
+    }
+    retryTimer_ = ASFW::Scheduling::kInvalidTimerToken;
 }
 
 void BusManagerElectionDriver::Contend(uint32_t generation, uint8_t localNodeId, uint8_t irmNodeId, uint16_t busBase16) noexcept {
@@ -293,9 +218,8 @@ void BusManagerElectionDriver::Contend(uint32_t generation, uint8_t localNodeId,
             if (deps_.hardware == nullptr) {
                 ASFW_LOG(Controller, "[BM Election] Cannot perform local CompareSwap: hardware interface is null");
                 inFlight_ = false;
-                if (observer_) {
-                    observer_->OnBMElectionFailed(generation, ASFW::Async::AsyncStatus::kHardwareError);
-                }
+                HandleCompareSwapResult(generation, localNodeId, irmNodeId, busBase16,
+                                        ASFW::Async::AsyncStatus::kHardwareError, 0, false);
                 return;
             }
             result = deps_.hardware->CompareSwapLocalIRMResource(
@@ -308,14 +232,15 @@ void BusManagerElectionDriver::Contend(uint32_t generation, uint8_t localNodeId,
             ASFW_LOG(Controller, "[BM Election] Local CompareSwap failed (status=%d)",
                      static_cast<int>(result.status));
             inFlight_ = false;
-            if (observer_) {
-                observer_->OnBMElectionFailed(generation, ASFW::Async::AsyncStatus::kHardwareError);
-            }
+            HandleCompareSwapResult(generation, localNodeId, irmNodeId, busBase16,
+                                    ASFW::Async::AsyncStatus::kHardwareError, 0, false);
             return;
         }
 
         // Invoke HandleCompareSwapResult synchronously since it's a local hardware lock sequence
-        HandleCompareSwapResult(generation, localNodeId, ASFW::Async::AsyncStatus::kSuccess, result.oldValue, result.compareMatched);
+        HandleCompareSwapResult(generation, localNodeId, irmNodeId, busBase16,
+                                ASFW::Async::AsyncStatus::kSuccess, result.oldValue,
+                                result.compareMatched);
         return;
     }
 
@@ -334,17 +259,80 @@ void BusManagerElectionDriver::Contend(uint32_t generation, uint8_t localNodeId,
              params.destinationID, irmNodeId, generation);
 
     std::weak_ptr<BusManagerElectionDriver> weakSelf = shared_from_this();
-    inFlightHandle_ = deps_.asyncController->CompareSwap(params, [weakSelf, generation, localNodeId](ASFW::Async::AsyncStatus status, uint32_t oldValue, bool compareMatched) {
+    inFlightHandle_ = deps_.asyncController->CompareSwap(params, [weakSelf, generation, localNodeId, irmNodeId, busBase16](ASFW::Async::AsyncStatus status, uint32_t oldValue, bool compareMatched) {
         auto self = weakSelf.lock();
         if (!self) {
             return;
         }
         self->inFlightHandle_ = {}; // clear in-flight handle
-        self->HandleCompareSwapResult(generation, localNodeId, status, oldValue, compareMatched);
+        self->HandleCompareSwapResult(generation, localNodeId, irmNodeId, busBase16,
+                                      status, oldValue, compareMatched);
     });
 }
 
-void BusManagerElectionDriver::HandleCompareSwapResult(uint32_t generation, uint8_t localNodeId, ASFW::Async::AsyncStatus status, uint32_t oldValue, bool compareMatched) noexcept {
+bool BusManagerElectionDriver::IsRetryableFailure(ASFW::Async::AsyncStatus status) noexcept {
+    switch (status) {
+    case ASFW::Async::AsyncStatus::kTimeout:
+    case ASFW::Async::AsyncStatus::kBusyRetryExhausted:
+    case ASFW::Async::AsyncStatus::kHardwareError:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool BusManagerElectionDriver::ScheduleTransientRetry(uint32_t generation, uint8_t localNodeId,
+                                                      uint8_t irmNodeId,
+                                                      uint16_t busBase16) noexcept {
+    if (!deps_.scheduler || attemptsThisGeneration_ >= kMaxAttemptsPerGeneration) {
+        return false;
+    }
+
+    inFlight_ = true;
+    inFlightGen_ = generation;
+    std::weak_ptr<BusManagerElectionDriver> weakSelf = shared_from_this();
+    retryTimer_ = deps_.scheduler->ScheduleAfter(
+        kTransientRetryDelayNs,
+        [weakSelf, generation, localNodeId, irmNodeId, busBase16]() {
+            auto self = weakSelf.lock();
+            if (!self) {
+                return;
+            }
+            self->retryTimer_ = ASFW::Scheduling::kInvalidTimerToken;
+            if (!self->ElectionStillAllowed() || !self->deps_.asyncController) {
+                self->inFlight_ = false;
+                return;
+            }
+
+            const auto state = self->deps_.asyncController->GetBusStateSnapshot();
+            if (state.generation16 != generation) {
+                self->inFlight_ = false;
+                self->fsm_.IncrementStaleAbortCount();
+                ASFW_LOG(Controller,
+                         "[BM Election] Transient retry suppressed: generation changed "
+                         "from %u to %u",
+                         generation, state.generation16);
+                return;
+            }
+
+            self->attemptedGeneration_ = generation;
+            self->attemptsThisGeneration_++;
+            ASFW_LOG(Controller,
+                     "[BM Election] Retrying CompareSwap for gen=%u (attempt=%u)",
+                     generation, static_cast<unsigned>(self->attemptsThisGeneration_));
+            self->Contend(generation, localNodeId, irmNodeId, busBase16);
+        });
+
+    if (retryTimer_ == ASFW::Scheduling::kInvalidTimerToken) {
+        inFlight_ = false;
+        return false;
+    }
+    return true;
+}
+
+void BusManagerElectionDriver::HandleCompareSwapResult(
+    uint32_t generation, uint8_t localNodeId, uint8_t irmNodeId, uint16_t busBase16,
+    ASFW::Async::AsyncStatus status, uint32_t oldValue, bool compareMatched) noexcept {
     if (!active_) {
         return;
     }
@@ -365,6 +353,14 @@ void BusManagerElectionDriver::HandleCompareSwapResult(uint32_t generation, uint
     if (status != ASFW::Async::AsyncStatus::kSuccess) {
         ASFW_LOG(Controller, "[BM Election] CompareSwap failed with status %d (%{public}s)",
                  static_cast<int>(status), ASFW::Async::ToString(status));
+        // Linux firewire core retries RCODE_SEND_ERROR after 1/8 second
+        // (core-card.c:391-398). Our async abstraction coalesces local
+        // send/transport failures into these retryable statuses, so perform one
+        // generation-safe retry.
+        if (IsRetryableFailure(status) &&
+            ScheduleTransientRetry(generation, localNodeId, irmNodeId, busBase16)) {
+            return;
+        }
         if (observer_) {
             observer_->OnBMElectionFailed(generation, status);
         }
@@ -375,18 +371,12 @@ void BusManagerElectionDriver::HandleCompareSwapResult(uint32_t generation, uint
     switch (outcome) {
     case ElectionOutcome::WonBM:
         ASFW_LOG(Controller, "[BM Election] WON Bus Manager election! (oldValue=0x%X, compareMatched=%d)", oldValue, compareMatched);
-        if (deps_.monotonicNowNs) {
-            lastLocalBMWinNs_ = deps_.monotonicNowNs();
-        }
         if (observer_) {
             observer_->OnLocalWonBM(generation, localNodeId);
         }
         break;
     case ElectionOutcome::IncumbentReestablished:
         ASFW_LOG(Controller, "[BM Election] Re-established BM incumbency.");
-        if (deps_.monotonicNowNs) {
-            lastLocalBMWinNs_ = deps_.monotonicNowNs();
-        }
         if (observer_) {
             observer_->OnLocalWonBM(generation, localNodeId);
         }

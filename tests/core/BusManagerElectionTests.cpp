@@ -280,7 +280,7 @@ TEST(BusManagerElectionDriver, IncumbentImmediateContention) {
     EXPECT_EQ(mockAsync->lastCompareSwapParams.swapValue, 0);
 }
 
-TEST(BusManagerElectionDriver, FastResetAfterLocalBMWonYieldsStableRemoteRootIRMTopology) {
+TEST(BusManagerElectionDriver, FastResetAfterLocalBMWonRecontendsAndDiscoversRemoteBM) {
     OSSharedPtr<IODispatchQueue> queue(new IODispatchQueue(), OSNoRetain);
     queue->SetManualDispatchForTesting(true);
 
@@ -324,23 +324,33 @@ TEST(BusManagerElectionDriver, FastResetAfterLocalBMWonYieldsStableRemoteRootIRM
         mockAsync->lastCompareSwapCallback(ASFW::Async::AsyncStatus::kSuccess, 0x3F, true);
     }
 
+    // A reset shortly after winning BM is not abdication evidence. Linux clears
+    // cached ownership on every generation and the incumbent recontends unless
+    // STATE_SET.abdicate was actually observed.
     {
-        ScopedMockClock clock([t0]() { return t0 + 384000000ULL; });
+        ScopedMockClock clock([t0]() { return t0 + 134000000ULL; });
         driver->OnBusReset();
     }
     EXPECT_TRUE(driver->WasIncumbent());
 
     const uint32_t nextGeneration = 22;
     mockAsync->currentGen16 = nextGeneration;
-    timing.OnSelfIDComplete(nextGeneration, t0 + 385000000ULL);
+    timing.OnSelfIDComplete(nextGeneration, t0 + 135000000ULL);
     snap.generation = nextGeneration;
 
-    driver->OnTopologyReady(snap, t0 + 385000000ULL);
-    EXPECT_EQ(mockAsync->compareSwapCount, 1);
-    EXPECT_EQ(driver->GetSnapshot().lastAction, 3);
+    driver->OnTopologyReady(snap, t0 + 135000000ULL);
+    ASSERT_EQ(mockAsync->compareSwapCount, 2);
+    EXPECT_EQ(driver->GetSnapshot().lastAction, 1);
+
+    // The compare-swap old value, not reset timing or topology shape, proves
+    // that the remote IRM already owns BUS_MANAGER_ID in this generation.
+    ASSERT_TRUE(static_cast<bool>(mockAsync->lastCompareSwapCallback));
+    mockAsync->lastCompareSwapCallback(ASFW::Async::AsyncStatus::kSuccess, 2, false);
+    EXPECT_EQ(driver->FSM().Owner(), ASFW::Bus::BmOwner::Remote);
+    EXPECT_EQ(driver->FSM().OwnerId(), 2);
 }
 
-TEST(BusManagerElectionDriver, FastResetYieldClearsWhenTopologyChanges) {
+TEST(BusManagerElectionDriver, FastResetWithStableRemoteRootIRMCanStillWinBM) {
     OSSharedPtr<IODispatchQueue> queue(new IODispatchQueue(), OSNoRetain);
     queue->SetManualDispatchForTesting(true);
 
@@ -387,36 +397,23 @@ TEST(BusManagerElectionDriver, FastResetYieldClearsWhenTopologyChanges) {
         driver->OnBusReset();
     }
 
-    const uint32_t yieldedGeneration = 32;
-    mockAsync->currentGen16 = yieldedGeneration;
-    timing.OnSelfIDComplete(yieldedGeneration, t0 + 301000000ULL);
-    snap.generation = yieldedGeneration;
+    const uint32_t nextGeneration = 32;
+    mockAsync->currentGen16 = nextGeneration;
+    timing.OnSelfIDComplete(nextGeneration, t0 + 301000000ULL);
+    snap.generation = nextGeneration;
 
     driver->OnTopologyReady(snap, t0 + 301000000ULL);
-    EXPECT_EQ(driver->GetSnapshot().lastAction, 3);
-    EXPECT_EQ(mockAsync->compareSwapCount, 1);
+    ASSERT_EQ(mockAsync->compareSwapCount, 2);
+    EXPECT_EQ(driver->GetSnapshot().lastAction, 1);
 
-    driver->OnBusReset();
-
-    const uint32_t changedGeneration = 33;
-    mockAsync->currentGen16 = changedGeneration;
-    timing.OnSelfIDComplete(changedGeneration, t0 + 302000000ULL);
-    snap.generation = changedGeneration;
-    snap.nodeCount = 4;
-
-    driver->OnTopologyReady(snap, t0 + 302000000ULL);
-    EXPECT_EQ(driver->GetSnapshot().lastAction, 2);
-    EXPECT_EQ(mockAsync->compareSwapCount, 1);
-
-    {
-        ScopedMockClock clock([t0]() { return t0 + 428000000ULL; });
-        queue->DrainAllForTesting();
-    }
-
-    EXPECT_EQ(mockAsync->compareSwapCount, 2);
+    // Stable remote root/IRM topology does not imply a remote BM. If the CSR is
+    // unclaimed, the incumbent legitimately wins it again.
+    ASSERT_TRUE(static_cast<bool>(mockAsync->lastCompareSwapCallback));
+    mockAsync->lastCompareSwapCallback(ASFW::Async::AsyncStatus::kSuccess, 0x3F, true);
+    EXPECT_EQ(driver->FSM().Owner(), ASFW::Bus::BmOwner::Local);
 }
 
-TEST(BusManagerElectionDriver, DelayedResetAfterLocalBMWonDoesNotArmStormYield) {
+TEST(BusManagerElectionDriver, TransientCompareSwapFailureRetriesOnceAfter125ms) {
     OSSharedPtr<IODispatchQueue> queue(new IODispatchQueue(), OSNoRetain);
     queue->SetManualDispatchForTesting(true);
 
@@ -436,6 +433,11 @@ TEST(BusManagerElectionDriver, DelayedResetAfterLocalBMWonDoesNotArmStormYield) 
     auto driver = std::make_shared<BusManagerElectionDriver>(
         deps, RolePolicy{RoleMode::FullBusManager, FullBMActivityLevel::ElectionOnly});
 
+    // Make this generation an incumbent generation so the first attempt starts
+    // immediately; the retry itself is the only delayed operation under test.
+    (void)driver->FSM().InterpretOldValue(0x3F, 0);
+    driver->OnBusReset();
+
     constexpr uint64_t t0 = 3000000000ULL;
     const uint32_t generation = 41;
     mockAsync->currentGen16 = generation;
@@ -444,37 +446,80 @@ TEST(BusManagerElectionDriver, DelayedResetAfterLocalBMWonDoesNotArmStormYield) 
     TopologySnapshot snap{};
     snap.generation = generation;
     snap.localNodeId = 0;
-    snap.rootNodeId = 0;
+    snap.rootNodeId = 2;
     snap.irmNodeId = 2;
     snap.nodeCount = 3;
     snap.busBase16 = 0x0;
 
     driver->OnTopologyReady(snap, t0);
+    ASSERT_EQ(mockAsync->compareSwapCount, 1);
+    ASSERT_TRUE(static_cast<bool>(mockAsync->lastCompareSwapCallback));
+
+    mockAsync->lastCompareSwapCallback(ASFW::Async::AsyncStatus::kHardwareError, 0, false);
+    EXPECT_TRUE(driver->InFlight());
+    EXPECT_EQ(driver->GetSnapshot().attemptsThisGen, 1);
+
     {
-        ScopedMockClock clock([t0]() { return t0 + 126000000ULL; });
+        ScopedMockClock clock([t0]() { return t0 + 125000000ULL; });
         queue->DrainAllForTesting();
-        ASSERT_EQ(mockAsync->compareSwapCount, 1);
-        ASSERT_TRUE(static_cast<bool>(mockAsync->lastCompareSwapCallback));
-        mockAsync->lastCompareSwapCallback(ASFW::Async::AsyncStatus::kSuccess, 0x3F, true);
     }
+    ASSERT_EQ(mockAsync->compareSwapCount, 2);
+    EXPECT_EQ(driver->GetSnapshot().attemptsThisGen, 2);
 
-    {
-        ScopedMockClock clock([t0]() { return t0 + 819000000ULL; });
-        driver->OnBusReset();
-    }
-    EXPECT_TRUE(driver->WasIncumbent());
+    // A second transient failure exhausts the bounded retry budget.
+    ASSERT_TRUE(static_cast<bool>(mockAsync->lastCompareSwapCallback));
+    mockAsync->lastCompareSwapCallback(ASFW::Async::AsyncStatus::kTimeout, 0, false);
+    queue->DrainAllForTesting();
+    EXPECT_EQ(mockAsync->compareSwapCount, 2);
+    EXPECT_FALSE(driver->InFlight());
+}
 
-    const uint32_t nextGeneration = 42;
-    mockAsync->currentGen16 = nextGeneration;
-    timing.OnSelfIDComplete(nextGeneration, t0 + 820000000ULL);
-    snap.generation = nextGeneration;
+TEST(BusManagerElectionDriver, BusResetCancelsPendingTransientRetry) {
+    OSSharedPtr<IODispatchQueue> queue(new IODispatchQueue(), OSNoRetain);
+    queue->SetManualDispatchForTesting(true);
+
+    auto scheduler = std::make_shared<QueueTimerScheduler>(queue);
+    ASFW::Bus::Timing::PostResetTimingCoordinator timing;
+    auto mockAsync = std::make_shared<MockAsyncPort>();
+
+    BusManagerElectionDriver::Deps deps{
+        .asyncController = mockAsync.get(),
+        .scheduler = scheduler.get(),
+        .csrResponder = nullptr,
+        .timing = &timing,
+        .monotonicNowNs = ASFW::Testing::HostMonotonicNow
+    };
+
+    auto driver = std::make_shared<BusManagerElectionDriver>(
+        deps, RolePolicy{RoleMode::FullBusManager, FullBMActivityLevel::ElectionOnly});
+
+    (void)driver->FSM().InterpretOldValue(0x3F, 0);
+    driver->OnBusReset();
+
+    constexpr uint64_t t0 = 4000000000ULL;
+    constexpr uint32_t generation = 51;
+    mockAsync->currentGen16 = generation;
+    timing.OnSelfIDComplete(generation, t0);
+
+    TopologySnapshot snap{};
+    snap.generation = generation;
     snap.localNodeId = 0;
     snap.rootNodeId = 2;
     snap.irmNodeId = 2;
+    snap.nodeCount = 3;
 
-    driver->OnTopologyReady(snap, t0 + 820000000ULL);
-    EXPECT_EQ(driver->GetSnapshot().lastAction, 1);
-    EXPECT_EQ(mockAsync->compareSwapCount, 2);
+    driver->OnTopologyReady(snap, t0);
+    ASSERT_EQ(mockAsync->compareSwapCount, 1);
+    ASSERT_TRUE(static_cast<bool>(mockAsync->lastCompareSwapCallback));
+    mockAsync->lastCompareSwapCallback(ASFW::Async::AsyncStatus::kHardwareError, 0, false);
+    ASSERT_TRUE(driver->InFlight());
+
+    mockAsync->currentGen16 = generation + 1;
+    driver->OnBusReset();
+    queue->DrainAllForTesting();
+
+    EXPECT_EQ(mockAsync->compareSwapCount, 1);
+    EXPECT_FALSE(driver->InFlight());
 }
 
 TEST(BusManagerElectionDriver, ChallengerGracePeriod) {

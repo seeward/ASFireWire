@@ -30,7 +30,6 @@ extension DiagnosticsTextFormatter {
         case 0: electActionStr = "none (DoNotContend)"
         case 1: electActionStr = "Immediate (incumbent retry)"
         case 2: electActionStr = "Grace Period (125ms challenger delay)"
-        case 3: electActionStr = "Yielded (fast-reset storm guard)"
         default: electActionStr = "Unknown (\(snapshot.busManager.bmElectionAction))"
         }
         r.row("Election Decision Action", electActionStr)
