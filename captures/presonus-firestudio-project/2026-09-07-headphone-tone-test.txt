@@ -1,0 +1,30 @@
+defaults phase=before input=104 output=97 system_output=97
+target uid=ASFW-000A920402D07FAC id=109 name="PreSonus FireStudio Project (DICE)" nominal_rate=48000 alive=1 running=0 running_somewhere=0 input_channels=10 output_channels=10
+input_virtual stream=111 rate=48000 channels=10 format=lpcm flags=0x9 bits=32 bytes_per_frame=40 frames_per_packet=1
+input_physical stream=111 rate=48000 channels=10 format=lpcm flags=0x9 bits=32 bytes_per_frame=40 frames_per_packet=1
+output_virtual stream=110 rate=48000 channels=10 format=lpcm flags=0x9 bits=32 bytes_per_frame=40 frames_per_packet=1
+output_physical stream=110 rate=48000 channels=10 format=lpcm flags=0x9 bits=32 bytes_per_frame=40 frames_per_packet=1
+trial=1 start_status=0 (0x0) start_call_ms=299 requested_seconds=24
+tone_phase="lead-in: silence" frame=512
+tone_phase="left: lower 440 Hz tone" frame=240128
+tone_phase="gap: silence" frame=336384
+tone_phase="right: higher 880 Hz tone" frame=384000
+tone_phase="gap: silence" frame=480256
+tone_phase="left: lower 440 Hz tone" frame=528384
+tone_phase="gap: silence" frame=624128
+tone_phase="right: higher 880 Hz tone" frame=672256
+tone_phase="gap: silence" frame=768000
+tone_phase="left: lower 440 Hz tone" frame=816128
+tone_phase="gap: silence" frame=912896
+tone_phase="right: higher 880 Hz tone" frame=960000
+tone_phase="gap: silence" frame=1056256
+tone_phase="ending: silence" frame=1104384
+tone_phase="complete: silence" frame=1152000
+trial=1 stop_status=0 (0x0) destroy_status=0 (0x0) elapsed_ms=24364 interrupted=0 callbacks=2252 wrong_device=0 output_bytes_zeroed=46120960 output_buffers=2252 no_output_callbacks=0 channel_mismatch_callbacks=0
+timing kind=now host_valid=2252 sample_valid=2252 missing_fields=0 regressions=0 duplicate_host=0 duplicate_sample=0 first_host=32578870413 last_host=33155124975 first_sample=5363 last_sample=1157875
+timing kind=output host_valid=2252 sample_valid=2252 missing_fields=0 regressions=0 duplicate_host=0 duplicate_sample=0 first_host=32579158033 last_host=33155412710 first_sample=5938 last_sample=1158450
+tone_peak_dbfs=-36 tone_frames=1152000 tone_format_errors=0 tone_sequence_complete=true
+target uid=ASFW-000A920402D07FAC id=109 name="PreSonus FireStudio Project (DICE)" nominal_rate=48000 alive=1 running=0 running_somewhere=0 input_channels=10 output_channels=10
+defaults phase=after input=104 output=97 system_output=97
+default_ids_unchanged=true
+trial_result=PASS evidence_scope=tone_submission_and_lifecycle_listener_confirmation_required

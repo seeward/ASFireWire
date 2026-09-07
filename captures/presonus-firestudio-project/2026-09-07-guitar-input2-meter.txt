@@ -1,0 +1,26 @@
+defaults phase=before input=104 output=97 system_output=97
+target uid=ASFW-000A920402D07FAC id=109 name="PreSonus FireStudio Project (DICE)" nominal_rate=48000 alive=1 running=0 running_somewhere=0 input_channels=10 output_channels=10
+input_virtual stream=111 rate=48000 channels=10 format=lpcm flags=0x9 bits=32 bytes_per_frame=40 frames_per_packet=1
+input_physical stream=111 rate=48000 channels=10 format=lpcm flags=0x9 bits=32 bytes_per_frame=40 frames_per_packet=1
+output_virtual stream=110 rate=48000 channels=10 format=lpcm flags=0x9 bits=32 bytes_per_frame=40 frames_per_packet=1
+output_physical stream=110 rate=48000 channels=10 format=lpcm flags=0x9 bits=32 bytes_per_frame=40 frames_per_packet=1
+trial=1 start_status=0 (0x0) start_call_ms=303 requested_seconds=10
+trial=1 stop_status=0 (0x0) destroy_status=0 (0x0) elapsed_ms=10359 interrupted=0 callbacks=939 wrong_device=0 output_bytes_zeroed=19230720 output_buffers=939 no_output_callbacks=0 channel_mismatch_callbacks=0
+timing kind=now host_valid=939 sample_valid=939 missing_fields=0 regressions=0 duplicate_host=0 duplicate_sample=0 first_host=57357326955 last_host=57597455007 first_sample=5312 last_sample=485569
+timing kind=output host_valid=939 sample_valid=939 missing_fields=0 regressions=0 duplicate_host=0 duplicate_sample=0 first_host=57357614560 last_host=57597742106 first_sample=5887 last_sample=486143
+timing kind=input host_valid=939 sample_valid=939 missing_fields=0 regressions=0 duplicate_host=0 duplicate_sample=0 first_host=57357006560 last_host=57597134108 first_sample=4671 last_sample=484927
+input_meter_frames=480768 no_input_callbacks=0 input_buffer_errors=0 nonfinite_input_samples=0
+input_channel=1 peak=0.000106811537989415 rms=2.701495863058e-05 peak_dbfs=-79.4276366288304 rms_dbfs=-91.3679138636429
+input_channel=2 peak=1 rms=0.190298320988694 peak_dbfs=0 rms_dbfs=-14.4113008699466
+input_channel=3 peak=0.000111699118860997 rms=3.02682023430298e-05 peak_dbfs=-79.0390050560971 rms_dbfs=-90.3802674286952
+input_channel=4 peak=0.000149726882227696 rms=5.15405908634992e-05 peak_dbfs=-76.4940043732285 rms_dbfs=-85.7570121397277
+input_channel=5 peak=0.00011360646749381 rms=2.33961513574945e-05 peak_dbfs=-78.8919388800843 rms_dbfs=-92.6171115540799
+input_channel=6 peak=0.000166893019923009 rms=5.67197479244334e-05 peak_dbfs=-75.5512365345171 rms_dbfs=-84.9253141584994
+input_channel=7 peak=9.62019112193957e-05 rms=2.62353007238006e-05 peak_dbfs=-80.3363259971248 rms_dbfs=-91.6222790661806
+input_channel=8 peak=0.000160455718287267 rms=5.84857285052123e-05 peak_dbfs=-75.8928960199387 rms_dbfs=-84.6590019219752
+input_channel=9 peak=0 rms=0 peak_dbfs=-inf rms_dbfs=-inf
+input_channel=10 peak=0 rms=0 peak_dbfs=-inf rms_dbfs=-inf
+target uid=ASFW-000A920402D07FAC id=109 name="PreSonus FireStudio Project (DICE)" nominal_rate=48000 alive=1 running=0 running_somewhere=0 input_channels=10 output_channels=10
+defaults phase=after input=104 output=97 system_output=97
+default_ids_unchanged=true
+trial_result=PASS evidence_scope=input_levels_and_lifecycle_not_recording_quality
