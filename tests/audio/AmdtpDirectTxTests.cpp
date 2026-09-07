@@ -58,6 +58,130 @@ AmdtpStreamConfig BlockingStereoConfig() {
     return config;
 }
 
+class AmdtpPacketDefaultsTests : public testing::TestWithParam<PcmSlotEncoding> {
+protected:
+    void SetUp() override {
+        config_.pcmChannels = 10;
+        config_.midiSlots = 1;
+        config_.dbs = 11;
+        policy_.hostToDevicePcmEncoding = GetParam();
+        ASSERT_TRUE(timeline_.AttachSlots(timelineSlots_.data(), timelineSlots_.size()));
+        packetizer_.BindTimeline(&timeline_);
+        ASSERT_TRUE(packetizer_.Configure(config_, policy_));
+        bytes_.fill(0xA5);
+    }
+
+    bool PrepareData(uint32_t packetIndex) {
+        AmdtpTimingState timing{};
+        timing.txClockValid = true;
+        timing.disposition = AmdtpPacketDisposition::Data;
+        timing.nextDataSyt = 0x1234;
+        timing.replayValid = true;
+        timing.replayDataBlocks = 8;
+        return packetizer_.PrepareNextPacket(
+            {packetIndex, bytes_.data(), static_cast<uint32_t>(bytes_.size())},
+            timing, packet_);
+    }
+
+    void ExpectSilentPayload() {
+        ASSERT_TRUE(packet_.isData);
+        ASSERT_EQ(packet_.byteCount, 360U);
+        ASSERT_EQ(packet_.framesInPacket, 8U);
+        ASSERT_EQ(packet_.dbs, 11U);
+        const uint8_t pcmLabel = GetParam() == PcmSlotEncoding::Am824MBLA ? 0x40 : 0;
+        for (uint32_t frame = 0; frame < 8; ++frame) {
+            for (uint32_t channel = 0; channel < 11; ++channel) {
+                SCOPED_TRACE(testing::Message() << "frame=" << frame << " channel=" << channel);
+                const uint32_t offset = 8 + (frame * 11 + channel) * 4;
+                EXPECT_EQ(bytes_[offset], channel < 10 ? pcmLabel : 0x80);
+                EXPECT_EQ(bytes_[offset + 1], 0);
+                EXPECT_EQ(bytes_[offset + 2], 0);
+                EXPECT_EQ(bytes_[offset + 3], 0);
+            }
+        }
+        for (uint32_t offset = packet_.byteCount; offset < bytes_.size(); ++offset) {
+            EXPECT_EQ(bytes_[offset], 0xA5) << "beyond packet at " << offset;
+        }
+    }
+
+    AmdtpStreamConfig config_{};
+    AmdtpTxPolicy policy_{};
+    AmdtpPacketTimeline timeline_{};
+    std::array<PacketTimelineSlot, 4> timelineSlots_{};
+    AmdtpTxPacketizer packetizer_{};
+    std::array<uint8_t, 512> bytes_{};
+    PreparedTxPacket packet_{};
+};
+
+TEST_P(AmdtpPacketDefaultsTests, UnwrittenDataPacketContainsWireSilence) {
+    ASSERT_TRUE(PrepareData(0));
+    ExpectSilentPayload();
+    EXPECT_EQ(bytes_[1], 11); // Constant DBS includes the MIDI slot.
+    EXPECT_EQ(bytes_[4], 0x90);
+    EXPECT_EQ(bytes_[5], 0x02);
+    EXPECT_EQ(bytes_[6], 0x12);
+    EXPECT_EQ(bytes_[7], 0x34);
+}
+
+TEST_P(AmdtpPacketDefaultsTests, ReusedDataPacketRestoresSilenceAfterHostAudio) {
+    ASSERT_TRUE(PrepareData(0));
+    AmdtpPayloadWriter writer{};
+    writer.Configure(config_, policy_);
+    writer.BindTimeline(&timeline_);
+    std::array<float, 10> hostFrame{0.5f, -0.5f};
+    writer.WriteFloat32Interleaved({hostFrame.data(), 0, 1, 1, 10}, 0);
+
+    // Golden wire bytes: both PCM polarities retain the selected encoding.
+    std::array<uint8_t, 8> expected{};
+    switch (GetParam()) {
+    case PcmSlotEncoding::Am824MBLA:
+        expected = {0x40, 0x40, 0, 0, 0x40, 0xC0, 0, 0};
+        break;
+    case PcmSlotEncoding::RawSigned24In32BE:
+        expected = {0, 0x40, 0, 0, 0xFF, 0xC0, 0, 0};
+        break;
+    case PcmSlotEncoding::RawSigned24In32LE:
+        expected = {0, 0, 0x40, 0, 0, 0, 0xC0, 0xFF};
+        break;
+    }
+    for (uint32_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(bytes_[8 + i], expected[i]) << "PCM byte " << i;
+    }
+    EXPECT_EQ(bytes_[8 + 10 * 4], 0x80); // PCM writes leave MIDI alone.
+
+    // A subsequent packet in the same memory must not replay the old audio
+    // when the host writer misses its opportunity to fill the new packet.
+    ASSERT_TRUE(PrepareData(1));
+    EXPECT_EQ(packet_.dbc, 8);
+    EXPECT_EQ(packet_.firstAudioFrame, 8U);
+    ExpectSilentPayload();
+}
+
+TEST_P(AmdtpPacketDefaultsTests, NoDataRemainsHeaderOnlyAndDoesNotTouchPayload) {
+    AmdtpTimingState timing{};
+    timing.disposition = AmdtpPacketDisposition::NoData;
+    ASSERT_TRUE(packetizer_.PrepareNextPacket(
+        {0, bytes_.data(), static_cast<uint32_t>(bytes_.size())}, timing, packet_));
+    EXPECT_FALSE(packet_.isData);
+    EXPECT_EQ(packet_.byteCount, 8U);
+    EXPECT_EQ(packet_.framesInPacket, 0U);
+    EXPECT_EQ(packet_.dbc, 0);
+    EXPECT_EQ(bytes_[1], 11);
+    EXPECT_EQ(bytes_[4], 0x90);
+    EXPECT_EQ(bytes_[5], 0xFF);
+    EXPECT_EQ(bytes_[6], 0xFF);
+    EXPECT_EQ(bytes_[7], 0xFF);
+    for (uint32_t offset = 8; offset < bytes_.size(); ++offset) {
+        EXPECT_EQ(bytes_[offset], 0xA5) << "payload byte " << offset;
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    PcmEncodings, AmdtpPacketDefaultsTests,
+    testing::Values(PcmSlotEncoding::Am824MBLA,
+                    PcmSlotEncoding::RawSigned24In32BE,
+                    PcmSlotEncoding::RawSigned24In32LE));
+
 TEST(AmdtpDirectTxTests, Int32EncodingUsesHighSigned24Bits) {
     EXPECT_EQ(PcmSlotCodec::EncodeInt32(
                   INT32_MAX, PcmSlotEncoding::RawSigned24In32BE),

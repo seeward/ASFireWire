@@ -1,6 +1,7 @@
 #include "AmdtpTxPacketizer.hpp"
 
 #include "AmdtpRateGeometry.hpp"
+#include "PcmSlotCodec.hpp"
 #include "../IEC61883/Syt.hpp"
 
 namespace ASFW::Protocols::Audio::AMDTP {
@@ -286,6 +287,24 @@ void AmdtpTxPacketizer::WriteDataPacketDefaults(uint8_t* packetBytes,
     if (txPolicy_.clearPayloadBeforeExposure) {
         for (uint32_t i = 0; i < payloadBytes; ++i) {
             payload[i] = 0;
+        }
+
+        // A packet may reach the bus before the host writer fills it. AM824
+        // silence requires its PCM label; raw PCM silence remains all zero.
+        // Behavioral reference: Linux sound/firewire/amdtp-am824.c:209-217
+        // (write_pcm_silence), corroborated by FFADO encodeAudioPortsSilence.
+        const uint32_t pcmSilence = PcmSlotCodec::EncodeInt32(
+            0, txPolicy_.hostToDevicePcmEncoding);
+        if (pcmSilence != 0) {
+            const uint32_t pcmSlots = streamConfig_.pcmChannels < streamConfig_.dbs
+                                          ? streamConfig_.pcmChannels : streamConfig_.dbs;
+            const uint32_t frames = payloadBytes / (streamConfig_.dbs * kBytesPerSlot);
+            for (uint32_t frame = 0; frame < frames; ++frame) {
+                for (uint32_t slot = 0; slot < pcmSlots; ++slot) {
+                    WriteBE32(payload + (frame * streamConfig_.dbs + slot) * kBytesPerSlot,
+                              pcmSilence);
+                }
+            }
         }
     }
 
