@@ -22,7 +22,11 @@ namespace {
     return caps.sampleRateHz != 0 &&
         caps.hostOutputPcmChannels != 0 &&
         caps.deviceToHostAm824Slots != 0 &&
-        caps.hostToDeviceAm824Slots != 0;
+        caps.hostToDeviceAm824Slots != 0 &&
+        caps.deviceToHostStreamCount != 0 &&
+        caps.deviceToHostStreamCount <= kMaxAudioStreamsPerDirection &&
+        caps.hostToDeviceStreamCount != 0 &&
+        caps.hostToDeviceStreamCount <= kMaxAudioStreamsPerDirection;
 }
 
 void LogRuntimeCaps(const char* source, const AudioStreamRuntimeCaps& caps) {
@@ -175,7 +179,9 @@ void DICETcatProtocol::PrepareDuplex(const AudioDuplexChannels& channels,
     }
 
     DiceClockConfiguration diceClock{};
-    if (!MakeDiceClockConfiguration(desiredClock, diceClock)) {
+    if (!MakeDiceClockConfiguration(desiredClock, diceClock) ||
+        (runtimePolicy_.requiredRuntimeGeometry &&
+         desiredClock.sampleRateHz != runtimePolicy_.requiredRuntimeGeometry->sampleRateHz)) {
         callback(kIOReturnUnsupported, {});
         return;
     }
@@ -190,8 +196,15 @@ void DICETcatProtocol::PrepareDuplex(const AudioDuplexChannels& channels,
         channels,
         diceClock,
         [this, callback = std::move(callback)](IOReturn status, DiceDuplexPrepareResult result) mutable {
-            if (status == kIOReturnSuccess) {
-                CacheRuntimeCaps(result.runtimeCaps);
+            if (status != kIOReturnSuccess) {
+                ResetRuntimeCaps();
+            }
+            if (status == kIOReturnSuccess && !CacheRuntimeCaps(result.runtimeCaps)) {
+                duplexCtrl_->AbortDuplex(kIOReturnUnsupported,
+                    [callback = std::move(callback)](IOReturn rollbackStatus) mutable {
+                        callback(rollbackStatus, {});
+                    });
+                return;
             }
             callback(status, result);
         });
@@ -223,8 +236,15 @@ void DICETcatProtocol::ConfirmDuplexStart(ConfirmCallback callback) {
 
     duplexCtrl_->ConfirmDuplexStart(
         [this, callback = std::move(callback)](IOReturn status, DiceDuplexConfirmResult result) mutable {
-            if (status == kIOReturnSuccess) {
-                CacheRuntimeCaps(result.runtimeCaps);
+            if (status != kIOReturnSuccess) {
+                ResetRuntimeCaps();
+            }
+            if (status == kIOReturnSuccess && !CacheRuntimeCaps(result.runtimeCaps)) {
+                duplexCtrl_->AbortDuplex(kIOReturnUnsupported,
+                    [callback = std::move(callback)](IOReturn rollbackStatus) mutable {
+                        callback(rollbackStatus, {});
+                    });
+                return;
             }
             callback(status, result);
         });
@@ -238,7 +258,9 @@ void DICETcatProtocol::ApplyClockConfig(const AudioClockConfig& desiredClock,
     }
 
     DiceClockConfiguration diceClock{};
-    if (!MakeDiceClockConfiguration(desiredClock, diceClock)) {
+    if (!MakeDiceClockConfiguration(desiredClock, diceClock) ||
+        (runtimePolicy_.requiredRuntimeGeometry &&
+         desiredClock.sampleRateHz != runtimePolicy_.requiredRuntimeGeometry->sampleRateHz)) {
         callback(kIOReturnUnsupported, {});
         return;
     }
@@ -253,8 +275,15 @@ void DICETcatProtocol::ApplyClockConfig(const AudioClockConfig& desiredClock,
     duplexCtrl_->ApplyClockConfig(
         diceClock,
         [this, callback = std::move(callback)](IOReturn status, DiceClockApplyResult result) mutable {
-            if (status == kIOReturnSuccess) {
-                CacheRuntimeCaps(result.runtimeCaps);
+            if (status != kIOReturnSuccess) {
+                ResetRuntimeCaps();
+            }
+            if (status == kIOReturnSuccess && !CacheRuntimeCaps(result.runtimeCaps)) {
+                duplexCtrl_->AbortDuplex(kIOReturnUnsupported,
+                    [callback = std::move(callback)](IOReturn rollbackStatus) mutable {
+                        callback(rollbackStatus, {});
+                    });
+                return;
             }
             callback(status, result);
         });
@@ -397,8 +426,12 @@ void DICETcatProtocol::EnsureRuntimeCapsLoaded(VoidCallback callback) {
     }
 
     if (runtimeCapsValid_.load(std::memory_order_acquire)) {
-        callback(kIOReturnSuccess);
-        return;
+        AudioStreamRuntimeCaps caps{};
+        if (GetRuntimeAudioStreamCaps(caps) && RuntimeCapsMatchPolicy(caps)) {
+            callback(kIOReturnSuccess);
+            return;
+        }
+        ResetRuntimeCaps();
     }
 
     EnsureSectionsLoaded([this, callback = std::move(callback)](IOReturn sectionStatus) mutable {
@@ -453,14 +486,13 @@ void DICETcatProtocol::EnsureRuntimeCapsLoaded(VoidCallback callback) {
 
                                 state->rx = rx;
                                 LogStreamConfigSummary("RX", state->rx);
-                                CacheRuntimeCaps(state->global, state->tx, state->rx);
+                                if (!CacheRuntimeCaps(state->global, state->tx, state->rx)) {
+                                    callback(kIOReturnUnsupported);
+                                    return;
+                                }
                                 AudioStreamRuntimeCaps caps{};
                                 (void)GetRuntimeAudioStreamCaps(caps);
                                 LogRuntimeCaps("standard-dice", caps);
-                                if (!HasUsableRuntimeCaps(caps)) {
-                                    ASFW_LOG(DICE,
-                                             "DICETcatProtocol: standard DICE discovery produced zero or partial caps; audio publication should fail closed");
-                                }
                                 callback(kIOReturnSuccess);
                             });
                     });
@@ -468,7 +500,7 @@ void DICETcatProtocol::EnsureRuntimeCapsLoaded(VoidCallback callback) {
     });
 }
 
-void DICETcatProtocol::CacheRuntimeCaps(const GlobalState& global,
+bool DICETcatProtocol::CacheRuntimeCaps(const GlobalState& global,
                                         const StreamConfig& tx,
                                         const StreamConfig& rx) noexcept {
     AudioStreamRuntimeCaps caps{
@@ -534,7 +566,7 @@ void DICETcatProtocol::CacheRuntimeCaps(const GlobalState& global,
     fillLabels(tx, inputChannelLabelCount_, inputChannelLabels_);
     fillLabels(rx, outputChannelLabelCount_, outputChannelLabels_);
 
-    CacheRuntimeCaps(caps);
+    return CacheRuntimeCaps(caps);
 }
 
 bool DICETcatProtocol::GetChannelLabels(std::vector<std::string>& inNames,
@@ -557,7 +589,48 @@ bool DICETcatProtocol::GetChannelLabels(std::vector<std::string>& inNames,
     return inCount > 0 || outCount > 0;
 }
 
-void DICETcatProtocol::CacheRuntimeCaps(const AudioStreamRuntimeCaps& caps) noexcept {
+bool DICETcatProtocol::RuntimeCapsMatchPolicy(const AudioStreamRuntimeCaps& caps) const noexcept {
+    if (!HasUsableRuntimeCaps(caps)) {
+        return false;
+    }
+    if (!runtimePolicy_.requiredRuntimeGeometry) {
+        return true;
+    }
+    const auto& expected = *runtimePolicy_.requiredRuntimeGeometry;
+    if (caps.sampleRateHz != expected.sampleRateHz ||
+        (runtimePolicy_.exposeDeviceToHostToCoreAudio &&
+         caps.hostInputPcmChannels != expected.hostInputPcmChannels) ||
+        caps.hostOutputPcmChannels != expected.hostOutputPcmChannels ||
+        caps.deviceToHostAm824Slots != expected.deviceToHostAm824Slots ||
+        caps.hostToDeviceAm824Slots != expected.hostToDeviceAm824Slots ||
+        caps.deviceToHostStreamCount != expected.deviceToHostStreamCount ||
+        caps.hostToDeviceStreamCount != expected.hostToDeviceStreamCount) {
+        return false;
+    }
+    auto sameStreams = [](const AudioStreamWireInfo* observed,
+                          const AudioStreamWireInfo* required, uint32_t count) {
+        for (uint32_t i = 0; i < count; ++i) {
+            if (observed[i].pcmChannels != required[i].pcmChannels ||
+                observed[i].midiPorts != required[i].midiPorts ||
+                observed[i].am824Slots != required[i].am824Slots) {
+                return false;
+            }
+        }
+        return true;
+    };
+    return sameStreams(caps.deviceToHostStreams, expected.deviceToHostStreams,
+                       caps.deviceToHostStreamCount) &&
+           sameStreams(caps.hostToDeviceStreams, expected.hostToDeviceStreams,
+                       caps.hostToDeviceStreamCount);
+}
+
+bool DICETcatProtocol::CacheRuntimeCaps(const AudioStreamRuntimeCaps& caps) noexcept {
+    if (!RuntimeCapsMatchPolicy(caps)) {
+        ASFW_LOG(DICE, "DICETcatProtocol: rejecting unusable or unexpected runtime geometry");
+        LogRuntimeCaps("rejected", caps);
+        ResetRuntimeCaps();
+        return false;
+    }
     const uint32_t exposedInputChannels = runtimePolicy_.exposeDeviceToHostToCoreAudio
                                               ? caps.hostInputPcmChannels
                                               : 0;
@@ -581,6 +654,7 @@ void DICETcatProtocol::CacheRuntimeCaps(const AudioStreamRuntimeCaps& caps) noex
 
     runtimeCapsValid_.store(true, std::memory_order_release);
     LogRuntimeCaps("cache", caps);
+    return true;
 }
 
 void DICETcatProtocol::ResetRuntimeCaps() noexcept {

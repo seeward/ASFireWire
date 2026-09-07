@@ -37,6 +37,9 @@ struct DICETcatRuntimePolicy final {
     // are flowing; it does not select ARX1 as a clock source.
     bool requireSourceLockBeforeStreamEnable{true};
     bool requireSourceLockAtConfirm{true};
+    // Optional captured wire geometry. Isochronous channel assignments are not
+    // compared; rates, PCM/MIDI widths, slot totals and stream counts are exact.
+    std::optional<AudioStreamRuntimeCaps> requiredRuntimeGeometry{};
 };
 
 class DICETcatProtocol final : public Audio::IDeviceProtocol,
@@ -99,10 +102,11 @@ private:
         DiceClockConfiguration& out) noexcept;
     void EnsureSectionsLoaded(VoidCallback callback);
     void EnsureRuntimeCapsLoaded(VoidCallback callback);
-    void CacheRuntimeCaps(const GlobalState& global,
+    [[nodiscard]] bool RuntimeCapsMatchPolicy(const AudioStreamRuntimeCaps& caps) const noexcept;
+    [[nodiscard]] bool CacheRuntimeCaps(const GlobalState& global,
                           const StreamConfig& tx,
                           const StreamConfig& rx) noexcept;
-    void CacheRuntimeCaps(const AudioStreamRuntimeCaps& caps) noexcept;
+    [[nodiscard]] bool CacheRuntimeCaps(const AudioStreamRuntimeCaps& caps) noexcept;
     void ResetRuntimeCaps() noexcept;
 
     Protocols::Ports::FireWireBusInfo& busInfo_;

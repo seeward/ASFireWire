@@ -20,7 +20,12 @@ namespace ASFW::Audio {
 [[nodiscard]] inline bool ApplyDiceRuntimeCapsToDeviceConfig(
     const AudioStreamRuntimeCaps& caps,
     Model::ASFWAudioDevice& config) {
-    if (caps.sampleRateHz == 0 || caps.hostOutputPcmChannels == 0) {
+    if (caps.sampleRateHz == 0 || caps.hostOutputPcmChannels == 0 ||
+        caps.deviceToHostAm824Slots == 0 || caps.hostToDeviceAm824Slots == 0 ||
+        caps.deviceToHostStreamCount == 0 ||
+        caps.deviceToHostStreamCount > kMaxAudioStreamsPerDirection ||
+        caps.hostToDeviceStreamCount == 0 ||
+        caps.hostToDeviceStreamCount > kMaxAudioStreamsPerDirection) {
         return false;
     }
 

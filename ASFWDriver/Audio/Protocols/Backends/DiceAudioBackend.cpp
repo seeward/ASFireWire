@@ -602,6 +602,14 @@ void DiceAudioBackend::EnsureNubForGuid(uint64_t guid) noexcept {
     }
     dev.currentSampleRate = 48000u;
 
+    auto* dice = protocol ? protocol->AsDuplexDeviceControl() : nullptr;
+    if (!dice) {
+        ASFW_LOG(Audio,
+                 "DiceAudioBackend::EnsureNubForGuid: deferring publication without DICE runtime control GUID=0x%016llx",
+                 guid);
+        return;
+    }
+
     // Enrich with the device's real per-channel labels (if the protocol has
     // loaded them), update the endpoint runtime, then publish the nub. Host
     // input == device TX, host output == device RX (see AudioTypes.hpp), which
@@ -613,15 +621,19 @@ void DiceAudioBackend::EnsureNubForGuid(uint64_t guid) noexcept {
         }
         if (protocol) {
             AudioStreamRuntimeCaps caps{};
-            if (protocol->GetRuntimeAudioStreamCaps(caps) &&
-                ApplyDiceRuntimeCapsToDeviceConfig(caps, dev)) {
+            if (!protocol->GetRuntimeAudioStreamCaps(caps) ||
+                !ApplyDiceRuntimeCapsToDeviceConfig(caps, dev)) {
                 ASFW_LOG(Audio,
-                         "DiceAudioBackend::EnsureNubForGuid: applied runtime geometry rate=%u in=%u out=%u (GUID=0x%016llx)",
-                         dev.currentSampleRate,
-                         dev.inputChannelCount,
-                         dev.outputChannelCount,
+                         "DiceAudioBackend::EnsureNubForGuid: deferring publication without usable runtime geometry GUID=0x%016llx",
                          guid);
+                return;
             }
+            ASFW_LOG(Audio,
+                     "DiceAudioBackend::EnsureNubForGuid: applied runtime geometry rate=%u in=%u out=%u (GUID=0x%016llx)",
+                     dev.currentSampleRate,
+                     dev.inputChannelCount,
+                     dev.outputChannelCount,
+                     guid);
 
             std::vector<std::string> inNames;
             std::vector<std::string> outNames;
@@ -645,17 +657,18 @@ void DiceAudioBackend::EnsureNubForGuid(uint64_t guid) noexcept {
 
     // Channel labels live in the TCAT stream-format name sections, cached only
     // once runtime caps load (during the first stream discovery). Load them
-    // once before the first publish so CoreAudio shows the real names from the
-    // start. The load early-returns if caps are already cached; publish happens
-    // regardless of outcome (names fall back to synthesized "<plug> N").
-    if (auto* dice = protocol ? protocol->AsDuplexDeviceControl() : nullptr) {
-        dice->EnsureRuntimeStreamGeometry(
-            [finish, dev, protocol](IOReturn /*status*/) mutable {
-                finish(std::move(dev), protocol);
-            });
-        return;
-    }
-    finish(std::move(dev), protocol);
+    // once before the first publish. Missing labels can use synthesized names;
+    // missing or unreadable wire geometry must never publish profile defaults.
+    dice->EnsureRuntimeStreamGeometry(
+        [finish, dev, protocol, guid](IOReturn status) mutable {
+            if (status != kIOReturnSuccess) {
+                ASFW_LOG(Audio,
+                         "DiceAudioBackend::EnsureNubForGuid: runtime geometry failed GUID=0x%016llx kr=0x%x",
+                         guid, status);
+                return;
+            }
+            finish(std::move(dev), protocol);
+        });
 }
 
 IOReturn DiceAudioBackend::StartStreaming(uint64_t guid) noexcept {

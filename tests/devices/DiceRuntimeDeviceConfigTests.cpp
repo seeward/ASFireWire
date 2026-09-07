@@ -88,6 +88,42 @@ TEST(DiceRuntimeDeviceConfigTests, RejectsPartialCapsWithoutChangingFallbackConf
     EXPECT_EQ(config.sampleRates, before.sampleRates);
 }
 
+TEST(DiceRuntimeDeviceConfigTests, RejectsMissingWireGeometryBeforeMutatingPublicationConfig) {
+    for (uint32_t failure = 0; failure < 7; ++failure) {
+        SCOPED_TRACE(failure);
+        ASFWAudioDevice config{};
+        config.inputChannelCount = 16;
+        config.outputChannelCount = 8;
+        config.channelCount = 16;
+        config.currentSampleRate = 48000;
+        config.sampleRates = {48000};
+        const ASFWAudioDevice before = config;
+        AudioStreamRuntimeCaps caps{
+            .hostInputPcmChannels = 10,
+            .hostOutputPcmChannels = 10,
+            .deviceToHostAm824Slots = 11,
+            .hostToDeviceAm824Slots = 11,
+            .sampleRateHz = 48000,
+            .deviceToHostStreamCount = 1,
+            .hostToDeviceStreamCount = 1,
+        };
+        if (failure == 0) caps.sampleRateHz = 0;
+        if (failure == 1) caps.deviceToHostAm824Slots = 0;
+        if (failure == 2) caps.hostToDeviceAm824Slots = 0;
+        if (failure == 3) caps.deviceToHostStreamCount = 0;
+        if (failure == 4) caps.hostToDeviceStreamCount = 0;
+        if (failure == 5) caps.deviceToHostStreamCount = 5;
+        if (failure == 6) caps.hostToDeviceStreamCount = 5;
+
+        EXPECT_FALSE(ApplyDiceRuntimeCapsToDeviceConfig(caps, config));
+        EXPECT_EQ(config.inputChannelCount, before.inputChannelCount);
+        EXPECT_EQ(config.outputChannelCount, before.outputChannelCount);
+        EXPECT_EQ(config.channelCount, before.channelCount);
+        EXPECT_EQ(config.currentSampleRate, before.currentSampleRate);
+        EXPECT_EQ(config.sampleRates, before.sampleRates);
+    }
+}
+
 TEST(DiceRuntimeDeviceConfigTests, AppliesPlaybackOnlyCoreAudioGeometryWithDuplexWireCaps) {
     ASFWAudioDevice config{};
     config.sampleRates = {44100U, 48000U};
