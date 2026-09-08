@@ -1,17 +1,25 @@
-# PreSonus FireStudio Project: experimental 48 kHz support
+# PreSonus FireStudio Project: experimental 44.1/48 kHz support
 
 This profile enables the exact FireStudio Project model `0x000a92:0x00000b`
-using stream geometry captured from one real unit. Short Core Audio tests confirmed
-guitar inputs 1 and 2 and stereo headphone playback. The owner subsequently
-confirmed recording and playback in GarageBand 10.4.14. Other inputs, physical
-output jacks, digital/MIDI operation and sustained stability remain unvalidated.
-
-**The unit must already report 48 kHz when discovered.** This initial profile
-advertises only 48 kHz and refuses publication if the observed rate or stream
-geometry differs. It does not automatically retune a unit found at another rate.
-The captured wire layout is 10 PCM channels plus one MIDI slot per direction;
-that layout is preserved even when an application uses only inputs/outputs 1–2.
+using stream geometry captured from one real unit. It supports **44.1 and 48 kHz**,
+with a 48 kHz default, while retaining one stream per direction with 10 PCM
+channels and one MIDI slot. The full layout is preserved when an application
+uses only inputs/outputs 1–2. Other rates remain rejected; a unit discovered at
+an unsupported rate or with mismatched geometry is not automatically retuned.
 Internal clock was the tested setting; the profile does not enforce a clock source.
+
+Short 48 kHz tests on September 7 confirmed guitar inputs 1 and 2 and stereo
+headphone playback; the owner also confirmed GarageBand recording and playback.
+On September 8, six silent start/stop trials passed across both rates, including
+48 → 44.1 → 48 → 44.1 kHz switching. The owner confirmed digital clock lock and
+audible S/PDIF test tones through a Roland VM-3100 at 44.1 kHz.
+
+The [September 8 validation report](2026-09-08-validation.md) records the rate
+extension, watchdog/shutdown and interrupt-ordering fixes, the failed earlier
+candidates and successful build 8 retest. Its current scope supersedes the
+48 kHz-only scope of the preserved September 7 evidence below. Independent
+S/PDIF stereo routing, digital capture, MIDI and sustained stability remain
+unvalidated. Mixer controls and headphone-mix management are future work.
 
 ## Capture provenance
 
@@ -33,7 +41,7 @@ discovery. The reports contain decoded registers, not raw Config ROM bytes,
 raw mixer coefficient quadlets or isochronous packets. Driver build timestamps
 are reproduced as reported, not treated as wall-clock compile times.
 
-## Observed configuration
+## Observed configuration on September 7
 
 | Field | Captured value |
 | --- | --- |
@@ -61,8 +69,10 @@ constants. TX/RX sections reserve space for two/four descriptors, but their
 NUMBER registers report **one** stream. Allocated capacity is not stream count.
 
 Stored low- and middle-rate tables both report 10 PCM + 1 MIDI each way, with
-identical 82-entry route tables. Only 48 kHz was active during capture. The
-high-rate table contains 8-channel AES defaults, but 176.4/192 kHz are absent
+identical 82-entry route tables. Only 48 kHz was active during the September 7
+capture. The [September 8 report](2026-09-08-dice-report-44100.txt) confirms the same live
+10 PCM + 1 MIDI geometry at 44.1 kHz. The high-rate table contains 8-channel
+AES defaults, but 176.4/192 kHz are absent
 from clock capabilities; inactive table contents do not establish supported
 modes. Standalone AES1/32 kHz settings do not override the active global clock.
 
@@ -70,9 +80,9 @@ modes. Standalone AES1/32 kHz settings do not override the active global clock.
 
 The captured PCM/MIDI counts imply DBS 11 under standard DICE AM824 framing.
 **DBS was derived from descriptors, not observed in a packet capture.** The
-profile uses blocking AM824, eight frames per DATA packet at 48 kHz, FMT=0x10,
-DATA FDF=0x02, and header-only NO-DATA with FDF=0xff/SYT=0xffff. DATA contains
-360 bytes including CIP. PCM silence is `0x40000000` and empty MIDI is
+profile uses blocking AM824, eight frames per DATA packet at both 44.1 and
+48 kHz, FMT=0x10, DATA FDF=0x01/0x02 respectively, and header-only NO-DATA
+with FDF=0xff/SYT=0xffff. DATA contains 360 bytes including CIP. PCM silence is `0x40000000` and empty MIDI is
 `0x80000000`, serialized big-endian.
 
 These choices follow the Project's generic Linux/FFADO streaming paths and
@@ -116,7 +126,7 @@ snapshot, not proof of continuous clipping or a driver fault. Meter hold/clear
 behavior was not established. Quiet headphone playback was subsequently heard
 without distortion.
 
-## Hardware validation
+## September 7 hardware validation (build 5)
 
 Tests used the local 0.3.0 build 5 candidate containing these source changes.
 Its running driver executable was verified against the candidate SHA-256
@@ -149,14 +159,16 @@ project rate and recorded file format were not independently captured. The
 candidate exposes only 48 kHz, but this report does not infer GarageBand project
 metadata from that fact.
 
-Remaining tests: inputs 3–8 individually, physical Main/line output jacks,
-S/PDIF, MIDI, other rates, sample-rate switching, sleep/wake, 5-minute/30-minute/
-2-hour stability, calibrated latency, and complete IRM resource-pool equality.
+Remaining after the September 7 tests were inputs 3–8 individually, physical
+Main/line output jacks, S/PDIF, MIDI, other rates, sample-rate switching,
+sleep/wake, 5-minute/30-minute/2-hour stability, calibrated latency, and complete
+IRM resource-pool equality. The September 8 report adds bounded 44.1/48 kHz
+switching and audible S/PDIF output; the other limitations remain.
 A full retained-driver-log export and raw isochronous packet trace were not
-obtained. The evidence establishes bounded operation on one unit, not general
-production readiness.
+obtained for those September 7 tests. The evidence establishes bounded
+operation on one unit, not general production readiness.
 
-## Host validation
+## September 7 host validation
 
 120 tests passed across `AudioProfileRegistryTests`, `DiceProfileTests`,
 `AmdtpDirectTxTests`, `DICETcatProtocolTests`, `DiceRuntimeDeviceConfigTests` and
