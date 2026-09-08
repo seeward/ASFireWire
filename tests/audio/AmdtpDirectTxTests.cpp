@@ -88,12 +88,11 @@ protected:
         ASSERT_EQ(packet_.byteCount, 360U);
         ASSERT_EQ(packet_.framesInPacket, 8U);
         ASSERT_EQ(packet_.dbs, 11U);
-        const uint8_t pcmLabel = GetParam() == PcmSlotEncoding::Am824MBLA ? 0x40 : 0;
         for (uint32_t frame = 0; frame < 8; ++frame) {
             for (uint32_t channel = 0; channel < 11; ++channel) {
                 SCOPED_TRACE(testing::Message() << "frame=" << frame << " channel=" << channel);
                 const uint32_t offset = 8 + (frame * 11 + channel) * 4;
-                EXPECT_EQ(bytes_[offset], channel < 10 ? pcmLabel : 0x80);
+                EXPECT_EQ(bytes_[offset], channel < 10 ? 0 : 0x80);
                 EXPECT_EQ(bytes_[offset + 1], 0);
                 EXPECT_EQ(bytes_[offset + 2], 0);
                 EXPECT_EQ(bytes_[offset + 3], 0);
@@ -113,7 +112,7 @@ protected:
     PreparedTxPacket packet_{};
 };
 
-TEST_P(AmdtpPacketDefaultsTests, UnwrittenDataPacketContainsWireSilence) {
+TEST_P(AmdtpPacketDefaultsTests, UnwrittenPcmIsZeroedWithoutEncodingTraversal) {
     ASSERT_TRUE(PrepareData(0));
     ExpectSilentPayload();
     EXPECT_EQ(bytes_[1], 11); // Constant DBS includes the MIDI slot.
@@ -194,6 +193,7 @@ TEST_P(AmdtpProjectRateTests, TenDistinctPcmLanesPreserveMidiAndRateAcrossPacket
     config.midiSlots = 1;
     config.dbs = 11;
     AmdtpTxPolicy policy{};
+    policy.hostToDevicePcmEncoding = PcmSlotEncoding::RawSigned24In32BE;
     AmdtpPacketTimeline timeline{};
     std::array<PacketTimelineSlot, 4> slots{};
     ASSERT_TRUE(timeline.AttachSlots(slots.data(), slots.size()));
@@ -237,7 +237,9 @@ TEST_P(AmdtpProjectRateTests, TenDistinctPcmLanesPreserveMidiAndRateAcrossPacket
             uint32_t expected = 0x80000000U;
             if (channel < 10) {
                 const int32_t sample = signed24[channel] * (frame % 2 ? -1 : 1);
-                expected = 0x40000000U | (static_cast<uint32_t>(sample) & 0x00FFFFFFU);
+                // Raw playback keeps the signed sample's sign extension in
+                // the high byte instead of inserting an AM824 PCM label.
+                expected = static_cast<uint32_t>(sample);
             }
             const uint32_t offset = 8 + (frame * 11 + channel) * 4;
             for (uint32_t byte = 0; byte < 4; ++byte) {
@@ -266,7 +268,7 @@ TEST_P(AmdtpProjectRateTests, TenDistinctPcmLanesPreserveMidiAndRateAcrossPacket
     for (uint32_t frame = 0; frame < 8; ++frame) {
         for (uint32_t channel = 0; channel < 11; ++channel) {
             const uint32_t offset = 8 + (frame * 11 + channel) * 4;
-            EXPECT_EQ(bytes[offset], channel < 10 ? 0x40U : 0x80U);
+            EXPECT_EQ(bytes[offset], channel < 10 ? 0U : 0x80U);
             EXPECT_EQ(bytes[offset + 1], 0U);
             EXPECT_EQ(bytes[offset + 2], 0U);
             EXPECT_EQ(bytes[offset + 3], 0U);

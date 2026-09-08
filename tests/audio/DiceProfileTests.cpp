@@ -248,7 +248,7 @@ TEST(DiceProfileTests, FireStudioProjectUsesCapturedLowRateGeometryAndDefaultsTo
     EXPECT_EQ(base->RxChannelCount(), 10U);
     EXPECT_EQ(base->TxDbs(), 11U);
     EXPECT_EQ(base->RxDbs(), 11U);
-    EXPECT_EQ(base->TxWireFormat(), ASFW::Encoding::AudioWireFormat::kAM824);
+    EXPECT_EQ(base->TxWireFormat(), ASFW::Encoding::AudioWireFormat::kRawPcm24In32);
     EXPECT_EQ(base->RxWireFormat(), ASFW::Encoding::AudioWireFormat::kAM824);
 
     const auto* profile = static_cast<const IAudioStreamProfile*>(base);

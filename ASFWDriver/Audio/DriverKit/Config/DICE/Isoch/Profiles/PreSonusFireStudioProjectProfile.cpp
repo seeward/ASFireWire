@@ -32,12 +32,15 @@ bool PreSonusFireStudioProjectProfile::Matches(const DiceDeviceIdentity& identit
 }
 
 DiceDeviceQuirks PreSonusFireStudioProjectProfile::Quirks() const noexcept {
-    // Project uses generic DICE in Linux (dice-stream.c -> amdtp-am824.c)
-    // and FFADO 2.5.0 (dice_avdevice.cpp -> AmdtpTransmitStreamProcessor.cpp).
-    // Both send labelled AM824 PCM and empty MIDI, with header-only NO-DATA.
-    // Do not inherit the raw-PCM/Saffire policy from the StudioLive profile.
-    // This is a source-backed first-test format, not a Project packet capture.
-    return DiceDeviceQuirks{};
+    // The maintainer's inspection of the original PreSonus KEXT reports
+    // raw sign-extended 24-in-32 playback PCM and zeroed unwritten samples:
+    // https://github.com/mrmidi/ASFireWire/pull/105#issuecomment-5581934008
+    // This playback-format candidate still needs its own hardware validation;
+    // the earlier labelled-AM824 trial is not proof of vendor-format parity.
+    // Keep capture decoding, MIDI defaults and NO-DATA framing unchanged.
+    DiceDeviceQuirks quirks{};
+    quirks.tx.hostToDevicePcmEncoding = Encoding::AudioWireFormat::kRawPcm24In32;
+    return quirks;
 }
 
 std::vector<uint32_t> PreSonusFireStudioProjectProfile::SupportedSampleRates() const {
