@@ -602,39 +602,35 @@ void DiceAudioBackend::EnsureNubForGuid(uint64_t guid) noexcept {
     }
     dev.currentSampleRate = 48000u;
 
-    auto* dice = protocol ? protocol->AsDuplexDeviceControl() : nullptr;
-    if (!dice) {
-        ASFW_LOG(Audio,
-                 "DiceAudioBackend::EnsureNubForGuid: deferring publication without DICE runtime control GUID=0x%016llx",
-                 guid);
-        return;
-    }
-
     // Enrich with the device's real per-channel labels (if the protocol has
     // loaded them), update the endpoint runtime, then publish the nub. Host
     // input == device TX, host output == device RX (see AudioTypes.hpp), which
     // is exactly how GetChannelLabels reports them.
     auto finish = [this, guid](Model::ASFWAudioDevice dev,
-                               const std::shared_ptr<IDeviceProtocol>& protocol) {
+                               const std::shared_ptr<IDeviceProtocol>& protocol,
+                               bool geometryReadSucceeded) {
         if (stopping_.load(std::memory_order_acquire)) {
             return;
         }
-        if (protocol) {
-            AudioStreamRuntimeCaps caps{};
-            if (!protocol->GetRuntimeAudioStreamCaps(caps) ||
-                !ApplyDiceRuntimeCapsToDeviceConfig(caps, dev)) {
-                ASFW_LOG(Audio,
-                         "DiceAudioBackend::EnsureNubForGuid: deferring publication without usable runtime geometry GUID=0x%016llx",
-                         guid);
-                return;
-            }
+        AudioStreamRuntimeCaps caps{};
+        const bool hasRuntimeCaps = protocol && protocol->GetRuntimeAudioStreamCaps(caps);
+        const auto publication = PrepareDiceDeviceConfigForPublication(
+            hasRuntimeCaps ? &caps : nullptr, geometryReadSucceeded, dev);
+        if (publication == DicePublicationConfigResult::kDefer) {
+            ASFW_LOG(Audio,
+                     "DiceAudioBackend::EnsureNubForGuid: deferring FireStudio Project publication without usable runtime geometry GUID=0x%016llx",
+                     guid);
+            return;
+        }
+        if (publication == DicePublicationConfigResult::kRuntimeGeometry) {
             ASFW_LOG(Audio,
                      "DiceAudioBackend::EnsureNubForGuid: applied runtime geometry rate=%u in=%u out=%u (GUID=0x%016llx)",
                      dev.currentSampleRate,
                      dev.inputChannelCount,
                      dev.outputChannelCount,
                      guid);
-
+        }
+        if (protocol) {
             std::vector<std::string> inNames;
             std::vector<std::string> outNames;
             if (protocol->GetChannelLabels(inNames, outNames)) {
@@ -657,18 +653,17 @@ void DiceAudioBackend::EnsureNubForGuid(uint64_t guid) noexcept {
 
     // Channel labels live in the TCAT stream-format name sections, cached only
     // once runtime caps load (during the first stream discovery). Load them
-    // once before the first publish. Missing labels can use synthesized names;
-    // missing or unreadable wire geometry must never publish profile defaults.
-    dice->EnsureRuntimeStreamGeometry(
-        [finish, dev, protocol, guid](IOReturn status) mutable {
-            if (status != kIOReturnSuccess) {
-                ASFW_LOG(Audio,
-                         "DiceAudioBackend::EnsureNubForGuid: runtime geometry failed GUID=0x%016llx kr=0x%x",
-                         guid, status);
-                return;
-            }
-            finish(std::move(dev), protocol);
-        });
+    // once before the first publish. As in the established DICE path, finish
+    // even on failure so ordinary profiles retain their publication fallback.
+    // The FireStudio Project's stricter policy is applied centrally in finish.
+    if (auto* dice = protocol ? protocol->AsDuplexDeviceControl() : nullptr) {
+        dice->EnsureRuntimeStreamGeometry(
+            [finish, dev, protocol](IOReturn status) mutable {
+                finish(std::move(dev), protocol, status == kIOReturnSuccess);
+            });
+        return;
+    }
+    finish(std::move(dev), protocol, false);
 }
 
 IOReturn DiceAudioBackend::StartStreaming(uint64_t guid) noexcept {

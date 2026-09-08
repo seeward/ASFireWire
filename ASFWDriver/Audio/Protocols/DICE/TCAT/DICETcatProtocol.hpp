@@ -12,6 +12,7 @@
 #include "../../IDeviceProtocol.hpp"
 #include "../../../../Protocols/Ports/ProtocolRegisterIO.hpp"
 
+#include <DriverKit/IOLib.h>
 #include <array>
 #include <atomic>
 #include <functional>
@@ -66,6 +67,8 @@ public:
                      ::ASFW::Scheduling::ITimerScheduler* timerScheduler = nullptr,
                      DICETcatRuntimePolicy runtimePolicy = {});
 
+    ~DICETcatProtocol() override;
+
     IOReturn Initialize() override;
     IOReturn Shutdown() override;
     const char* GetName() const override { return "TCAT DICE"; }
@@ -113,7 +116,7 @@ private:
     [[nodiscard]] bool CacheRuntimeCaps(const GlobalState& global,
                           const StreamConfig& tx,
                           const StreamConfig& rx) noexcept;
-    [[nodiscard]] bool CacheRuntimeCaps(const AudioStreamRuntimeCaps& caps) noexcept;
+    [[nodiscard]] bool UpdateOperationalCaps(const AudioStreamRuntimeCaps& caps) noexcept;
     void ResetRuntimeCaps() noexcept;
 
     Protocols::Ports::FireWireBusInfo& busInfo_;
@@ -127,6 +130,9 @@ private:
     GeneralSections sections_{};
     bool initialized_{false};
     bool sectionsLoaded_{false};
+    // Serializes initial discovery publication only. Never held during I/O or
+    // client callbacks, and never acquired by stream-capability readers.
+    IOLock* discoveryLock_{nullptr};
 
     // The user-selected device clock, remembered across StartIO cycles so the
     // per-StartIO bring-up (PrepareDuplex48k) targets the live rate instead of a
@@ -137,7 +143,12 @@ private:
     // selection, flapping the device PLL and starving audio.
     AudioClockConfig selectedClock_{};
 
+    // Live state is written only by successful operational requests. Until the
+    // first one completes, getters use the immutable discovery values below.
     std::atomic<uint32_t> runtimeSampleRateHz_{0};
+    uint32_t discoverySampleRateHz_{0};
+    uint8_t discoveryDeviceToHostIsoChannel_{AudioStreamRuntimeCaps::kInvalidIsoChannel};
+    uint8_t discoveryHostToDeviceIsoChannel_{AudioStreamRuntimeCaps::kInvalidIsoChannel};
     std::atomic<uint32_t> hostInputPcmChannels_{0};
     std::atomic<uint32_t> hostOutputPcmChannels_{0};
     std::atomic<uint32_t> deviceToHostAm824Slots_{0};
@@ -146,19 +157,22 @@ private:
     std::atomic<uint32_t> hostToDeviceIsoChannel_{AudioStreamRuntimeCaps::kInvalidIsoChannel};
 
     // Per-stream wire geometry (DICE TX_NUMBER/RX_NUMBER + per-stream channels).
-    // Counts are atomic; the arrays are plain and published through the
-    // runtimeCapsValid_ release/acquire fence (written before the release-store,
-    // read after the acquire-load), mirroring the scalar fields above.
+    // Written once during discovery and published by runtimeCapsValid_. The
+    // plain arrays must remain immutable until quiesced Shutdown: storing true
+    // again does not protect readers that already passed the acquire-load.
+    // Live ISO assignments are atomic overlays, separate from static topology.
     std::atomic<uint32_t> deviceToHostStreamCount_{0};
     std::atomic<uint32_t> hostToDeviceStreamCount_{0};
     AudioStreamWireInfo deviceToHostStreams_[kMaxAudioStreamsPerDirection]{};
     AudioStreamWireInfo hostToDeviceStreams_[kMaxAudioStreamsPerDirection]{};
+    std::atomic<uint8_t> deviceToHostStreamIsoChannels_[kMaxAudioStreamsPerDirection]{};
+    std::atomic<uint8_t> hostToDeviceStreamIsoChannels_[kMaxAudioStreamsPerDirection]{};
 
     // Per-channel device labels, flattened across this direction's streams in
     // channel order (input == device TX, output == device RX). Published
     // through the runtimeCapsValid_ release/acquire fence like the arrays above;
-    // only the (global, tx, rx) cache path fills them (the caps-only overload
-    // leaves them intact). Covers the widest supported interface (32x32).
+    // only initial discovery fills them. Runtime operations and later discovery
+    // requests leave them intact. Covers the widest supported interface (32x32).
     static constexpr uint32_t kMaxChannelLabels = 32;
     std::atomic<uint32_t> inputChannelLabelCount_{0};
     std::atomic<uint32_t> outputChannelLabelCount_{0};
