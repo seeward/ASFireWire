@@ -1,193 +1,85 @@
-# PreSonus FireStudio Project: experimental 44.1/48 kHz support
+# PreSonus FireStudio Project: capture provenance and validation limits
 
-This profile enables the exact FireStudio Project model `0x000a92:0x00000b`
-using stream geometry captured from one real unit. It supports **44.1 and 48 kHz**,
-with a 48 kHz default, while retaining one stream per direction with 10 PCM
-channels and one MIDI slot. The full layout is preserved when an application
-uses only inputs/outputs 1–2. Other rates remain rejected; a unit discovered at
-an unsupported rate or with mismatched geometry is not automatically retuned.
-Internal clock was the tested setting; the profile does not enforce a clock source.
+The experimental profile targets Config ROM vendor/model `0x000a92:0x00000b`
+(`FIRESTUDIO_PROJECT`) and accepts 44.1/48 kHz with a 48 kHz default. Its captured
+layout is one stream per direction, each with 10 PCM channels and one MIDI slot.
+Other rates remain outside this profile's supported scope.
 
-Short 48 kHz tests on September 7 confirmed guitar inputs 1 and 2 and stereo
-headphone playback; the owner also confirmed GarageBand recording and playback.
-On September 8, six silent start/stop trials passed across both rates, including
-48 → 44.1 → 48 → 44.1 kHz switching. The owner confirmed digital clock lock and
-audible S/PDIF test tones through a Roland VM-3100 at 44.1 kHz.
+## Retained device report
 
-The [September 8 validation report](2026-09-08-validation.md) records the rate
-extension, watchdog/shutdown and interrupt-ordering fixes, the failed earlier
-candidates and successful build 8 retest. Its current scope supersedes the
-48 kHz-only scope of the preserved September 7 evidence below. Independent
-S/PDIF stereo routing, digital capture, MIDI and sustained stability remain
-unvalidated. Mixer controls and headphone-mix management are future work.
+[`dice-report.txt`](dice-report.txt) is the unchanged latest read-only app export,
+captured **2026-09-08 at 08:00:03 UTC**, renamed from
+`2026-09-08-dice-report-44100.txt`. SHA-256:
+`35c7a79f8d6d4ccb850253b6269993cf85ccca19c5d8af34ca37fce7bc0f17d2`.
 
-## Capture provenance
+- FireStudio Project GUID `0x000A920402D07FAC`; TCD2210 / DICE Mini.
+- MacBookPro18,3 / Apple M1 Pro; macOS 26.6.2 build 25G83.
+- Apple Thunderbolt 3-to-2 and Thunderbolt-to-FireWire adapters, then FW800-to-FW400.
+- ASFW 0.3.0 local build 8, based on `ac8a124` with the candidate changes.
+- Internal clock locked at selected, nominal and measured 44,100 Hz.
+- No owner, streaming disabled, both ISO channels disabled; 10 PCM + 1 MIDI in
+  each direction. The earlier 48 kHz report shows the same stream geometry.
 
-- Initial read-only capture: 2026-09-07 at 11:39:39 UTC.
-- MacBookPro18,3, Apple M1 Pro, macOS 26.6.2 build 25G83.
-- Initial ASFW app/driver: 0.3.0 build 4, source
-  `ac8a124a683d2f8201cd14ee0d2de8265e4834f0`.
-- Connection: Apple Thunderbolt 3-to-2 adapter, Apple Thunderbolt-to-FireWire
-  adapter and FW800-to-FW400 cable. macOS reported controller `pci11c1,5901`.
-- [Initial DICE report](2026-09-07-dice-report.txt): unchanged app export,
+This export contains decoded registers, routing and a rounded mixer matrix;
+it is not a raw Config ROM, coefficient or isochronous-packet capture. Its
+embedded build timestamp is reproduced as reported. The report's TCAT product
+number is derived from the GUID, so the archived Config ROM screenshot supplies
+independent vendor/model evidence. Inactive rate tables do not establish support
+for additional modes.
+
+## Bounded hardware observations
+
+The following results describe the **earlier labelled-AM824 candidates**, whose
+PCM silence was `0x40000000`. They do not validate the raw-PCM candidate now in
+this PR.
+
+- September 7, build 5, 48 kHz: two short silent start/stop checks, stereo
+  headphone playback and guitar inputs 1/2 passed. The contributor also reported
+  GarageBand recording/playback; no take or project metadata was exported.
+- September 8, build 8: six three-second silent runs passed across 44.1/48 kHz,
+  including idle rate changes. Two 24-second tone runs completed with transport
+  progress and successful shutdown in the reviewed logs. The contributor heard
+  test tones and reported digital clock lock on a Roland VM-3100 connected to
+  the coaxial S/PDIF output at 44.1 kHz.
+- Build 8's running driver SHA-256 was
+  `591fe51b261cd7d8cea007c1be78856fad1057e2d0bcd33c8d901a65d8f79f87`.
+  Local build counters and generated version metadata are not included in this
+  contribution; a rebuilt PR artifact has not had a separate hardware run.
+
+The repository owner reports that the original PreSonus vendor KEXT transmits
+raw sign-extended 24-in-32 PCM with zero-based silence (`0x00000000`). This is
+attributed vendor-binary evidence, not an independently captured wire format.
+The raw-PCM change and standard zero-filled silence still require hardware
+verification; the earlier listening results do not establish their success.
+
+The saved mixer sends the same mix to both S/PDIF channels, including playback
+1/2. No router, mixer coefficient or flash changes were made. Independent digital
+left/right routing, digital capture, bit-perfect transfer, input waveform quality,
+MIDI, inputs 3–8 individually, physical Main/line jacks, other rates, sleep/wake,
+long-run stability and calibrated latency remain unverified. The capture-derived
+DBS of 11 was not observed on the wire. Mixer controls and headphone-mix management
+remain outside this contribution.
+
+## Current candidate software checks
+
+The revised PR passed 247 targeted host tests and all 38 tests in the TCAT
+executable under ThreadSanitizer without diagnostics. A separate raw-PCM build 9
+Release app/driver passed signature, entitlement and arm64e checks. It remains
+uninstalled and hardware-unverified; the known build 8 installation is unchanged.
+
+## Archived evidence
+
+The initial report, screenshot, raw meter/probe logs, lifecycle excerpts and
+longer summaries remain accessible at immutable commit
+[`458673e2`](https://github.com/mrmidi/ASFireWire/tree/458673e250d3cea67470a9b350e15eaf98d15c8a/captures/presonus-firestudio-project).
+In particular:
+
+- [Initial September 7 report](https://github.com/mrmidi/ASFireWire/blob/458673e250d3cea67470a9b350e15eaf98d15c8a/captures/presonus-firestudio-project/2026-09-07-dice-report.txt),
   SHA-256 `2b0c0bd55b6bd55e322bf5ba6cf5b5ebc7262d1e3ee38f8394928631d2beba3e`.
-- [Device Properties screenshot](2026-09-07-device-properties.png): independent
-  Config ROM vendor/model evidence. The DICE report's TCAT product number is
-  derived from GUID bits, so it is not independent identity evidence.
+- [Config ROM identity screenshot](https://github.com/mrmidi/ASFireWire/blob/458673e250d3cea67470a9b350e15eaf98d15c8a/captures/presonus-firestudio-project/2026-09-07-device-properties.png).
+- [September 7 results and references](https://github.com/mrmidi/ASFireWire/blob/458673e250d3cea67470a9b350e15eaf98d15c8a/captures/presonus-firestudio-project/README.md#september-7-hardware-validation-build-5).
+- [September 8 validation and earlier fault history](https://github.com/mrmidi/ASFireWire/blob/458673e250d3cea67470a9b350e15eaf98d15c8a/captures/presonus-firestudio-project/2026-09-08-validation.md).
 
-Network MCP remained disabled. The initial capture issued no owner, clock,
-stream, router or flash writes; the driver had initialized the controller for
-discovery. The reports contain decoded registers, not raw Config ROM bytes,
-raw mixer coefficient quadlets or isochronous packets. Driver build timestamps
-are reproduced as reported, not treated as wall-clock compile times.
-
-## Observed configuration on September 7
-
-| Field | Captured value |
-| --- | --- |
-| Vendor/model | `0x000a92 / 0x00000b` |
-| GUID | `0x000A920402D07FAC` |
-| Model string | `FIRESTUDIO_PROJECT` |
-| ASIC | TCD2210 / DICE Mini |
-| DICE protocol version | `0x01000400` (1.0.4.0); vendor firmware build not established |
-| Current clock | Internal; selected, nominal and measured 48,000 Hz; locked |
-| Owner / streaming | No owner (`0xffff000000000000`); GLOBAL_ENABLE=0 |
-| Device TX → host capture | 1 stream, 10 PCM channels, 1 MIDI port, ISO=-1, S400 |
-| Device RX ← host playback | 1 stream, 10 PCM channels, 1 MIDI port, ISO=-1, SEQ_START=0 |
-| Descriptor stride | 70 quadlets / 280 bytes in each direction |
-| Capture channel labels | Mic 1–8, SPDIF L, SPDIF R |
-| Playback channel labels | daw rt.1 through daw rt.10 |
-| Clock capabilities | `0x1102001f`: 32/44.1/48/88.2/96 kHz; AES2, ARX1, Internal bits |
-| Clock label caveat | AES2 is labelled SPDIF; advertised ARX1 is labelled Unused |
-| EAP stream limits | 1 TX and 1 RX stream |
-| EAP mixer | 18 inputs, 16 outputs; exposed/writable/storable |
-| EAP router | Exposed/writable/storable, maximum 128 entries |
-
-General section offsets are device-reported: global `+0x28`, TX `+0x190`, RX
-`+0x3c8`, ext-sync `+0x830` from `0xffffe0000000`. These are not universal DICE
-constants. TX/RX sections reserve space for two/four descriptors, but their
-NUMBER registers report **one** stream. Allocated capacity is not stream count.
-
-Stored low- and middle-rate tables both report 10 PCM + 1 MIDI each way, with
-identical 82-entry route tables. Only 48 kHz was active during the September 7
-capture. The [September 8 report](2026-09-08-dice-report-44100.txt) confirms the same live
-10 PCM + 1 MIDI geometry at 44.1 kHz. The high-rate table contains 8-channel
-AES defaults, but 176.4/192 kHz are absent
-from clock capabilities; inactive table contents do not establish supported
-modes. Standalone AES1/32 kHz settings do not override the active global clock.
-
-## Framing and discovery safeguards
-
-The captured PCM/MIDI counts imply DBS 11 under standard DICE AM824 framing.
-**DBS was derived from descriptors, not observed in a packet capture.** The
-profile uses blocking AM824, eight frames per DATA packet at both 44.1 and
-48 kHz, FMT=0x10, DATA FDF=0x01/0x02 respectively, and header-only NO-DATA
-with FDF=0xff/SYT=0xffff. DATA contains 360 bytes including CIP. PCM silence is `0x40000000` and empty MIDI is
-`0x80000000`, serialized big-endian.
-
-These choices follow the Project's generic Linux/FFADO streaming paths and
-produced working audio in the bounded tests below. StudioLive raw-PCM and
-NO-DATA FDF-preservation quirks are not applied to this device. Default buffer
-and latency settings remain generic; physical round-trip latency was not measured.
-
-The exact runtime constraint covers rate, stream counts, PCM channels and MIDI
-ports/slots; ISO channel allocation is deliberately excluded. Discovery must
-succeed with usable caps before audio publication. A later geometry mismatch
-rejects preparation and rolls back ownership before completing the request.
-Truncated declared stream descriptors must not be interpreted as a smaller
-valid layout. Encoding-aware AM824 defaults keep unwritten/pre-roll PCM slots
-labelled as silence while preserving raw-PCM behavior.
-
-The failed-discovery publication guard and descriptor parsing checks apply to
-other DICE models too. A failed capability read leaves the endpoint unpublished;
-there is no new retry loop in that callback. Another device-record update or
-reconnect is needed to retry. Other DICE models were covered by host tests, but
-were not tested on hardware for this change.
-
-## Existing routing
-
-The captured Project endpoint map agrees with FFADO and the ALSA Rust protocol.
-With zero-based register indices:
-
-- Capture 0–7 receives Ins0 0–7; capture 8–9 receives AES 2–3.
-- Analogue output 0–1 receives mixer output 0–1.
-- Analogue output 2–7 receives playback 2–7 directly.
-- S/PDIF output receives mixer output 8–9.
-- Playback 0–1 enters mixer input columns 10–11.
-
-The manual describes Main as sharing the line 1–2 source with its own level
-control. The captured matrix sends DAW 1 to the left mix at -9.9 dB and DAW 2
-to the right at -10.2 dB, with opposite stereo crosspoints muted. Other inputs
-also feed this mix. The profile does not change routing, mixer coefficients
-or flash settings.
-
-Initial saturation bits `0x3ff` and full-scale routed mixer peak codes are one
-snapshot, not proof of continuous clipping or a driver fault. Meter hold/clear
-behavior was not established. Quiet headphone playback was subsequently heard
-without distortion.
-
-## September 7 hardware validation (build 5)
-
-Tests used the local 0.3.0 build 5 candidate containing these source changes.
-Its running driver executable was verified against the candidate SHA-256
-`4bae5ce16eb6ae43a52409e7915663c47b10a0fa64db2e06a963c2fff25e421d`.
-The local version increment is omitted from this contribution. The candidate
-Release build succeeded with arm64e and x86_64 driver slices. Build 4 initially
-remained attached during upgrade; a normal Mac restart completed replacement
-before any build 5 audio testing.
-
-| Check | Result and evidence |
-| --- | --- |
-| Enumeration and identity | One Project on the adapter chain above; independent Config ROM screenshot |
-| Core Audio publication | Alive at 48 kHz with 10 inputs / 10 outputs |
-| Silent start/stop | Two 3-second runs: 283/282 callbacks, no missing/repeated/backwards timestamps; [log](2026-09-07-silent-start-stop.txt) |
-| Release after silent tests | No owner, GLOBAL_ENABLE=0, both ISO=-1, Internal 48 kHz locked; router tables and rounded mixer matrix unchanged; [report](2026-09-07-after-silent-test-dice-report.txt) |
-| Stereo headphones | Three quiet 440 Hz left / 880 Hz right pairs over 24 seconds; listener confirmed correct sides and no distortion; [log](2026-09-07-headphone-tone-test.txt), [listening result](2026-09-07-headphone-listening-result.md) |
-| Guitar input 1 | Confirmed playing window; channel 1 peak -26.04 dBFS, RMS -44.25 dBFS; [log](2026-09-07-guitar-input1-meter.txt), [result](2026-09-07-guitar-input1-result.md) |
-| Guitar input 2 | Initial run reached full scale; lower-gain retest peaked -27.05 dBFS, RMS -46.62 dBFS; [initial log](2026-09-07-guitar-input2-meter.txt), [initial result](2026-09-07-guitar-input2-result.md), [retest log](2026-09-07-guitar-input2-low-gain-meter.txt), [retest result](2026-09-07-guitar-input2-low-gain-result.md) |
-| GarageBand 10.4.14 | Owner confirmed recording and playback through the FireStudio; no take was exported or independently analysed |
-
-The silent/tone clients targeted the exact Core Audio UID and did not change
-default-device settings. Each confirmed guitar window delivered 939 callbacks
-and 480,768 input frames over approximately 10 seconds, with no input-buffer
-or timestamp errors. No input waveform was saved: meter results establish
-signal/channel mapping, not subjective input quality. An earlier missed playing
-window is excluded from confirmed results.
-
-GarageBand confirmation is a user acceptance result. Its track input selection,
-project rate and recorded file format were not independently captured. The
-candidate exposes only 48 kHz, but this report does not infer GarageBand project
-metadata from that fact.
-
-Remaining after the September 7 tests were inputs 3–8 individually, physical
-Main/line output jacks, S/PDIF, MIDI, other rates, sample-rate switching,
-sleep/wake, 5-minute/30-minute/2-hour stability, calibrated latency, and complete
-IRM resource-pool equality. The September 8 report adds bounded 44.1/48 kHz
-switching and audible S/PDIF output; the other limitations remain.
-A full retained-driver-log export and raw isochronous packet trace were not
-obtained for those September 7 tests. The evidence establishes bounded
-operation on one unit, not general production readiness.
-
-## September 7 host validation
-
-120 tests passed across `AudioProfileRegistryTests`, `DiceProfileTests`,
-`AmdtpDirectTxTests`, `DICETcatProtocolTests`, `DiceRuntimeDeviceConfigTests` and
-`DICEDuplexBringupControllerTests`. Coverage includes exact model selection,
-AM824/raw-PCM silence bytes and reused buffers, complete stream descriptors,
-geometry drift, rate rejection before bus access, stale-cap invalidation and
-ownership rollback with one completion callback. The AM824 default-silence
-regressions were reproduced before the fix. These are host tests with DriverKit
-stubs, not additional hardware runs.
-
-## Behavioral references
-
-- [Linux generic DICE stream setup](https://github.com/torvalds/linux/blob/df2908090cda368b01ff43709f51890076c56157/sound/firewire/dice/dice-stream.c#L488-L508)
-  and [AM824 encoder/silence](https://github.com/torvalds/linux/blob/df2908090cda368b01ff43709f51890076c56157/sound/firewire/amdtp-am824.c#L148-L217).
-- [Rust Project endpoint map](https://github.com/alsa-project/snd-firewire-ctl-services/blob/d4f8f2ba00fca75d8c361e3dcffccf7ad0010595/protocols/dice/src/presonus/fstudioproject.rs#L12-L80).
-- [FFADO 2.5.0 source](https://ffado.org/files/libffado-2.5.0.tgz):
-  `src/dice/presonus/firestudio_project.cpp`, `src/dice/dice_avdevice.cpp` and
-  `src/libstreaming/amdtp/AmdtpTransmitStreamProcessor.cpp`.
-- [Project owner's manual](https://pae-web.presonusmusic.com/downloads/products/pdf/FireStudioProject_OwnersManual_EN.pdf),
-  printed pages 26 and 33, for Main/headphone and line-output relationships.
-
-Reference implementation code was not copied into ASFireWire.
+These archived notes describe their historical candidates, including superseded
+publication/cache and labelled-silence behavior. This directory retains only the
+latest device report and this scope summary.
