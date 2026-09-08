@@ -44,11 +44,22 @@ this hash identifies the tested binary, not every rebuild of the same source.
   (DIN-A), connected to the FireStudio's coaxial S/PDIF OUT at 44.1 kHz.
 - A 24-second sequence alternated quiet 440/880 Hz tones at -36 dBFS with silent
   gaps. It completed all 1,058,400 sequence frames over 2,069 callbacks with
-  contiguous output timestamps, 193,158 transmitted packets, 31,516 transmit
+  contiguous output timestamps, 193,158 assembled packets, 31,516 transmit
   interrupts, zero TX underruns and successful shutdown. No driver fault was
   found in the reviewed run log.
 - Asked whether both tones were clear and the gaps quiet, with no clicks, buzz,
   distortion or dropouts, the contributor replied: **“Both clear; gaps quiet”.**
+- After the device power-cycle recovery described below, the contributor selected
+  44.1 kHz in Audio MIDI Setup without a snap-back and reported GarageBand
+  playback: **“played over 2 mins no issues”**. Core Audio remained at 44.1 kHz;
+  Roland lock was not separately reconfirmed for this session.
+- The complete GarageBand driver session lasted **411.647 seconds** (about
+  6 minutes 52 seconds), including any silence while the app held the stream.
+  Its final counters were 3,292,813 assembled packets, 548,004 transmit interrupts
+  and zero TX underruns. Stop completed in 44 ms, reached Idle and released TX
+  resources. No watchdog, fatal, async-timeout, failed start/stop or payload
+  anomaly appeared in the complete session log. This is not a claim of audible
+  music throughout the session; no reopen-after-quit test was performed.
 
 The repository owner reports that the original PreSonus vendor KEXT uses this
 raw PCM format and zero-based silence. That remains attributed vendor-binary
@@ -58,7 +69,8 @@ on this unit, not an independent capture of the vendor's wire format.
 ## Historical labelled-AM824 results
 
 The earlier builds below used labelled AM824 with PCM silence `0x40000000`.
-Their input and analogue-output results have not been repeated with build 9.
+Their recording, input and analogue-output results have not been repeated with
+build 9; GarageBand playback has the separate current-build result above.
 
 - September 7, build 5, 48 kHz: two short silent start/stop checks, stereo
   headphone playback and guitar inputs 1/2 passed. The contributor also reported
@@ -67,6 +79,32 @@ Their input and analogue-output results have not been repeated with build 9.
   including idle rate changes. Two 24-second tone runs completed with transport
   progress and successful shutdown; the contributor reported clock lock and
   audible S/PDIF test tones through the Roland at 44.1 kHz.
+
+## Known Thunderbolt-adapter reconnect issue — unfixed
+
+The same installed build 9 produced these controlled observations on September 8:
+
+| Physical sequence | Settled result |
+| --- | --- |
+| A: power on FireStudio with adapter present | FireStudio became root/IRM with remote cycles observed; three-second silent 48 kHz start/stop passed, zero TX underruns, TX resources released. |
+| B: reconnect the complete Thunderbolt adapter while FireStudio stays powered | Mac remained root, local cycle master was disabled and no remote cycle continuity was observed. Preflight stopped without starting audio. |
+| C: power-cycle FireStudio only, retaining the adapter | FireStudio again became root/IRM with remote cycles; matching silent 48 kHz start/stop passed, zero TX underruns, TX resources released. |
+
+B's state persisted through a diagnostics snapshot 106 seconds after Self-ID:
+Client Only / Observe Only, no bus manager, cycle timer enabled, cycle-master
+activation suppressed as `SuppressedNotBMOrFallbackIRM`. An earlier actual
+stream start after adapter reconnect had failed with a watchdog/timestamp stall
+and cleanup failures; B reproduced its timing state without repeating that start.
+The A/B/C comparison points to missing bus timing when the Mac becomes root,
+but does not establish the code fix or show that every reconnect fails.
+
+C created a **new TCAT protocol and discovery cache**. Its successful recovery
+therefore does not verify preservation/recovery of an existing protocol's cache
+across bus reset. The full power-cycle transition also logged a transient
+boot/discovery timeout and a device-removal teardown IPC error; only the settled
+stream trial was clean. The later successful user-selected 44.1 kHz and GarageBand
+playback results above do not resolve the adapter-reconnect issue. No runtime
+reconnect fix is included in this contribution.
 
 ## Remaining validation limits
 

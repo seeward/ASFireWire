@@ -8,9 +8,9 @@
 namespace ASFW::Isoch::Audio::DICE::Profiles {
 
 // Experimental 44.1/48 kHz profile using geometry read from a real Project.
-// Earlier labelled-AM824 trials verified short playback/capture and rate
-// switches on one unit. The raw playback candidate requires hardware testing;
-// latency and sustained stability remain unvalidated.
+// Build 9 raw-PCM trials verified bounded playback and rate switching on one
+// unit; earlier labelled-AM824 trials also covered capture. Adapter-reconnect
+// timing remains unfixed; calibrated latency and long-run stability are unvalidated.
 // See captures/presonus-firestudio-project/.
 class PreSonusFireStudioProjectProfile final : public IDiceDeviceProfile {
 public:

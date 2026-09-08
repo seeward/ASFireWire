@@ -35,8 +35,9 @@ DiceDeviceQuirks PreSonusFireStudioProjectProfile::Quirks() const noexcept {
     // The maintainer's inspection of the original PreSonus KEXT reports
     // raw sign-extended 24-in-32 playback PCM and zeroed unwritten samples:
     // https://github.com/mrmidi/ASFireWire/pull/105#issuecomment-5581934008
-    // This playback-format candidate still needs its own hardware validation;
-    // the earlier labelled-AM824 trial is not proof of vendor-format parity.
+    // Build 9 passed bounded raw-PCM playback tests with zeroed silence;
+    // see captures/presonus-firestudio-project/README.md for evidence and limits.
+    // These listening tests do not establish bit-perfect vendor-format parity.
     // Keep capture decoding, MIDI defaults and NO-DATA framing unchanged.
     DiceDeviceQuirks quirks{};
     quirks.tx.hostToDevicePcmEncoding = Encoding::AudioWireFormat::kRawPcm24In32;
