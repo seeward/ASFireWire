@@ -37,8 +37,8 @@ LookupIdentity(const DeviceProfileQuery& query) noexcept {
 LookupAudioProfile(const DeviceProfileQuery& query) noexcept {
     if (query.vendorId == kPreSonusVendorId && query.modelId == kFireStudioProjectModelId) {
         // Captured 2026-09-07: one stream/direction, 10 PCM + 1 MIDI,
-        // currently 48 kHz internal. The protocol enforces this geometry and
-        // the experimental stream profile advertises 48 kHz only.
+        // captured at 48 kHz internal. The protocol enforces this geometry;
+        // the experimental stream profile allows 44.1 and 48 kHz.
         return AudioProfileHint{.family = AudioProtocolFamily::DICE,
                                 .mode = AudioIntegrationMode::kHardcodedNub,
                                 .source = MatchSource::VendorModel};

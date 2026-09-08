@@ -132,6 +132,11 @@ AudioStreamRuntimeCaps RequiredTenChannelGeometry() {
     return caps;
 }
 
+DICETcatRuntimePolicy LowRateTenChannelPolicy() {
+    return {.requiredRuntimeGeometry = RequiredTenChannelGeometry(),
+            .allowedSampleRatesHz = {44100, 48000}};
+}
+
 std::array<uint8_t, ExtensionSections::kWireSize> MakeExtensionSectionsWire() {
     std::array<uint8_t, ExtensionSections::kWireSize> bytes{};
     const std::array<uint32_t, 18> quadlets{
@@ -267,6 +272,17 @@ public:
             } else if (address.addressLo == kRxBaseLo + 8) {
                 rxIso_ = value;
                 if (value != 0xFFFFFFFFU) ++activeIsoWriteCount_;
+            } else if (address.addressLo == kGlobalBaseLo + ASFW::Audio::DICE::GlobalOffset::kClockSelect) {
+                clockWrites_.push_back(value);
+                if (applyClockWrites_) {
+                    clockSelect_ = value;
+                    const uint32_t rateIndex = (value >> 8) & 0xff;
+                    if (rateIndex == 1 || rateIndex == 2) {
+                        sampleRate_ = rateIndex == 1 ? 44100 : 48000;
+                        status_ = 1U | (rateIndex << 8); // Locked, nominal rate.
+                        notification_ = 0x20; // CLOCK_ACCEPTED.
+                    }
+                }
             }
         }
         callback(AsyncStatus::kSuccess, {});
@@ -331,6 +347,8 @@ public:
     uint32_t extStatus_{0};
     uint32_t sampleRate_{48000};
     uint32_t notification_{0x20};
+    bool applyClockWrites_{false};
+    std::vector<uint32_t> clockWrites_;
     std::optional<uint32_t> failedReadAddress_{};
     uint32_t txCount_{1};
     uint32_t rxCount_{1};
@@ -613,6 +631,236 @@ TEST(DICETcatProtocolTests, RequiredGeometryRejectsOtherRateRequestsBeforeBusAcc
     EXPECT_EQ(bus.readCount, 0);
     EXPECT_EQ(bus.writeCount, 0);
     EXPECT_EQ(bus.lockCount, 0);
+}
+
+TEST(DICETcatProtocolTests, RateAllowlistAcceptsBothLowRatesWithExactTenChannelGeometry) {
+    for (const uint32_t rate : {44100U, 48000U}) {
+        SCOPED_TRACE(rate);
+        CountingFireWireBus bus;
+        bus.sampleRate_ = rate;
+        RouteState routeState;
+        DICETcatProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr,
+                                  nullptr, LowRateTenChannelPolicy());
+        ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+        int completions = 0;
+        protocol.EnsureRuntimeStreamGeometry([&](IOReturn status) {
+            ++completions;
+            EXPECT_EQ(status, kIOReturnSuccess);
+        });
+        ASSERT_EQ(completions, 1);
+        AudioStreamRuntimeCaps caps{};
+        ASSERT_TRUE(protocol.GetRuntimeAudioStreamCaps(caps));
+        EXPECT_EQ(caps.sampleRateHz, rate);
+        EXPECT_EQ(caps.hostInputPcmChannels, 10U);
+        EXPECT_EQ(caps.hostOutputPcmChannels, 10U);
+        EXPECT_EQ(caps.deviceToHostAm824Slots, 11U);
+        EXPECT_EQ(caps.hostToDeviceAm824Slots, 11U);
+        EXPECT_EQ(caps.deviceToHostStreamCount, 1U);
+        EXPECT_EQ(caps.hostToDeviceStreamCount, 1U);
+        EXPECT_EQ(caps.deviceToHostStreams[0].midiPorts, 1U);
+        EXPECT_EQ(caps.hostToDeviceStreams[0].midiPorts, 1U);
+        EXPECT_EQ(bus.writeCount, 0);
+        EXPECT_EQ(bus.lockCount, 0);
+    }
+}
+
+TEST(DICETcatProtocolTests, RateAllowlistRejectsOtherRequestedAndObservedRates) {
+    for (const uint32_t rate : {0U, 32000U, 88200U, 96000U, 176400U, 192000U}) {
+        SCOPED_TRACE(rate);
+        CountingFireWireBus bus;
+        bus.sampleRate_ = rate;
+        RouteState routeState;
+        DICETcatProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr,
+                                  nullptr, LowRateTenChannelPolicy());
+        ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+        int completions = 0;
+        protocol.PrepareDuplex({}, AudioClockConfig{.sampleRateHz = rate},
+            [&](IOReturn status, ASFW::Audio::DICE::DiceDuplexPrepareResult) {
+                ++completions;
+                EXPECT_EQ(status, kIOReturnUnsupported);
+            });
+        protocol.ApplyClockConfig(AudioClockConfig{.sampleRateHz = rate},
+            [&](IOReturn status, ASFW::Audio::DICE::DiceClockApplyResult) {
+                ++completions;
+                EXPECT_EQ(status, kIOReturnUnsupported);
+            });
+        EXPECT_EQ(completions, 2);
+        EXPECT_EQ(bus.readCount, 0);
+        protocol.EnsureRuntimeStreamGeometry([&](IOReturn status) {
+            ++completions;
+            EXPECT_NE(status, kIOReturnSuccess);
+        });
+        EXPECT_EQ(completions, 3);
+        AudioStreamRuntimeCaps caps{};
+        EXPECT_FALSE(protocol.GetRuntimeAudioStreamCaps(caps));
+        EXPECT_EQ(bus.writeCount, 0);
+        EXPECT_EQ(bus.lockCount, 0);
+    }
+}
+
+TEST(DICETcatProtocolTests, RateAllowlistKeeps44100AfterIdleClockChangeAndRestores48000) {
+    CountingFireWireBus bus;
+    bus.applyClockWrites_ = true;
+    RouteState routeState;
+    DICETcatProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr,
+                              nullptr, LowRateTenChannelPolicy());
+    ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+    int completions = 0;
+    protocol.ApplyClockConfig(AudioClockConfig{.sampleRateHz = 44100},
+        [&](IOReturn status, ASFW::Audio::DICE::DiceClockApplyResult result) {
+            ++completions;
+            EXPECT_EQ(status, kIOReturnSuccess);
+            EXPECT_EQ(result.appliedClock.sampleRateHz, 44100U);
+            EXPECT_EQ(result.runtimeCaps.sampleRateHz, 44100U);
+        });
+    ASSERT_EQ(completions, 1);
+    EXPECT_EQ(bus.sampleRate_, 44100U);
+    EXPECT_EQ(bus.owner_, ASFW::Audio::DICE::kOwnerNoOwner);
+    ASSERT_FALSE(bus.clockWrites_.empty());
+    EXPECT_EQ(bus.clockWrites_.back(), 0x0000010cU); // 44.1 kHz, Internal.
+
+    // The legacy StartIO method name must not restore its old 48 kHz default.
+    protocol.PrepareDuplex48k({}, [&](IOReturn status) {
+        ++completions;
+        EXPECT_EQ(status, kIOReturnSuccess);
+    });
+    ASSERT_EQ(completions, 2);
+    EXPECT_EQ(bus.sampleRate_, 44100U);
+    EXPECT_EQ(bus.clockWrites_.back(), 0x0000010cU);
+    AudioStreamRuntimeCaps caps{};
+    ASSERT_TRUE(protocol.GetRuntimeAudioStreamCaps(caps));
+    EXPECT_EQ(caps.sampleRateHz, 44100U);
+    EXPECT_EQ(caps.hostOutputPcmChannels, 10U);
+    ASSERT_EQ(protocol.StopDuplex(), kIOReturnSuccess);
+    EXPECT_EQ(bus.owner_, ASFW::Audio::DICE::kOwnerNoOwner);
+
+    protocol.ApplyClockConfig(AudioClockConfig{.sampleRateHz = 48000},
+        [&](IOReturn status, ASFW::Audio::DICE::DiceClockApplyResult result) {
+            ++completions;
+            EXPECT_EQ(status, kIOReturnSuccess);
+            EXPECT_EQ(result.runtimeCaps.sampleRateHz, 48000U);
+        });
+    EXPECT_EQ(completions, 3);
+    EXPECT_EQ(bus.clockWrites_.back(), kClockSelect48kInternal);
+    EXPECT_EQ(bus.sampleRate_, 48000U);
+    EXPECT_EQ(bus.owner_, ASFW::Audio::DICE::kOwnerNoOwner);
+    EXPECT_EQ(bus.enableWriteCount_, 0U);
+    EXPECT_EQ(bus.activeIsoWriteCount_, 0U);
+}
+
+TEST(DICETcatProtocolTests, RateAllowlistStillRollsBackChangedWireGeometryAt44100) {
+    for (uint32_t failure = 0; failure < 6; ++failure) {
+        SCOPED_TRACE(failure);
+        CountingFireWireBus bus;
+        bus.sampleRate_ = 44100;
+        bus.clockSelect_ = 0x0000010c;
+        bus.status_ = 0x00000101;
+        RouteState routeState;
+        DICETcatProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr,
+                                  nullptr, LowRateTenChannelPolicy());
+        ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+        protocol.EnsureRuntimeStreamGeometry([](IOReturn status) {
+            ASSERT_EQ(status, kIOReturnSuccess);
+        });
+        if (failure == 0) bus.txPcm_ = 9;
+        if (failure == 1) bus.rxPcm_ = 9;
+        if (failure == 2) bus.txMidi_ = 2;
+        if (failure == 3) bus.rxMidi_ = 2;
+        if (failure == 4) bus.txCount_ = 2;
+        if (failure == 5) bus.rxCount_ = 2;
+        const uint64_t originalOwner = bus.owner_;
+        int completions = 0;
+        protocol.PrepareDuplex({}, AudioClockConfig{.sampleRateHz = 44100},
+            [&](IOReturn status, ASFW::Audio::DICE::DiceDuplexPrepareResult) {
+                ++completions;
+                EXPECT_NE(status, kIOReturnSuccess);
+                EXPECT_EQ(bus.owner_, originalOwner);
+                EXPECT_FALSE(ASFW::Audio::DICE::TCAT::DICETcatProtocolTestPeer::HasDuplexState(protocol));
+            });
+        ASSERT_EQ(completions, 1);
+        EXPECT_EQ(bus.lockCount, 2); // Claim and rollback compare/swap.
+        EXPECT_EQ(bus.enable_, 0U);
+        EXPECT_EQ(bus.enableWriteCount_, 0U);
+        EXPECT_EQ(bus.activeIsoWriteCount_, 0U);
+        AudioStreamRuntimeCaps caps{};
+        EXPECT_FALSE(protocol.GetRuntimeAudioStreamCaps(caps));
+        const int writes = bus.writeCount;
+        protocol.ProgramRx([&](IOReturn status, ASFW::Audio::DICE::DiceDuplexStageResult) {
+            ++completions;
+            EXPECT_NE(status, kIOReturnSuccess);
+        });
+        EXPECT_EQ(completions, 2);
+        EXPECT_EQ(bus.writeCount, writes);
+    }
+}
+
+TEST(DICETcatProtocolTests, FailedClockOperationsDoNotChangeLegacyStartRate) {
+    for (const bool prepareFailure : {false, true}) {
+        for (const bool geometryFailure : {false, true}) {
+            SCOPED_TRACE(testing::Message() << "prepare=" << prepareFailure
+                                           << " geometry=" << geometryFailure);
+            CountingFireWireBus bus;
+            bus.applyClockWrites_ = true;
+            RouteState routeState;
+            DICETcatProtocol protocol(bus, bus, routeState.registry, routeState.route, nullptr,
+                                      nullptr, LowRateTenChannelPolicy());
+            ASSERT_EQ(protocol.Initialize(), kIOReturnSuccess);
+            int completions = 0;
+            protocol.ApplyClockConfig(AudioClockConfig{.sampleRateHz = 48000},
+                [&](IOReturn status, ASFW::Audio::DICE::DiceClockApplyResult) {
+                    ++completions;
+                    ASSERT_EQ(status, kIOReturnSuccess);
+                });
+            ASSERT_EQ(completions, 1);
+            if (geometryFailure) {
+                bus.txPcm_ = 9; // Failure after the hardware clock changes.
+            } else {
+                // Failure before any clock programming or owner claim.
+                bus.failedReadAddress_ = kGlobalBaseLo + ASFW::Audio::DICE::GlobalOffset::kStatus;
+            }
+            if (prepareFailure) {
+                protocol.PrepareDuplex({}, AudioClockConfig{.sampleRateHz = 44100},
+                    [&](IOReturn status, ASFW::Audio::DICE::DiceDuplexPrepareResult) {
+                        ++completions;
+                        EXPECT_NE(status, kIOReturnSuccess);
+                    });
+            } else {
+                protocol.ApplyClockConfig(AudioClockConfig{.sampleRateHz = 44100},
+                    [&](IOReturn status, ASFW::Audio::DICE::DiceClockApplyResult) {
+                        ++completions;
+                        EXPECT_NE(status, kIOReturnSuccess);
+                    });
+            }
+            ASSERT_EQ(completions, 2);
+            EXPECT_EQ(bus.sampleRate_, geometryFailure ? 44100U : 48000U);
+            EXPECT_EQ(bus.owner_, ASFW::Audio::DICE::kOwnerNoOwner);
+            const size_t clockWritesAfterFailure = bus.clockWrites_.size();
+            bus.failedReadAddress_.reset();
+            bus.txPcm_ = 10;
+
+            // A later StartIO must use the prior successful selection, not
+            // silently retry the failed request for 44.1 kHz.
+            protocol.PrepareDuplex48k({}, [&](IOReturn status) {
+                ++completions;
+                EXPECT_EQ(status, kIOReturnSuccess);
+            });
+            ASSERT_EQ(completions, 3);
+            EXPECT_EQ(bus.sampleRate_, 48000U);
+            EXPECT_EQ(bus.clockSelect_, kClockSelect48kInternal);
+            // A read failure left 48 kHz selected, so no redundant write is
+            // needed. A post-clock geometry failure requires one return write.
+            EXPECT_EQ(bus.clockWrites_.size(), clockWritesAfterFailure + (geometryFailure ? 1U : 0U));
+            if (geometryFailure) {
+                ASSERT_FALSE(bus.clockWrites_.empty());
+                EXPECT_EQ(bus.clockWrites_.back(), kClockSelect48kInternal);
+            }
+            AudioStreamRuntimeCaps caps{};
+            ASSERT_TRUE(protocol.GetRuntimeAudioStreamCaps(caps));
+            EXPECT_EQ(caps.sampleRateHz, 48000U);
+            EXPECT_EQ(protocol.StopDuplex(), kIOReturnSuccess);
+            EXPECT_EQ(bus.owner_, ASFW::Audio::DICE::kOwnerNoOwner);
+        }
+    }
 }
 
 TEST(DICETcatProtocolTests, FailedPrepareInvalidatesEarlierSuccessfulDiscovery) {

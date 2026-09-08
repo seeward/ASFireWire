@@ -182,6 +182,101 @@ INSTANTIATE_TEST_SUITE_P(
                     PcmSlotEncoding::RawSigned24In32BE,
                     PcmSlotEncoding::RawSigned24In32LE));
 
+class AmdtpProjectRateTests : public testing::TestWithParam<uint32_t> {};
+
+TEST_P(AmdtpProjectRateTests, TenDistinctPcmLanesPreserveMidiAndRateAcrossPacketReuse) {
+    // Project's measured geometry is 10 PCM + 1 MIDI. Linux amdtp-stream.c
+    // uses an eight-frame SYT interval at both 44.1 and 48 kHz; dice-stream.c
+    // starts blocking duplex with sequence replay. Exercise that replay path.
+    AmdtpStreamConfig config{};
+    config.sampleRate = GetParam();
+    config.pcmChannels = 10;
+    config.midiSlots = 1;
+    config.dbs = 11;
+    AmdtpTxPolicy policy{};
+    AmdtpPacketTimeline timeline{};
+    std::array<PacketTimelineSlot, 4> slots{};
+    ASSERT_TRUE(timeline.AttachSlots(slots.data(), slots.size()));
+    AmdtpTxPacketizer packetizer{};
+    packetizer.BindTimeline(&timeline);
+    ASSERT_TRUE(packetizer.Configure(config, policy));
+    std::array<uint8_t, 512> bytes{};
+    bytes.fill(0xA5);
+    AmdtpTimingState timing{};
+    timing.txClockValid = true;
+    timing.disposition = AmdtpPacketDisposition::Data;
+    timing.replayValid = true;
+    timing.replayDataBlocks = 8;
+    timing.nextDataSyt = 0x1234;
+    PreparedTxPacket packet{};
+    ASSERT_TRUE(packetizer.PrepareNextPacket({0, bytes.data(), bytes.size()}, timing, packet));
+    ASSERT_TRUE(packet.isData);
+    ASSERT_EQ(packet.byteCount, 360U);
+    EXPECT_EQ(bytes[1], 11U);
+    EXPECT_EQ(bytes[5], GetParam() == 44100 ? 0x01 : 0x02);
+
+    constexpr std::array<float, 10> samples{
+        0.03125f, -0.03125f, 0.0625f, -0.0625f, 0.125f,
+        -0.125f, 0.25f, -0.25f, 0.5f, -0.5f};
+    constexpr std::array<int32_t, 10> signed24{
+        0x040000, -0x040000, 0x080000, -0x080000, 0x100000,
+        -0x100000, 0x200000, -0x200000, 0x400000, -0x400000};
+    std::array<float, 80> host{};
+    for (uint32_t frame = 0; frame < 8; ++frame) {
+        for (uint32_t channel = 0; channel < 10; ++channel) {
+            host[frame * 10 + channel] = samples[channel] * (frame % 2 ? -1.0f : 1.0f);
+        }
+    }
+    AmdtpPayloadWriter writer{};
+    writer.Configure(config, policy);
+    writer.BindTimeline(&timeline);
+    writer.WriteFloat32Interleaved({host.data(), 0, 8, 8, 10}, 0);
+    for (uint32_t frame = 0; frame < 8; ++frame) {
+        for (uint32_t channel = 0; channel < 11; ++channel) {
+            SCOPED_TRACE(testing::Message() << "frame=" << frame << " channel=" << channel);
+            uint32_t expected = 0x80000000U;
+            if (channel < 10) {
+                const int32_t sample = signed24[channel] * (frame % 2 ? -1 : 1);
+                expected = 0x40000000U | (static_cast<uint32_t>(sample) & 0x00FFFFFFU);
+            }
+            const uint32_t offset = 8 + (frame * 11 + channel) * 4;
+            for (uint32_t byte = 0; byte < 4; ++byte) {
+                EXPECT_EQ(bytes[offset + byte], (expected >> (24 - 8 * byte)) & 0xFFU);
+            }
+        }
+    }
+    // Header-only NO-DATA must not consume audio frames or leak the old payload.
+    bytes.fill(0xA5);
+    timing.disposition = AmdtpPacketDisposition::NoData;
+    timing.replayDataBlocks = 0;
+    ASSERT_TRUE(packetizer.PrepareNextPacket({1, bytes.data(), bytes.size()}, timing, packet));
+    ASSERT_FALSE(packet.isData);
+    EXPECT_EQ(packet.byteCount, 8U);
+    EXPECT_EQ(packet.dbc, 8U);
+    EXPECT_EQ(bytes[5], 0xFFU);
+    for (uint32_t offset = 8; offset < bytes.size(); ++offset) EXPECT_EQ(bytes[offset], 0xA5U);
+
+    timing.disposition = AmdtpPacketDisposition::Data;
+    timing.replayDataBlocks = 8;
+    ASSERT_TRUE(packetizer.PrepareNextPacket({2, bytes.data(), bytes.size()}, timing, packet));
+    ASSERT_TRUE(packet.isData);
+    EXPECT_EQ(packet.dbc, 8U);
+    EXPECT_EQ(packet.firstAudioFrame, 8U);
+    EXPECT_EQ(bytes[5], GetParam() == 44100 ? 0x01 : 0x02);
+    for (uint32_t frame = 0; frame < 8; ++frame) {
+        for (uint32_t channel = 0; channel < 11; ++channel) {
+            const uint32_t offset = 8 + (frame * 11 + channel) * 4;
+            EXPECT_EQ(bytes[offset], channel < 10 ? 0x40U : 0x80U);
+            EXPECT_EQ(bytes[offset + 1], 0U);
+            EXPECT_EQ(bytes[offset + 2], 0U);
+            EXPECT_EQ(bytes[offset + 3], 0U);
+        }
+    }
+    for (uint32_t offset = packet.byteCount; offset < bytes.size(); ++offset) EXPECT_EQ(bytes[offset], 0xA5U);
+}
+
+INSTANTIATE_TEST_SUITE_P(FireStudioRates, AmdtpProjectRateTests, testing::Values(44100U, 48000U));
+
 TEST(AmdtpDirectTxTests, Int32EncodingUsesHighSigned24Bits) {
     EXPECT_EQ(PcmSlotCodec::EncodeInt32(
                   INT32_MAX, PcmSlotEncoding::RawSigned24In32BE),

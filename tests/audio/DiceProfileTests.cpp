@@ -235,7 +235,7 @@ TEST(DiceProfileTests, PreSonusStudioLiveSafetyOffsetsAndLatencies) {
     EXPECT_EQ(profile->RxReportedLatencyFrames(48000.0), 29);
 }
 
-TEST(DiceProfileTests, FireStudioProjectUsesCapturedDuplexGeometryAt48kOnly) {
+TEST(DiceProfileTests, FireStudioProjectUsesCapturedLowRateGeometryAndDefaultsTo48k) {
     // Captured active TX/RX and low/middle EAP descriptors, 2026-09-07:
     // 10 PCM, one MIDI port, one stream per direction. Extra allocated
     // descriptor blocks are not extra streams. DBS is standard-AM824 derived.
@@ -243,7 +243,7 @@ TEST(DiceProfileTests, FireStudioProjectUsesCapturedDuplexGeometryAt48kOnly) {
         0x000a92, 0x00000b, 0x000A920402D07FACULL);
     ASSERT_NE(base, nullptr);
     EXPECT_STREQ(base->Name(), "PreSonus FireStudio Project (DICE)");
-    EXPECT_EQ(base->SupportedSampleRates(), (std::vector<uint32_t>{48000}));
+    EXPECT_EQ(base->SupportedSampleRates(), (std::vector<uint32_t>{44100, 48000}));
     EXPECT_EQ(base->TxChannelCount(), 10U);
     EXPECT_EQ(base->RxChannelCount(), 10U);
     EXPECT_EQ(base->TxDbs(), 11U);

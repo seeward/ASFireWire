@@ -41,9 +41,10 @@ DiceDeviceQuirks PreSonusFireStudioProjectProfile::Quirks() const noexcept {
 }
 
 std::vector<uint32_t> PreSonusFireStudioProjectProfile::SupportedSampleRates() const {
-    // Low/middle tables both report 10 PCM + 1 MIDI, but the first live
-    // milestone deliberately validates only the already-selected 48 kHz.
-    return {kSampleRateHz};
+    // Both rates use the captured low-rate 10 PCM + 1 MIDI geometry. Linux
+    // dice-stream.c:19-30 groups 44.1/48 kHz in mode 0; the existing generic
+    // blocking AM824 path derives cadence and FDF from the selected rate.
+    return {kSupportedSampleRatesHz.begin(), kSupportedSampleRatesHz.end()};
 }
 
 bool PreSonusFireStudioProjectProfile::BuildDefaultTxStreamConfig(DiceStreamConfig& out) const noexcept {

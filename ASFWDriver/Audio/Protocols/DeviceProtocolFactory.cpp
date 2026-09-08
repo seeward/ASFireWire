@@ -97,7 +97,7 @@ std::unique_ptr<IDeviceProtocol> DeviceProtocolFactory::Create(
 
     if (vendorId == kPreSonusVendorId && modelId == kFireStudioProjectModelId) {
         using Profile = ASFW::Isoch::Audio::DICE::Profiles::PreSonusFireStudioProjectProfile;
-        // The initial captured layout is the only one this profile can drive.
+        // The captured low-rate layout is the only one this profile can drive.
         // Validate physical wire geometry, including MIDI, before publication
         // and after clock preparation. ISO channels are assigned at runtime.
         AudioStreamRuntimeCaps expected{};
@@ -115,12 +115,17 @@ std::unique_ptr<IDeviceProtocol> DeviceProtocolFactory::Create(
         };
         expected.deviceToHostStreams[0] = stream;
         expected.hostToDeviceStreams[0] = stream;
+        DICE::TCAT::DICETcatRuntimePolicy policy{.requiredRuntimeGeometry = expected};
+        static_assert(Profile::kSupportedSampleRatesHz.size() <= policy.allowedSampleRatesHz.size());
+        for (size_t index = 0; index < Profile::kSupportedSampleRatesHz.size(); ++index) {
+            policy.allowedSampleRatesHz[index] = Profile::kSupportedSampleRatesHz[index];
+        }
         ASFW_LOG(DICE,
-                 "Creating experimental 48k FireStudio Project TCAT protocol node=0x%04x",
+                 "Creating experimental 44.1/48k FireStudio Project TCAT protocol node=0x%04x",
                  nodeId);
         return std::make_unique<DICE::TCAT::DICETcatProtocol>(
             busOps, busInfo, routeRegistry, route, irmClient, timerScheduler,
-            DICE::TCAT::DICETcatRuntimePolicy{.requiredRuntimeGeometry = expected});
+            policy);
     }
 
     if (vendorId == kPreSonusVendorId && modelId == kStudioLive1602ModelId) {

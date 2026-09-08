@@ -180,16 +180,9 @@ void DICETcatProtocol::PrepareDuplex(const AudioDuplexChannels& channels,
 
     DiceClockConfiguration diceClock{};
     if (!MakeDiceClockConfiguration(desiredClock, diceClock) ||
-        (runtimePolicy_.requiredRuntimeGeometry &&
-         desiredClock.sampleRateHz != runtimePolicy_.requiredRuntimeGeometry->sampleRateHz)) {
+        !SampleRateMatchesPolicy(desiredClock.sampleRateHz)) {
         callback(kIOReturnUnsupported, {});
         return;
-    }
-
-    // Remember the live clock so a later per-StartIO PrepareDuplex48k targets it
-    // rather than reverting the device to 48 kHz (see selectedClock_).
-    if (desiredClock.sampleRateHz != 0) {
-        selectedClock_ = desiredClock;
     }
 
     duplexCtrl_->PrepareDuplex(
@@ -205,6 +198,12 @@ void DICETcatProtocol::PrepareDuplex(const AudioDuplexChannels& channels,
                         callback(rollbackStatus, {});
                     });
                 return;
+            }
+            if (status == kIOReturnSuccess) {
+                // Only a completed, geometry-validated preparation may change
+                // the next legacy StartIO target. A failed request is not a
+                // selected device rate, even if it reached CLOCK_SELECT.
+                selectedClock_ = result.appliedClock;
             }
             callback(status, result);
         });
@@ -259,17 +258,9 @@ void DICETcatProtocol::ApplyClockConfig(const AudioClockConfig& desiredClock,
 
     DiceClockConfiguration diceClock{};
     if (!MakeDiceClockConfiguration(desiredClock, diceClock) ||
-        (runtimePolicy_.requiredRuntimeGeometry &&
-         desiredClock.sampleRateHz != runtimePolicy_.requiredRuntimeGeometry->sampleRateHz)) {
+        !SampleRateMatchesPolicy(desiredClock.sampleRateHz)) {
         callback(kIOReturnUnsupported, {});
         return;
-    }
-
-    // An idle sample-rate change lands here (RunIdleClockApply). Remember it so
-    // the next StartIO's PrepareDuplex48k keeps the device at this rate instead
-    // of rewriting CLOCK_SELECT back to 48 kHz (see selectedClock_).
-    if (desiredClock.sampleRateHz != 0) {
-        selectedClock_ = desiredClock;
     }
 
     duplexCtrl_->ApplyClockConfig(
@@ -284,6 +275,12 @@ void DICETcatProtocol::ApplyClockConfig(const AudioClockConfig& desiredClock,
                         callback(rollbackStatus, {});
                     });
                 return;
+            }
+            if (status == kIOReturnSuccess) {
+                // Preserve the last successful rate on read/clock/geometry
+                // failure; otherwise StartIO would silently retry a failed
+                // idle rate change after its caller has already rejected it.
+                selectedClock_ = result.appliedClock;
             }
             callback(status, result);
         });
@@ -589,16 +586,31 @@ bool DICETcatProtocol::GetChannelLabels(std::vector<std::string>& inNames,
     return inCount > 0 || outCount > 0;
 }
 
+bool DICETcatProtocol::SampleRateMatchesPolicy(uint32_t sampleRateHz) const noexcept {
+    if (sampleRateHz == 0) {
+        return false;
+    }
+    bool hasAllowedRate = false;
+    for (const uint32_t allowedRate : runtimePolicy_.allowedSampleRatesHz) {
+        if (allowedRate == sampleRateHz) {
+            return true;
+        }
+        hasAllowedRate |= allowedRate != 0;
+    }
+    return !hasAllowedRate &&
+           (!runtimePolicy_.requiredRuntimeGeometry ||
+            sampleRateHz == runtimePolicy_.requiredRuntimeGeometry->sampleRateHz);
+}
+
 bool DICETcatProtocol::RuntimeCapsMatchPolicy(const AudioStreamRuntimeCaps& caps) const noexcept {
-    if (!HasUsableRuntimeCaps(caps)) {
+    if (!HasUsableRuntimeCaps(caps) || !SampleRateMatchesPolicy(caps.sampleRateHz)) {
         return false;
     }
     if (!runtimePolicy_.requiredRuntimeGeometry) {
         return true;
     }
     const auto& expected = *runtimePolicy_.requiredRuntimeGeometry;
-    if (caps.sampleRateHz != expected.sampleRateHz ||
-        (runtimePolicy_.exposeDeviceToHostToCoreAudio &&
+    if ((runtimePolicy_.exposeDeviceToHostToCoreAudio &&
          caps.hostInputPcmChannels != expected.hostInputPcmChannels) ||
         caps.hostOutputPcmChannels != expected.hostOutputPcmChannels ||
         caps.deviceToHostAm824Slots != expected.deviceToHostAm824Slots ||

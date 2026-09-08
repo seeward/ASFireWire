@@ -12,6 +12,7 @@
 #include "../../IDeviceProtocol.hpp"
 #include "../../../../Protocols/Ports/ProtocolRegisterIO.hpp"
 
+#include <array>
 #include <atomic>
 #include <functional>
 #include <optional>
@@ -38,8 +39,13 @@ struct DICETcatRuntimePolicy final {
     bool requireSourceLockBeforeStreamEnable{true};
     bool requireSourceLockAtConfirm{true};
     // Optional captured wire geometry. Isochronous channel assignments are not
-    // compared; rates, PCM/MIDI widths, slot totals and stream counts are exact.
+    // compared; PCM/MIDI widths, slot totals and stream counts remain exact.
     std::optional<AudioStreamRuntimeCaps> requiredRuntimeGeometry{};
+    // Optional bounded rate allowlist (seven standard DICE rates maximum).
+    // Zero entries are unused. With no nonzero entries, preserve the captured
+    // geometry's exact rate, or the generic rate behavior when unconstrained.
+    // An allowlist changes only the rate check, never the required wire shape.
+    std::array<uint32_t, 7> allowedSampleRatesHz{};
 };
 
 class DICETcatProtocol final : public Audio::IDeviceProtocol,
@@ -102,6 +108,7 @@ private:
         DiceClockConfiguration& out) noexcept;
     void EnsureSectionsLoaded(VoidCallback callback);
     void EnsureRuntimeCapsLoaded(VoidCallback callback);
+    [[nodiscard]] bool SampleRateMatchesPolicy(uint32_t sampleRateHz) const noexcept;
     [[nodiscard]] bool RuntimeCapsMatchPolicy(const AudioStreamRuntimeCaps& caps) const noexcept;
     [[nodiscard]] bool CacheRuntimeCaps(const GlobalState& global,
                           const StreamConfig& tx,
@@ -123,8 +130,8 @@ private:
 
     // The user-selected device clock, remembered across StartIO cycles so the
     // per-StartIO bring-up (PrepareDuplex48k) targets the live rate instead of a
-    // hardcoded 48 kHz. Updated whenever a real clock is applied (ApplyClockConfig
-    // for idle rate changes, PrepareDuplex for restarts). Default {0} means
+    // hardcoded 48 kHz. Updated after a successful, geometry-validated clock
+    // apply or preparation; failed requests retain the last selection. Default {0} means
     // "nothing selected yet" → PrepareDuplex48k falls back to 48 kHz. Without this
     // every StartIO rewrites CLOCK_SELECT back to 48 kHz and fights a 44.1 kHz
     // selection, flapping the device PLL and starving audio.

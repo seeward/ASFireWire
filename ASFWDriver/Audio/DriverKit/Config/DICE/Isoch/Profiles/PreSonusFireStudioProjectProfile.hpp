@@ -3,14 +3,18 @@
 
 #include "../../DiceDeviceProfile.hpp"
 
+#include <array>
+
 namespace ASFW::Isoch::Audio::DICE::Profiles {
 
-// Experimental, 48 kHz-only profile using geometry read from a real Project.
-// Short capture/playback and GarageBand use were verified on one unit; hardware
-// latency and sustained stability remain unvalidated. See captures/presonus-firestudio-project/.
+// Experimental 44.1/48 kHz profile using geometry read from a real Project.
+// Short playback/capture, rate switches and 44.1 kHz S/PDIF playback were
+// verified on one unit; latency and sustained stability remain unvalidated.
+// See captures/presonus-firestudio-project/.
 class PreSonusFireStudioProjectProfile final : public IDiceDeviceProfile {
 public:
     static constexpr uint32_t kSampleRateHz = 48000;
+    static constexpr std::array<uint32_t, 2> kSupportedSampleRatesHz{44100, 48000};
     static constexpr uint16_t kPcmChannels = 10;
     static constexpr uint16_t kMidiPorts = 1;
     static constexpr uint8_t kMidiSlots = 1;
